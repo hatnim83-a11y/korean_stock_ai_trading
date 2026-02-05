@@ -32,7 +32,7 @@ Group=hatni
 WorkingDirectory=/home/hatni/korean_stock_ai_trading
 
 # 가상환경 활성화 후 실행
-ExecStart=/home/hatni/korean_stock_ai_trading/venv/bin/python main.py
+ExecStart=/home/hatni/korean_stock_ai_trading/venv/bin/python main.py --real
 
 # 환경 변수
 Environment=PYTHONUNBUFFERED=1
