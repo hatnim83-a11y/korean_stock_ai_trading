@@ -1,0 +1,114 @@
+# ============================================
+# 한국 주식 AI 스윙 트레이딩 시스템
+# 환경 변수 설정 파일
+# ============================================
+# 
+# 사용법:
+# 1. 이 파일을 복사하여 .env 파일 생성
+#    cp env_example.txt .env
+# 2. 각 항목에 실제 값 입력
+# 3. .env 파일은 절대 git에 커밋하지 마세요!
+#
+# ============================================
+
+# ===== KIS API (한국투자증권) =====
+# 발급처: https://apiportal.koreainvestment.com
+KIS_APP_KEY=your_app_key_here
+KIS_APP_SECRET=your_app_secret_here
+
+# 계좌번호 (예: 12345678-01)
+KIS_ACCOUNT_NO=12345678-01
+
+# 종합계좌번호 (8자리)
+KIS_CANO=12345678
+
+# 계좌상품코드 (2자리)
+KIS_ACNT_PRDT_CD=01
+
+# ===== 모의투자/실전투자 구분 =====
+# true: 모의투자 (개발/테스트용)
+# false: 실전투자 (실제 매매)
+IS_MOCK=true
+
+# ===== Claude API (Anthropic) =====
+# 발급처: https://console.anthropic.com
+ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxx
+
+# 사용할 Claude 모델
+CLAUDE_MODEL=claude-sonnet-4-5-20250929
+
+# ===== Telegram Bot =====
+# 발급처: @BotFather
+TELEGRAM_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ
+
+# 알림 받을 채팅 ID (개인 또는 그룹)
+TELEGRAM_CHAT_ID=123456789
+
+# ===== DART API (공시 정보) =====
+# 발급처: https://opendart.fss.or.kr
+DART_API_KEY=your_dart_api_key_here
+
+# ===== 데이터베이스 =====
+DATABASE_PATH=/home/hatni/korean_stock_ai_trading/data/trading.db
+
+# ===== 로깅 =====
+# 로그 레벨: DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_LEVEL=INFO
+LOG_PATH=/home/hatni/korean_stock_ai_trading/logs
+
+# ===== 트레이딩 설정 =====
+# 총 투자 자본금 (원)
+TOTAL_CAPITAL=10000000
+
+# 최대 보유 종목 수
+MAX_POSITIONS=15
+
+# 일일 최대 손실률 (0.02 = 2%)
+DAILY_MAX_LOSS=0.02
+
+# ===== 포트폴리오 제약 조건 =====
+# 종목당 최소 투자 비중 (0.03 = 3%)
+MIN_POSITION_WEIGHT=0.03
+
+# 종목당 최대 투자 비중 (0.15 = 15%)
+MAX_POSITION_WEIGHT=0.15
+
+# 테마당 최대 투자 비중 (0.30 = 30%)
+MAX_THEME_WEIGHT=0.30
+
+# ===== 손절/익절 설정 =====
+# 기본 손절률 (-0.08 = -8%)
+DEFAULT_STOP_LOSS=-0.08
+
+# 기본 익절률 (0.15 = +15%)
+DEFAULT_TAKE_PROFIT=0.15
+
+# ATR 기반 손절 계산 시 배수
+ATR_MULTIPLIER=2.0
+
+# ===== 스크리닝 조건 =====
+# 최소 거래대금 (원) - 50억원
+MIN_TRADING_VALUE=5000000000
+
+# RSI 상한선 (과열 방지)
+RSI_UPPER_LIMIT=75.0
+
+# RSI 하한선 (과매도)
+RSI_LOWER_LIMIT=30.0
+
+# 거래량 비율 하한 (20일 평균 대비)
+VOLUME_RATIO_MIN=1.2
+
+# 최대 부채비율 (%)
+MAX_DEBT_RATIO=200.0
+
+# ===== API 호출 제한 =====
+# KIS API 호출 간 대기 시간 (초)
+KIS_API_DELAY=0.11
+
+# Claude API 동시 호출 제한
+CLAUDE_CONCURRENT_LIMIT=5
+
+# ===== 테마 선정 =====
+# 선정할 상위 테마 수
+TOP_THEME_COUNT=5

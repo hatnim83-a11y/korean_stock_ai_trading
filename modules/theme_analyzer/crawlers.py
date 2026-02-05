@@ -1,0 +1,614 @@
+"""
+crawlers.py - 테마 데이터 크롤링 모듈
+
+이 파일은 네이버 증권, 한국경제 등에서 테마 정보를 크롤링합니다.
+
+주요 기능:
+- 네이버 증권 인기 테마 크롤링
+- 한국경제 테마 정보 크롤링
+- 테마별 종목 목록 수집
+- 뉴스 언급 빈도 수집
+
+사용법:
+    from modules.theme_analyzer.crawlers import (
+        crawl_naver_themes,
+        crawl_hankyung_themes,
+        crawl_theme_stocks,
+        crawl_theme_news_count
+    )
+    
+    naver_themes = crawl_naver_themes()
+    hankyung_themes = crawl_hankyung_themes()
+"""
+
+import time
+import random
+from typing import Optional
+from datetime import datetime, timedelta
+
+import httpx
+from bs4 import BeautifulSoup
+
+# 프로젝트 루트의 logger 사용
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from logger import logger
+
+
+# ===== 상수 정의 =====
+# 크롤링 시 사용할 User-Agent (브라우저처럼 보이게)
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://www.google.com/"
+}
+
+# 요청 간 대기 시간 (초) - 차단 방지
+MIN_DELAY = 1.0
+MAX_DELAY = 2.5
+
+
+def _random_delay():
+    """차단 방지를 위한 랜덤 대기"""
+    delay = random.uniform(MIN_DELAY, MAX_DELAY)
+    time.sleep(delay)
+
+
+def _safe_float(value: str, default: float = 0.0) -> float:
+    """
+    문자열을 안전하게 float으로 변환
+    
+    Args:
+        value: 변환할 문자열 (예: "+3.5%", "-2.1%", "1,234")
+        default: 변환 실패 시 기본값
+        
+    Returns:
+        변환된 float 값
+    """
+    if not value:
+        return default
+    
+    try:
+        # 쉼표, %, +, 공백 등 제거
+        cleaned = value.replace(",", "").replace("%", "").replace("+", "").strip()
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(value: str, default: int = 0) -> int:
+    """
+    문자열을 안전하게 int로 변환
+    
+    Args:
+        value: 변환할 문자열 (예: "1,234개")
+        default: 변환 실패 시 기본값
+        
+    Returns:
+        변환된 int 값
+    """
+    if not value:
+        return default
+    
+    try:
+        # 쉼표, '개' 등 제거
+        cleaned = value.replace(",", "").replace("개", "").strip()
+        return int(cleaned)
+    except (ValueError, TypeError):
+        return default
+
+
+# ===== 네이버 증권 테마 크롤링 =====
+
+def crawl_naver_themes(max_pages: int = 3) -> list[dict]:
+    """
+    네이버 증권 인기 테마 크롤링
+    
+    네이버 증권의 테마 페이지에서 테마 목록과 등락률을 수집합니다.
+    
+    Args:
+        max_pages: 크롤링할 최대 페이지 수 (기본 3페이지)
+    
+    Returns:
+        테마 정보 리스트:
+        [
+            {
+                'name': '2차전지',
+                'stock_count': 45,
+                'avg_change_rate': 3.2,
+                'source': 'naver',
+                'url': 'https://...'
+            },
+            ...
+        ]
+    
+    Example:
+        >>> themes = crawl_naver_themes()
+        >>> print(themes[0])
+        {'name': '2차전지', 'stock_count': 45, 'avg_change_rate': 3.2, ...}
+    """
+    themes = []
+    base_url = "https://finance.naver.com/sise/theme.naver"
+    
+    logger.info("📊 네이버 증권 테마 크롤링 시작")
+    
+    for page in range(1, max_pages + 1):
+        try:
+            url = f"{base_url}?&page={page}"
+            
+            response = httpx.get(
+                url,
+                headers=DEFAULT_HEADERS,
+                timeout=15.0,
+                follow_redirects=True
+            )
+            response.raise_for_status()
+            
+            # HTML 파싱
+            soup = BeautifulSoup(response.text, "lxml")
+            
+            # 테마 테이블 찾기
+            table = soup.find("table", class_="type_1")
+            if not table:
+                logger.warning(f"테마 테이블을 찾을 수 없습니다 (페이지 {page})")
+                continue
+            
+            rows = table.find_all("tr")
+            
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) < 5:
+                    continue
+                
+                # 테마명 추출
+                theme_link = cols[0].find("a")
+                if not theme_link:
+                    continue
+                
+                theme_name = theme_link.get_text(strip=True)
+                theme_url = "https://finance.naver.com" + theme_link.get("href", "")
+                
+                # 전일대비(%) 추출
+                change_rate_elem = cols[1].find("span")
+                change_rate = 0.0
+                if change_rate_elem:
+                    change_text = change_rate_elem.get_text(strip=True)
+                    change_rate = _safe_float(change_text)
+                    # 하락인 경우 음수 처리
+                    if "하락" in cols[1].get_text() or "down" in str(cols[1]).lower():
+                        change_rate = -abs(change_rate)
+                
+                # 최근 3일 등락률 (있는 경우)
+                three_day_rate = _safe_float(cols[2].get_text(strip=True)) if len(cols) > 2 else 0.0
+                
+                # 종목 수 (컬럼 3)
+                stock_count = int(cols[3].get_text(strip=True)) if len(cols) > 3 and cols[3].get_text(strip=True).isdigit() else 0
+                
+                themes.append({
+                    "name": theme_name,
+                    "stock_count": stock_count,
+                    "avg_change_rate": change_rate,
+                    "three_day_rate": three_day_rate,
+                    "source": "naver",
+                    "url": theme_url
+                })
+            
+            logger.debug(f"페이지 {page} 크롤링 완료: {len(themes)}개 테마")
+            _random_delay()
+            
+        except httpx.TimeoutException:
+            logger.warning(f"네이버 테마 크롤링 타임아웃 (페이지 {page})")
+            continue
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"네이버 테마 HTTP 에러: {e.response.status_code}")
+            break
+            
+        except Exception as e:
+            logger.error(f"네이버 테마 크롤링 실패: {e}")
+            continue
+    
+    # 중복 제거 (테마명 기준)
+    seen = set()
+    unique_themes = []
+    for theme in themes:
+        if theme["name"] not in seen:
+            seen.add(theme["name"])
+            unique_themes.append(theme)
+    
+    logger.info(f"✅ 네이버 테마 {len(unique_themes)}개 수집 완료")
+    return unique_themes
+
+
+def crawl_naver_theme_stocks(theme_url: str) -> list[dict]:
+    """
+    네이버 증권 특정 테마의 종목 목록 크롤링
+    
+    Args:
+        theme_url: 테마 상세 페이지 URL
+    
+    Returns:
+        종목 정보 리스트:
+        [
+            {
+                'code': '005930',
+                'name': '삼성전자',
+                'price': 75000,
+                'change_rate': 2.5
+            },
+            ...
+        ]
+    """
+    stocks = []
+    
+    try:
+        response = httpx.get(
+            theme_url,
+            headers=DEFAULT_HEADERS,
+            timeout=15.0,
+            follow_redirects=True
+        )
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "lxml")
+        
+        # 종목 테이블 찾기
+        table = soup.find("table", class_="type_5")
+        if not table:
+            logger.warning("종목 테이블을 찾을 수 없습니다")
+            return stocks
+        
+        rows = table.find_all("tr")
+        
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 4:
+                continue
+            
+            # 종목명 및 코드 추출
+            stock_link = cols[0].find("a")
+            if not stock_link:
+                continue
+            
+            stock_name = stock_link.get_text(strip=True)
+            href = stock_link.get("href", "")
+            
+            # URL에서 종목 코드 추출
+            stock_code = ""
+            if "code=" in href:
+                stock_code = href.split("code=")[-1].split("&")[0]
+            
+            # 현재가
+            price = _safe_int(cols[1].get_text(strip=True).replace(",", ""))
+            
+            # 등락률
+            change_rate = _safe_float(cols[2].get_text(strip=True))
+            
+            if stock_code:
+                stocks.append({
+                    "code": stock_code,
+                    "name": stock_name,
+                    "price": price,
+                    "change_rate": change_rate
+                })
+        
+        logger.debug(f"테마 종목 {len(stocks)}개 수집")
+        
+    except Exception as e:
+        logger.error(f"테마 종목 크롤링 실패: {e}")
+    
+    return stocks
+
+
+# ===== 한국경제 테마 크롤링 =====
+
+def crawl_hankyung_themes() -> list[dict]:
+    """
+    한국경제 증권 테마 크롤링
+    
+    한국경제의 테마 페이지에서 테마 목록을 수집합니다.
+    
+    Returns:
+        테마 정보 리스트:
+        [
+            {
+                'name': '2차전지',
+                'avg_change_rate': 2.5,
+                'source': 'hankyung'
+            },
+            ...
+        ]
+    """
+    themes = []
+    url = "https://markets.hankyung.com/theme"
+    
+    logger.info("📊 한국경제 테마 크롤링 시작")
+    
+    try:
+        response = httpx.get(
+            url,
+            headers=DEFAULT_HEADERS,
+            timeout=15.0,
+            follow_redirects=True
+        )
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "lxml")
+        
+        # 테마 목록 찾기 (한경 사이트 구조에 따라 조정 필요)
+        theme_items = soup.select(".theme_item, .theme-list li, [class*='theme']")
+        
+        for item in theme_items:
+            # 테마명 추출
+            name_elem = item.find("a") or item.find(class_="name") or item.find("span")
+            if not name_elem:
+                continue
+            
+            theme_name = name_elem.get_text(strip=True)
+            if not theme_name or len(theme_name) < 2:
+                continue
+            
+            # 등락률 추출
+            rate_elem = item.find(class_="rate") or item.find(class_="change")
+            change_rate = 0.0
+            if rate_elem:
+                change_rate = _safe_float(rate_elem.get_text(strip=True))
+            
+            themes.append({
+                "name": theme_name,
+                "avg_change_rate": change_rate,
+                "source": "hankyung"
+            })
+        
+        logger.info(f"✅ 한국경제 테마 {len(themes)}개 수집 완료")
+        
+    except httpx.TimeoutException:
+        logger.warning("한국경제 테마 크롤링 타임아웃")
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"한국경제 테마 HTTP 에러: {e.response.status_code}")
+        
+    except Exception as e:
+        logger.error(f"한국경제 테마 크롤링 실패: {e}")
+    
+    return themes
+
+
+# ===== 뉴스 언급 빈도 크롤링 =====
+
+def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
+    """
+    특정 테마의 최근 N일 뉴스 언급 횟수 조회
+    
+    네이버 뉴스 검색을 통해 테마 관련 뉴스 개수를 파악합니다.
+    
+    Args:
+        theme_name: 테마명 (예: "2차전지")
+        days: 조회할 일수 (기본 3일)
+    
+    Returns:
+        뉴스 언급 횟수
+        
+    Example:
+        >>> count = crawl_theme_news_count("2차전지", days=3)
+        >>> print(count)
+        127
+    """
+    try:
+        # 네이버 뉴스 검색 URL
+        # 날짜 필터: ds (시작일), de (종료일)
+        today = datetime.now()
+        start_date = (today - timedelta(days=days)).strftime("%Y.%m.%d")
+        end_date = today.strftime("%Y.%m.%d")
+        
+        # 증권/주식 관련 키워드 추가
+        search_query = f"{theme_name} 주식"
+        
+        url = "https://search.naver.com/search.naver"
+        params = {
+            "where": "news",
+            "query": search_query,
+            "sm": "tab_opt",
+            "sort": "1",  # 최신순
+            "ds": start_date,
+            "de": end_date,
+            "nso": f"so:dd,p:from{start_date.replace('.', '')}to{end_date.replace('.', '')}"
+        }
+        
+        response = httpx.get(
+            url,
+            params=params,
+            headers=DEFAULT_HEADERS,
+            timeout=10.0,
+            follow_redirects=True
+        )
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "lxml")
+        
+        # 검색 결과 수 추출
+        # "뉴스 약 1,234건" 형태로 표시됨
+        result_info = soup.find("div", class_="title_desc")
+        if result_info:
+            text = result_info.get_text()
+            # 숫자 추출
+            import re
+            numbers = re.findall(r"[\d,]+", text)
+            if numbers:
+                count = _safe_int(numbers[0])
+                logger.debug(f"[{theme_name}] 뉴스 {count}건")
+                return count
+        
+        # 뉴스 아이템 수로 대략 추정 (검색 결과가 없는 경우)
+        news_items = soup.select(".news_area, .bx, .list_news li")
+        count = len(news_items)
+        
+        logger.debug(f"[{theme_name}] 뉴스 약 {count}건 (추정)")
+        return count
+        
+    except Exception as e:
+        logger.warning(f"[{theme_name}] 뉴스 카운트 조회 실패: {e}")
+        return 0
+
+
+def crawl_multiple_theme_news(theme_names: list[str], days: int = 3) -> dict[str, int]:
+    """
+    여러 테마의 뉴스 언급 횟수 일괄 조회
+    
+    Args:
+        theme_names: 테마명 리스트
+        days: 조회할 일수
+    
+    Returns:
+        {테마명: 뉴스 수} 딕셔너리
+        
+    Example:
+        >>> counts = crawl_multiple_theme_news(["2차전지", "AI반도체"])
+        >>> print(counts)
+        {'2차전지': 127, 'AI반도체': 95}
+    """
+    results = {}
+    
+    logger.info(f"📰 {len(theme_names)}개 테마 뉴스 수집 시작")
+    
+    for theme_name in theme_names:
+        count = crawl_theme_news_count(theme_name, days)
+        results[theme_name] = count
+        _random_delay()  # 차단 방지
+    
+    logger.info(f"✅ 테마 뉴스 수집 완료")
+    return results
+
+
+# ===== 자체 정의 테마 목록 =====
+
+def get_predefined_themes() -> list[dict]:
+    """
+    자체 정의된 20개 핵심 테마 반환
+    
+    네이버/한경에 없거나 중요한 테마를 직접 정의합니다.
+    
+    Returns:
+        테마 정보 리스트
+    """
+    predefined = [
+        {"name": "2차전지", "category": "신성장", "keywords": ["배터리", "리튬", "전기차"]},
+        {"name": "AI반도체", "category": "반도체", "keywords": ["AI칩", "HBM", "GPU"]},
+        {"name": "K-방산", "category": "방위산업", "keywords": ["방산", "무기", "수출"]},
+        {"name": "바이오", "category": "헬스케어", "keywords": ["신약", "임상", "바이오텍"]},
+        {"name": "로봇", "category": "신성장", "keywords": ["로봇", "자동화", "휴머노이드"]},
+        {"name": "자율주행", "category": "모빌리티", "keywords": ["자율주행", "라이다", "센서"]},
+        {"name": "원자력", "category": "에너지", "keywords": ["원전", "SMR", "핵융합"]},
+        {"name": "수소", "category": "에너지", "keywords": ["수소", "연료전지", "그린수소"]},
+        {"name": "조선", "category": "산업재", "keywords": ["조선", "LNG선", "컨테이너선"]},
+        {"name": "건설", "category": "산업재", "keywords": ["건설", "아파트", "인프라"]},
+        {"name": "금융", "category": "금융", "keywords": ["은행", "증권", "보험"]},
+        {"name": "엔터테인먼트", "category": "소비재", "keywords": ["K-POP", "드라마", "콘텐츠"]},
+        {"name": "게임", "category": "IT서비스", "keywords": ["게임", "모바일게임", "e스포츠"]},
+        {"name": "플랫폼", "category": "IT서비스", "keywords": ["플랫폼", "이커머스", "핀테크"]},
+        {"name": "클라우드", "category": "IT서비스", "keywords": ["클라우드", "SaaS", "데이터센터"]},
+        {"name": "음식료", "category": "소비재", "keywords": ["식품", "음료", "주류"]},
+        {"name": "화장품", "category": "소비재", "keywords": ["화장품", "K-뷰티", "스킨케어"]},
+        {"name": "철강", "category": "소재", "keywords": ["철강", "스테인리스", "특수강"]},
+        {"name": "화학", "category": "소재", "keywords": ["화학", "석유화학", "정밀화학"]},
+        {"name": "통신", "category": "통신", "keywords": ["5G", "6G", "통신장비"]},
+    ]
+    
+    return [
+        {
+            "name": t["name"],
+            "category": t["category"],
+            "keywords": t["keywords"],
+            "source": "predefined"
+        }
+        for t in predefined
+    ]
+
+
+# ===== 통합 크롤링 함수 =====
+
+def crawl_all_themes() -> list[dict]:
+    """
+    모든 소스에서 테마 데이터 통합 수집
+    
+    네이버, 한경, 자체정의 테마를 모두 수집하여 병합합니다.
+    
+    Returns:
+        통합된 테마 정보 리스트
+        
+    Example:
+        >>> all_themes = crawl_all_themes()
+        >>> print(f"총 {len(all_themes)}개 테마 수집")
+    """
+    all_themes = []
+    
+    logger.info("🔄 전체 테마 크롤링 시작")
+    
+    # 1. 네이버 테마
+    try:
+        naver_themes = crawl_naver_themes()
+        all_themes.extend(naver_themes)
+    except Exception as e:
+        logger.error(f"네이버 테마 수집 실패: {e}")
+    
+    _random_delay()
+    
+    # 2. 한경 테마
+    try:
+        hankyung_themes = crawl_hankyung_themes()
+        all_themes.extend(hankyung_themes)
+    except Exception as e:
+        logger.error(f"한경 테마 수집 실패: {e}")
+    
+    # 3. 자체 정의 테마
+    predefined_themes = get_predefined_themes()
+    all_themes.extend(predefined_themes)
+    
+    # 중복 제거 (테마명 기준, 첫 번째 것 유지)
+    seen = set()
+    unique_themes = []
+    for theme in all_themes:
+        if theme["name"] not in seen:
+            seen.add(theme["name"])
+            unique_themes.append(theme)
+    
+    logger.info(f"✅ 전체 테마 {len(unique_themes)}개 수집 완료")
+    
+    return unique_themes
+
+
+# ===== 직접 실행 시 테스트 =====
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🔍 테마 크롤러 테스트")
+    print("=" * 60)
+    
+    # 네이버 테마 테스트
+    print("\n📊 네이버 테마 크롤링...")
+    naver_themes = crawl_naver_themes(max_pages=1)
+    print(f"수집된 테마: {len(naver_themes)}개")
+    for theme in naver_themes[:5]:
+        print(f"  - {theme['name']}: {theme['avg_change_rate']:+.2f}%")
+    
+    # 뉴스 카운트 테스트
+    if naver_themes:
+        print("\n📰 뉴스 카운트 테스트...")
+        test_theme = naver_themes[0]["name"]
+        news_count = crawl_theme_news_count(test_theme, days=3)
+        print(f"  {test_theme}: {news_count}건")
+    
+    # 자체 정의 테마
+    print("\n📋 자체 정의 테마...")
+    predefined = get_predefined_themes()
+    print(f"정의된 테마: {len(predefined)}개")
+    for theme in predefined[:5]:
+        print(f"  - {theme['name']} ({theme['category']})")
+    
+    print("\n" + "=" * 60)
+    print("✅ 테스트 완료!")
+    print("=" * 60)

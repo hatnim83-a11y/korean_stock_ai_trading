@@ -1,0 +1,63 @@
+# trading_system.service - 한국 주식 AI 스윙 트레이딩 시스템 systemd 서비스
+#
+# 설치 방법:
+#   1. 서비스 파일 복사:
+#      sudo cp trading_system.service /etc/systemd/system/
+#
+#   2. 서비스 활성화:
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable trading_system
+#
+#   3. 서비스 시작:
+#      sudo systemctl start trading_system
+#
+# 관리 명령어:
+#   - 상태 확인: sudo systemctl status trading_system
+#   - 로그 확인: sudo journalctl -u trading_system -f
+#   - 재시작: sudo systemctl restart trading_system
+#   - 중지: sudo systemctl stop trading_system
+
+[Unit]
+Description=Korean Stock AI Swing Trading System
+Documentation=https://github.com/your-repo/korean_stock_ai_trading
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hatni
+Group=hatni
+
+# 작업 디렉토리
+WorkingDirectory=/home/hatni/korean_stock_ai_trading
+
+# 가상환경 활성화 후 실행
+ExecStart=/home/hatni/korean_stock_ai_trading/venv/bin/python main.py
+
+# 환경 변수
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/hatni/korean_stock_ai_trading/.env
+
+# 재시작 정책
+Restart=always
+RestartSec=10
+
+# 시작/종료 타임아웃
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# 리소스 제한
+MemoryMax=1G
+CPUQuota=50%
+
+# 로깅
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading_system
+
+# 보안 설정
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
