@@ -315,9 +315,9 @@ def crawl_naver_theme_stocks(theme_url: str) -> list[dict]:
 def crawl_hankyung_themes() -> list[dict]:
     """
     한국경제 증권 테마 크롤링
-    
+
     한국경제의 테마 페이지에서 테마 목록을 수집합니다.
-    
+
     Returns:
         테마 정보 리스트:
         [
@@ -330,57 +330,75 @@ def crawl_hankyung_themes() -> list[dict]:
         ]
     """
     themes = []
-    url = "https://markets.hankyung.com/theme"
-    
+    urls = [
+        "https://markets.hankyung.com/stock/themes",
+        "https://markets.hankyung.com/theme",
+    ]
+
     logger.info("📊 한국경제 테마 크롤링 시작")
-    
+
+    response = None
+    for url in urls:
+        try:
+            response = httpx.get(
+                url,
+                headers=DEFAULT_HEADERS,
+                timeout=15.0,
+                follow_redirects=True
+            )
+            response.raise_for_status()
+            logger.debug(f"한경 테마 URL 성공: {url}")
+            break
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"한경 테마 URL 실패 ({e.response.status_code}): {url}")
+            response = None
+            continue
+        except httpx.TimeoutException:
+            logger.warning(f"한경 테마 URL 타임아웃: {url}")
+            response = None
+            continue
+        except Exception as e:
+            logger.warning(f"한경 테마 URL 오류: {url} - {e}")
+            response = None
+            continue
+
+    if response is None:
+        logger.warning("한국경제 테마 크롤링: 모든 URL 실패 - 빈 리스트 반환")
+        return themes
+
     try:
-        response = httpx.get(
-            url,
-            headers=DEFAULT_HEADERS,
-            timeout=15.0,
-            follow_redirects=True
-        )
-        response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, "lxml")
-        
+
         # 테마 목록 찾기 (한경 사이트 구조에 따라 조정 필요)
         theme_items = soup.select(".theme_item, .theme-list li, [class*='theme']")
-        
+
         for item in theme_items:
             # 테마명 추출
             name_elem = item.find("a") or item.find(class_="name") or item.find("span")
             if not name_elem:
                 continue
-            
+
             theme_name = name_elem.get_text(strip=True)
             if not theme_name or len(theme_name) < 2:
                 continue
-            
+
             # 등락률 추출
             rate_elem = item.find(class_="rate") or item.find(class_="change")
             change_rate = 0.0
             if rate_elem:
                 change_rate = _safe_float(rate_elem.get_text(strip=True))
-            
+
             themes.append({
                 "name": theme_name,
                 "avg_change_rate": change_rate,
                 "source": "hankyung"
             })
-        
+
         logger.info(f"✅ 한국경제 테마 {len(themes)}개 수집 완료")
-        
-    except httpx.TimeoutException:
-        logger.warning("한국경제 테마 크롤링 타임아웃")
-        
-    except httpx.HTTPStatusError as e:
-        logger.error(f"한국경제 테마 HTTP 에러: {e.response.status_code}")
-        
+
     except Exception as e:
         logger.error(f"한국경제 테마 크롤링 실패: {e}")
-    
+
     return themes
 
 

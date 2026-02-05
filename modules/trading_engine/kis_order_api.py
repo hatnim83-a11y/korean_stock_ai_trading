@@ -132,15 +132,15 @@ class KISOrderApi:
     
     def get_access_token(self) -> str:
         """
-        접근 토큰 발급 (24시간 유효)
-        
+        접근 토큰 발급 (24시간 유효, 최대 3회 재시도)
+
         Returns:
             접근 토큰 문자열
         """
         # 토큰이 유효하면 재사용
         if self.access_token and self.token_expired_at > time.time():
             return self.access_token
-        
+
         url = f"{self.base_url}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
         body = {
@@ -148,23 +148,50 @@ class KISOrderApi:
             "appkey": self.app_key,
             "appsecret": self.app_secret
         }
-        
-        try:
-            self._rate_limit()
-            response = httpx.post(url, headers=headers, json=body, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            self.access_token = data["access_token"]
-            # 23시간 후 만료로 설정 (여유 확보)
-            self.token_expired_at = time.time() + (23 * 60 * 60)
-            
-            logger.info("KIS API 토큰 발급 성공")
-            return self.access_token
-            
-        except Exception as e:
-            logger.error(f"토큰 발급 실패: {e}")
-            raise
+
+        max_retries = 3
+        last_exception = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._rate_limit()
+                response = httpx.post(url, headers=headers, json=body, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                self.access_token = data["access_token"]
+                # 23시간 후 만료로 설정 (여유 확보)
+                self.token_expired_at = time.time() + (23 * 60 * 60)
+
+                logger.info("KIS API 토큰 발급 성공")
+                return self.access_token
+
+            except httpx.HTTPStatusError as e:
+                last_exception = e
+                status_code = e.response.status_code
+                logger.warning(f"토큰 발급 HTTP {status_code} (시도 {attempt}/{max_retries})")
+
+                if status_code == 403:
+                    # 기존 토큰 초기화
+                    self.access_token = None
+                    self.token_expired_at = 0
+
+                if attempt < max_retries:
+                    backoff = 2 ** attempt  # 2초, 4초, 8초
+                    logger.info(f"토큰 발급 재시도 대기: {backoff}초")
+                    time.sleep(backoff)
+
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"토큰 발급 실패 (시도 {attempt}/{max_retries}): {e}")
+
+                if attempt < max_retries:
+                    backoff = 2 ** attempt
+                    logger.info(f"토큰 발급 재시도 대기: {backoff}초")
+                    time.sleep(backoff)
+
+        logger.error(f"토큰 발급 최종 실패 ({max_retries}회 시도): {last_exception}")
+        raise last_exception
     
     def _get_hashkey(self, body: dict) -> str:
         """

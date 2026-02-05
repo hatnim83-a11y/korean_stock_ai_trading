@@ -33,6 +33,26 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from logger import logger
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """빈 문자열이나 잘못된 값을 안전하게 int로 변환"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """빈 문자열이나 잘못된 값을 안전하게 float로 변환"""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 class KISApi:
     """
     한국투자증권 KIS Developers API 클라이언트
@@ -275,17 +295,17 @@ class KISApi:
             result = {
                 "code": stock_code,
                 "name": stock_name,
-                "price": int(output.get("stck_prpr", 0)),  # 현재가
-                "change": int(output.get("prdy_vrss", 0)),  # 전일대비
-                "change_rate": float(output.get("prdy_ctrt", 0)),  # 등락률
-                "volume": int(output.get("acml_vol", 0)),  # 누적거래량
-                "trade_value": int(output.get("acml_tr_pbmn", 0)),  # 누적거래대금
-                "high": int(output.get("stck_hgpr", 0)),  # 고가
-                "low": int(output.get("stck_lwpr", 0)),  # 저가
-                "open": int(output.get("stck_oprc", 0)),  # 시가
-                "per": float(output.get("per", 0)),  # PER
-                "pbr": float(output.get("pbr", 0)),  # PBR
-                "market_cap": int(output.get("hts_avls", 0)) * 100000000,  # 시가총액
+                "price": _safe_int(output.get("stck_prpr")),  # 현재가
+                "change": _safe_int(output.get("prdy_vrss")),  # 전일대비
+                "change_rate": _safe_float(output.get("prdy_ctrt")),  # 등락률
+                "volume": _safe_int(output.get("acml_vol")),  # 누적거래량
+                "trade_value": _safe_int(output.get("acml_tr_pbmn")),  # 누적거래대금
+                "high": _safe_int(output.get("stck_hgpr")),  # 고가
+                "low": _safe_int(output.get("stck_lwpr")),  # 저가
+                "open": _safe_int(output.get("stck_oprc")),  # 시가
+                "per": _safe_float(output.get("per")),  # PER
+                "pbr": _safe_float(output.get("pbr")),  # PBR
+                "market_cap": _safe_int(output.get("hts_avls")) * 100000000,  # 시가총액
             }
             
             logger.debug(f"[{stock_code}] 현재가 조회: {result['price']:,}원")
@@ -357,12 +377,12 @@ class KISApi:
             for item in output[:count]:
                 result.append({
                     "date": item.get("stck_bsop_date", ""),
-                    "open": int(item.get("stck_oprc", 0)),
-                    "high": int(item.get("stck_hgpr", 0)),
-                    "low": int(item.get("stck_lwpr", 0)),
-                    "close": int(item.get("stck_clpr", 0)),
-                    "volume": int(item.get("acml_vol", 0)),
-                    "trade_value": int(item.get("acml_tr_pbmn", 0)),
+                    "open": _safe_int(item.get("stck_oprc")),
+                    "high": _safe_int(item.get("stck_hgpr")),
+                    "low": _safe_int(item.get("stck_lwpr")),
+                    "close": _safe_int(item.get("stck_clpr")),
+                    "volume": _safe_int(item.get("acml_vol")),
+                    "trade_value": _safe_int(item.get("acml_tr_pbmn")),
                 })
             
             logger.debug(f"[{stock_code}] 일별 시세 {len(result)}건 조회")
@@ -436,12 +456,12 @@ class KISApi:
             
             for i, item in enumerate(output[:days]):
                 # 순매수량 * 종가 = 순매수금액 (대략)
-                foreign_net = int(item.get("frgn_ntby_qty", 0))
-                institution_net = int(item.get("orgn_ntby_qty", 0))
-                individual_net = int(item.get("prsn_ntby_qty", 0))
-                
+                foreign_net = _safe_int(item.get("frgn_ntby_qty"))
+                institution_net = _safe_int(item.get("orgn_ntby_qty"))
+                individual_net = _safe_int(item.get("prsn_ntby_qty"))
+
                 # 종가 정보가 있으면 금액 계산
-                close_price = int(item.get("stck_clpr", 0))
+                close_price = _safe_int(item.get("stck_clpr"))
                 
                 foreign_total += foreign_net * close_price
                 institution_total += institution_net * close_price

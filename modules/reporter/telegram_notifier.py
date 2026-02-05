@@ -93,7 +93,7 @@ class TelegramNotifier:
         if not self._enabled:
             logger.debug(f"[텔레그램 비활성] {text[:50]}...")
             return False
-        
+
         url = f"{self.base_url}/sendMessage"
         data = {
             "chat_id": self.chat_id,
@@ -101,18 +101,36 @@ class TelegramNotifier:
             "parse_mode": parse_mode,
             "disable_notification": disable_notification
         }
-        
+
         try:
             response = httpx.post(url, json=data, timeout=10)
             result = response.json()
-            
+
             if result.get("ok"):
                 logger.debug("텔레그램 메시지 전송 성공")
                 return True
             else:
-                logger.error(f"텔레그램 전송 실패: {result.get('description')}")
+                error_desc = result.get('description', '')
+                logger.warning(f"텔레그램 전송 실패 (parse_mode={parse_mode}): {error_desc}")
+
+                # Markdown/HTML 파싱 실패 시 plain text로 재시도
+                if parse_mode:
+                    logger.info("텔레그램 plain text로 재시도")
+                    fallback_data = {
+                        "chat_id": self.chat_id,
+                        "text": text,
+                        "disable_notification": disable_notification
+                    }
+                    fallback_response = httpx.post(url, json=fallback_data, timeout=10)
+                    fallback_result = fallback_response.json()
+                    if fallback_result.get("ok"):
+                        logger.debug("텔레그램 plain text 전송 성공")
+                        return True
+                    else:
+                        logger.error(f"텔레그램 plain text 전송도 실패: {fallback_result.get('description')}")
+
                 return False
-                
+
         except Exception as e:
             logger.error(f"텔레그램 전송 오류: {e}")
             return False
