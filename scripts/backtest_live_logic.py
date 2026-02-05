@@ -113,6 +113,9 @@ class Position:
     # 트레일링 스탑
     highest_price: float = 0.0
     trailing_stop: float = 0.0
+    trailing_active: bool = False  # 트레일링 활성화 여부
+    trailing_level: int = 0  # 트레일링 레벨 (0=미활성, 1=5%, 2=3%, 3=2%)
+    max_profit_pct: float = 0.0  # 최대 수익률 기록
 
     def __post_init__(self):
         self.remaining_shares = self.shares
@@ -158,11 +161,28 @@ class BacktestConfig:
 
     # 매매 전략
     stop_loss_pct: float = -0.07  # -7%
-    take_profit_pct: float = 0.15  # +15%
-    partial_profit_pct: float = 0.10  # +10%에서 절반 익절
-    partial_sell_ratio: float = 0.5  # 50% 매도
-    trailing_stop_pct: float = 0.05  # 고점 대비 5% 하락
-    max_holding_days: int = 10  # 최대 보유일
+    max_holding_days: int = 14  # 최대 보유일 (늘림)
+
+    # 이익 추종 전략 (Let Profits Run)
+    enable_profit_trailing: bool = True  # 이익 추종 전략 활성화
+
+    # 단계별 트레일링 스탑
+    trail_activation_pct: float = 0.08  # +8%에서 트레일링 시작
+    trail_level1_pct: float = 0.05  # 8%~15%: 고점 대비 5% 트레일링
+    trail_level2_threshold: float = 0.15  # +15%에서 트레일링 강화
+    trail_level2_pct: float = 0.03  # 15%~25%: 고점 대비 3% 트레일링
+    trail_level3_threshold: float = 0.25  # +25%에서 트레일링 더 강화
+    trail_level3_pct: float = 0.02  # 25%+: 고점 대비 2% 트레일링
+
+    # 기존 전략 (비활성화 가능)
+    enable_fixed_take_profit: bool = False  # 고정 익절 비활성화
+    take_profit_pct: float = 0.15  # (비활성화됨)
+    enable_partial_profit: bool = False  # 분할 익절 비활성화
+    partial_profit_pct: float = 0.10
+    partial_sell_ratio: float = 0.5
+    # 분할 익절 후 트레일링 (기존 전략용)
+    enable_trailing_after_partial: bool = False
+    trailing_after_partial_pct: float = 0.05  # 고점 대비 5%
 
     # 기타
     commission: float = 0.00015  # 수수료 0.015%
@@ -447,53 +467,108 @@ class LiveLogicBacktester:
             if df_until.empty:
                 continue
 
-            current_price = df_until.iloc[-1]['Close']
+            current_price = float(df_until.iloc[-1]['Close'])
             holding_days = (date - pos.entry_date).days
+            current_profit_pct = (current_price - pos.entry_price) / pos.entry_price
 
-            # 고점 갱신
+            # 최대 수익률/고점 갱신
             if current_price > pos.highest_price:
                 pos.highest_price = current_price
-                pos.trailing_stop = current_price * (1 - self.config.trailing_stop_pct)
+                # 기존 전략: 분할 익절 후 트레일링 스탑 갱신
+                if self.config.enable_trailing_after_partial:
+                    pos.trailing_stop = current_price * (1 - self.config.trailing_after_partial_pct)
+            if current_profit_pct > pos.max_profit_pct:
+                pos.max_profit_pct = current_profit_pct
 
             exit_reason = None
             exit_price = current_price
 
-            # 1. 손절 (-7%)
-            if current_price <= pos.stop_loss:
-                exit_reason = "손절"
-                exit_price = pos.stop_loss
+            # ===== 이익 추종 전략 (Let Profits Run) =====
+            if self.config.enable_profit_trailing:
+                # 트레일링 레벨 업데이트
+                if current_profit_pct >= self.config.trail_level3_threshold:
+                    # +25% 이상: 레벨 3 (2% 트레일링)
+                    if pos.trailing_level < 3:
+                        pos.trailing_level = 3
+                        pos.trailing_active = True
+                        logger.debug(f"  🔥 {pos.name} 레벨3 트레일링 (2%)")
+                elif current_profit_pct >= self.config.trail_level2_threshold:
+                    # +15% 이상: 레벨 2 (3% 트레일링)
+                    if pos.trailing_level < 2:
+                        pos.trailing_level = 2
+                        pos.trailing_active = True
+                        logger.debug(f"  🔥 {pos.name} 레벨2 트레일링 (3%)")
+                elif current_profit_pct >= self.config.trail_activation_pct:
+                    # +8% 이상: 레벨 1 (5% 트레일링) + 본전 손절
+                    if pos.trailing_level < 1:
+                        pos.trailing_level = 1
+                        pos.trailing_active = True
+                        pos.stop_loss = pos.entry_price  # 본전 손절로 이동
+                        logger.debug(f"  📈 {pos.name} 트레일링 활성화 (5%), 본전 손절")
 
-            # 2. 익절 (+15%)
-            elif current_price >= pos.take_profit:
+                # 트레일링 스탑 가격 계산 (레벨별)
+                if pos.trailing_active:
+                    if pos.trailing_level == 3:
+                        trail_pct = self.config.trail_level3_pct  # 2%
+                    elif pos.trailing_level == 2:
+                        trail_pct = self.config.trail_level2_pct  # 3%
+                    else:
+                        trail_pct = self.config.trail_level1_pct  # 5%
+
+                    new_trailing_stop = pos.highest_price * (1 - trail_pct)
+                    # 트레일링 스탑은 올라가기만 함 (내려가지 않음)
+                    if new_trailing_stop > pos.trailing_stop:
+                        pos.trailing_stop = new_trailing_stop
+
+                    # 트레일링 스탑보다 손절가가 낮으면 손절가 상향
+                    if pos.trailing_stop > pos.stop_loss:
+                        pos.stop_loss = pos.trailing_stop
+
+            # ===== 청산 조건 체크 =====
+
+            # 1. 손절 (기본 -7% 또는 트레일링 스탑)
+            if current_price <= pos.stop_loss:
+                if pos.trailing_active:
+                    exit_reason = f"트레일링L{pos.trailing_level}"
+                    exit_price = pos.trailing_stop  # 트레일링 스탑 가격
+                else:
+                    exit_reason = "손절"
+                    exit_price = pos.stop_loss  # 손절 가격 (원본과 동일)
+
+            # 2. 고정 익절 (비활성화 가능)
+            elif self.config.enable_fixed_take_profit and current_price >= pos.take_profit:
                 exit_reason = "익절"
                 exit_price = pos.take_profit
 
-            # 3. 분할 익절 (+10%에서 절반)
-            elif not pos.partial_sold and current_price >= pos.entry_price * (1 + self.config.partial_profit_pct):
-                # 절반 매도
-                sell_shares = int(pos.remaining_shares * self.config.partial_sell_ratio)
-                if sell_shares > 0:
-                    pos.partial_sold = True
-                    pos.partial_sold_date = date
-                    pos.partial_sold_price = current_price
-                    pos.remaining_shares -= sell_shares
+            # 3. 분할 익절 (비활성화 가능)
+            elif self.config.enable_partial_profit and not pos.partial_sold:
+                if current_price >= pos.entry_price * (1 + self.config.partial_profit_pct):
+                    sell_shares = int(pos.remaining_shares * self.config.partial_sell_ratio)
+                    if sell_shares > 0:
+                        pos.partial_sold = True
+                        pos.partial_sold_date = date
+                        pos.partial_sold_price = current_price
+                        pos.remaining_shares -= sell_shares
 
-                    # 수익 실현
-                    pnl = (current_price - pos.entry_price) * sell_shares
-                    commission = current_price * sell_shares * self.config.commission
-                    self.cash += current_price * sell_shares - commission
+                        commission = current_price * sell_shares * self.config.commission
+                        self.cash += current_price * sell_shares - commission
 
-                    # 손절가 조정 (본전으로)
-                    pos.stop_loss = pos.entry_price
+                        # 분할 익절 후 트레일링 활성화 (기존 전략)
+                        if self.config.enable_trailing_after_partial:
+                            pos.trailing_active = True
+                            pos.stop_loss = pos.entry_price  # 본전 손절
 
-                    logger.debug(f"  📊 분할익절: {pos.name} {sell_shares}주 @ {current_price:,.0f}")
+                        logger.debug(f"  📊 분할익절: {pos.name} {sell_shares}주 @ {current_price:,.0f}")
 
-            # 4. 트레일링 스탑 (분할 익절 후)
-            elif pos.partial_sold and current_price <= pos.trailing_stop:
-                exit_reason = "트레일링스탑"
+            # 3-1. 분할 익절 후 트레일링 스탑 (기존 전략)
+            if self.config.enable_trailing_after_partial and pos.partial_sold and not exit_reason:
+                # 트레일링 스탑 도달 시 청산
+                if current_price <= pos.trailing_stop:
+                    exit_reason = "트레일링스탑"
+                    exit_price = current_price
 
-            # 5. 보유기간 초과
-            elif holding_days >= self.config.max_holding_days:
+            # 4. 보유기간 초과
+            if not exit_reason and holding_days >= self.config.max_holding_days:
                 exit_reason = "보유기간만료"
 
             if exit_reason:
@@ -598,7 +673,7 @@ class LiveLogicBacktester:
                 # 기존 포지션 정리 (테마 변경 시)
                 # 주석: 실전에서는 테마 변경 시 즉시 청산하지 않을 수 있음
 
-            # 청산 조건 체크
+            # 청산 조건 체크 (시장 상황과 무관하게 항상 실행)
             self.check_exits(date_dt)
 
             # 신규 진입 (포지션 여유 있을 때)
@@ -797,23 +872,142 @@ class LiveLogicBacktester:
 
 def main():
     """메인 함수"""
-    config = BacktestConfig(
-        start_date="2023-01-01",
-        end_date="2026-01-31",
-        initial_capital=100_000_000,  # 1억
-        top_themes=3,
-        theme_rotation_days=14,
-        max_positions=10,
-        stocks_per_theme=3,
-        stop_loss_pct=-0.07,
-        take_profit_pct=0.15,
-        partial_profit_pct=0.10,
-        trailing_stop_pct=0.05,
-        max_holding_days=10,
-    )
+    import argparse
 
-    backtester = LiveLogicBacktester(config)
-    backtester.run()
+    parser = argparse.ArgumentParser(description="실전 로직 백테스트")
+    parser.add_argument("--old-strategy", action="store_true", help="기존 전략 (고정 익절)")
+    parser.add_argument("--compare", action="store_true", help="기존 vs 이익추종 비교 실행")
+    args = parser.parse_args()
+
+    base_config = {
+        "start_date": "2023-01-01",
+        "end_date": "2026-01-31",
+        "initial_capital": 100_000_000,
+        "top_themes": 3,
+        "theme_rotation_days": 14,
+        "max_positions": 10,
+        "stocks_per_theme": 3,
+        "stop_loss_pct": -0.07,
+    }
+
+    if args.compare:
+        # 비교 모드: 기존 전략 vs 이익추종 전략
+        print("\n" + "=" * 70)
+        print("🔬 기존 전략 vs 이익 추종 전략 비교")
+        print("=" * 70)
+
+        results = {}
+
+        # 1. 기존 전략 (고정 익절 +15%, 분할 익절 +10%, 분할 후 트레일링)
+        print("\n" + "=" * 60)
+        print("📊 [1/2] 기존 전략 (분할익절 + 트레일링)")
+        print("=" * 60)
+        config_old = BacktestConfig(
+            **base_config,
+            enable_profit_trailing=False,
+            enable_fixed_take_profit=True,
+            take_profit_pct=0.15,
+            enable_partial_profit=True,
+            partial_profit_pct=0.10,
+            partial_sell_ratio=0.5,
+            enable_trailing_after_partial=True,  # 분할 익절 후 트레일링
+            trailing_after_partial_pct=0.05,
+            max_holding_days=10,
+        )
+        bt_old = LiveLogicBacktester(config_old)
+        bt_old.run()
+
+        # MDD 계산
+        equity_old = pd.Series([e["equity"] for e in bt_old.equity_curve])
+        mdd_old = ((equity_old - equity_old.cummax()) / equity_old.cummax() * 100).min()
+
+        results['old'] = {
+            'final': bt_old.equity_curve[-1]["equity"] if bt_old.equity_curve else 0,
+            'trades': len(bt_old.trades),
+            'mdd': mdd_old,
+            'wins': len([t for t in bt_old.trades if t.pnl > 0]),
+        }
+
+        # 2. 이익 추종 전략 (단계별 트레일링)
+        print("\n" + "=" * 60)
+        print("📊 [2/2] 이익 추종 전략 (단계별 트레일링)")
+        print("=" * 60)
+        config_new = BacktestConfig(
+            **base_config,
+            enable_profit_trailing=True,
+            enable_fixed_take_profit=False,
+            enable_partial_profit=False,
+            max_holding_days=14,
+            trail_activation_pct=0.08,
+            trail_level1_pct=0.05,
+            trail_level2_threshold=0.15,
+            trail_level2_pct=0.03,
+            trail_level3_threshold=0.25,
+            trail_level3_pct=0.02,
+        )
+        bt_new = LiveLogicBacktester(config_new)
+        bt_new.run()
+
+        # MDD 계산
+        equity_new = pd.Series([e["equity"] for e in bt_new.equity_curve])
+        mdd_new = ((equity_new - equity_new.cummax()) / equity_new.cummax() * 100).min()
+
+        results['new'] = {
+            'final': bt_new.equity_curve[-1]["equity"] if bt_new.equity_curve else 0,
+            'trades': len(bt_new.trades),
+            'mdd': mdd_new,
+            'wins': len([t for t in bt_new.trades if t.pnl > 0]),
+        }
+
+        # 비교 결과
+        initial = base_config["initial_capital"]
+        print("\n" + "=" * 70)
+        print("📈 비교 결과 요약")
+        print("=" * 70)
+        print(f"{'구분':<20} {'기존 전략':>15} {'이익 추종':>15} {'차이':>15}")
+        print("-" * 70)
+
+        ret_old = (results['old']['final'] - initial) / initial * 100
+        ret_new = (results['new']['final'] - initial) / initial * 100
+        print(f"{'총 수익률':.<20} {ret_old:>14.2f}% {ret_new:>14.2f}% {ret_new - ret_old:>+14.2f}%")
+        print(f"{'최종 자산':.<20} {results['old']['final']:>14,.0f} {results['new']['final']:>14,.0f} {results['new']['final'] - results['old']['final']:>+14,.0f}")
+        print(f"{'MDD':.<20} {results['old']['mdd']:>14.2f}% {results['new']['mdd']:>14.2f}% {results['new']['mdd'] - results['old']['mdd']:>+14.2f}%")
+        print(f"{'총 거래 수':.<20} {results['old']['trades']:>15} {results['new']['trades']:>15} {results['new']['trades'] - results['old']['trades']:>+15}")
+        print(f"{'승리 거래':.<20} {results['old']['wins']:>15} {results['new']['wins']:>15} {results['new']['wins'] - results['old']['wins']:>+15}")
+
+        win_rate_old = results['old']['wins'] / results['old']['trades'] * 100 if results['old']['trades'] > 0 else 0
+        win_rate_new = results['new']['wins'] / results['new']['trades'] * 100 if results['new']['trades'] > 0 else 0
+        print(f"{'승률':.<20} {win_rate_old:>14.1f}% {win_rate_new:>14.1f}% {win_rate_new - win_rate_old:>+14.1f}%")
+        print("=" * 70)
+
+    else:
+        # 단일 실행 (이익 추종 전략이 기본)
+        if args.old_strategy:
+            print("📊 기존 전략 (분할익절 + 트레일링)")
+            config = BacktestConfig(
+                **base_config,
+                enable_profit_trailing=False,
+                enable_fixed_take_profit=True,
+                take_profit_pct=0.15,
+                enable_partial_profit=True,
+                partial_profit_pct=0.10,
+                partial_sell_ratio=0.5,
+                enable_trailing_after_partial=True,
+                trailing_after_partial_pct=0.05,
+                max_holding_days=10,
+            )
+        else:
+            print("📊 이익 추종 전략 (단계별 트레일링)")
+            config = BacktestConfig(
+                **base_config,
+                enable_profit_trailing=True,
+                enable_fixed_take_profit=False,
+                enable_partial_profit=False,
+                max_holding_days=14,
+            )
+
+        backtester = LiveLogicBacktester(config)
+        backtester.run()
 
 
 if __name__ == "__main__":
