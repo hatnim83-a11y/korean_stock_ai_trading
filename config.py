@@ -129,10 +129,6 @@ class Settings(BaseSettings):
         default=0.40,
         description="테마당 최대 투자 비중 (40%)"
     )
-    THEME_ROTATION_DAYS: int = Field(
-        default=7,
-        description="테마 로테이션 주기 (7일, 14일 대비 +75% 수익)"
-    )
 
     # ===== 보유 기간 설정 =====
     MAX_HOLD_DAYS_PROFIT: int = Field(
@@ -281,8 +277,8 @@ class Settings(BaseSettings):
     
     # ===== 테마 로테이션 설정 =====
     THEME_REVIEW_DAYS: int = Field(
-        default=14,
-        description="메인 테마 재평가 주기 (14일 = 2주)"
+        default=7,
+        description="메인 테마 재평가 주기 (7일, 14일 대비 +75% 수익)"
     )
     THEME_CHANGE_THRESHOLD: float = Field(
         default=-0.20,
