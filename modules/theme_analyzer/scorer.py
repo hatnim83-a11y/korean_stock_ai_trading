@@ -415,13 +415,9 @@ def score_themes(themes: list[dict]) -> list[dict]:
     """
     scored_themes = []
     
-    # 핵심 대형 테마 정의 (보너스 점수 +10)
-    MAJOR_THEMES = {
-        "반도체": 10, "2차전지": 10, "AI": 10, "인공지능": 10,
-        "배터리": 8, "자율주행": 8, "로봇": 8, "바이오": 8,
-        "방산": 7, "원자력": 7, "조선": 7, "건설": 6,
-        "플랫폼": 6, "클라우드": 6, "게임": 5, "엔터": 5
-    }
+    # 테마 규모 기반 보너스 (종목수/거래대금 반영)
+    # 고정 보너스 대신 데이터 기반으로 계산
+    # 종목수 10개 이상 = 대형 테마, 20개 이상 = 메이저 테마
 
     for theme in themes:
         theme_name = theme.get("name", theme.get("theme", ""))
@@ -455,14 +451,34 @@ def score_themes(themes: list[dict]) -> list[dict]:
         ai_sentiment = theme.get("ai_sentiment", 0)
         a_score = calculate_ai_sentiment_score(ai_sentiment) if ai_sentiment else 10  # 기본 10점
 
-        # 5. 대형 테마 보너스 점수
+        # 5. 테마 규모 보너스 (데이터 기반, 고정 보너스 아님)
+        # - 종목수 기반: 대형 테마는 자연스럽게 종목이 많음
+        # - 거래대금 기반: 시장의 관심이 높으면 거래대금이 높음
+        stock_count = theme.get("stock_count", len(theme.get("stocks", [])))
+        avg_trading_value = theme.get("avg_trading_value", 0)  # 억원 단위
+
         bonus = 0
         bonus_reason = ""
-        for major_name, major_bonus in MAJOR_THEMES.items():
-            if major_name in theme_name:
-                bonus = major_bonus
-                bonus_reason = f"핵심테마({major_name})"
-                break
+
+        # 종목수 기반 보너스 (10개당 +2점, 최대 +6점)
+        if stock_count >= 20:
+            bonus += 6
+            bonus_reason = f"메이저테마({stock_count}종목)"
+        elif stock_count >= 15:
+            bonus += 4
+            bonus_reason = f"대형테마({stock_count}종목)"
+        elif stock_count >= 10:
+            bonus += 2
+            bonus_reason = f"중형테마({stock_count}종목)"
+
+        # 거래대금 기반 추가 보너스 (테마 평균 일 거래대금)
+        # 100억 이상 = +2점, 500억 이상 = +4점
+        if avg_trading_value >= 500:
+            bonus += 4
+            bonus_reason += ", 고거래대금" if bonus_reason else "고거래대금"
+        elif avg_trading_value >= 100:
+            bonus += 2
+            bonus_reason += ", 활발한거래" if bonus_reason else "활발한거래"
 
         total = m_score + s_score + n_score + a_score + bonus
 
