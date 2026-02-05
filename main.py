@@ -113,6 +113,8 @@ class TradingSystem:
         self.today_candidates: list[dict] = []   # 08:30 선정 후보 (10-15개)
         self.today_orders: list[dict] = []       # 09:25 최종 매수 (5-8개)
         self.current_themes: list[dict] = []     # 현재 테마 리스트
+        self.today_ai_analysis: list[dict] = []  # AI 분석 결과 (선정 이유 포함)
+        self.today_trades: list[dict] = []       # 오늘 거래 내역
         
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -308,7 +310,10 @@ class TradingSystem:
                 use_mock_data=self.test_mode
             )
             logger.info(f"   검증 통과: {len(verified)}개")
-            
+
+            # AI 분석 결과 저장 (일일 리포트용)
+            self.today_ai_analysis = verified
+
             if not verified:
                 logger.warning("AI 검증 통과 종목이 없습니다")
                 return {"success": False, "reason": "AI 검증 통과 없음"}
@@ -508,7 +513,7 @@ class TradingSystem:
                 save_to_db=True
             )
             
-            # 매수 알림
+            # 매수 알림 및 거래 내역 저장
             success_count = 0
             for order in result.get("orders", []):
                 if order.get("success"):
@@ -519,14 +524,22 @@ class TradingSystem:
                         order.get("quantity", 0),
                         order.get("price", 0)
                     )
-            
+                    # 거래 내역 저장 (일일 리포트용)
+                    self.today_trades.append({
+                        "action": "buy",
+                        "stock_code": order.get("stock_code", ""),
+                        "stock_name": order.get("stock_name", ""),
+                        "shares": order.get("quantity", 0),
+                        "price": order.get("price", 0)
+                    })
+
             # 결과 알림
             self.notifier.send_message(
                 f"✅ 09:25 매수 완료\n"
                 f"- 주문: {len(self.today_orders)}건\n"
                 f"- 성공: {success_count}건"
             )
-            
+
             return result
             
         except Exception as e:
@@ -647,15 +660,12 @@ class TradingSystem:
     async def send_daily_report(self) -> None:
         """일일 리포트 발송 (16:00)"""
         logger.info("📊 일일 리포트 생성")
-        
+
         try:
             # 현재 포트폴리오
             balance = self.trading_engine.get_balance()
             positions = balance.get("positions", [])
-            
-            # 오늘 거래
-            today_trades = []  # DB에서 조회 가능
-            
+
             # 성과 지표
             calc = PerformanceCalculator()
             metrics = {
@@ -664,12 +674,18 @@ class TradingSystem:
                 "win_rate": 0,
                 "total_return": 0
             }
-            
-            # 리포트 전송
-            self.notifier.send_daily_report(positions, metrics)
-            
+
+            # 리포트 전송 (테마 선정 이유 + AI 분석 이유 포함)
+            self.notifier.send_daily_report(
+                portfolio=positions,
+                metrics=metrics,
+                themes=self.current_themes,         # 테마 선정 이유
+                ai_analysis=self.today_ai_analysis, # AI 종목 선정 이유
+                today_trades=self.today_trades      # 오늘 거래 내역
+            )
+
             logger.info("✅ 일일 리포트 발송 완료")
-            
+
         except Exception as e:
             logger.error(f"리포트 발송 실패: {e}")
     

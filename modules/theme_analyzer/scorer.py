@@ -415,32 +415,86 @@ def score_themes(themes: list[dict]) -> list[dict]:
     """
     scored_themes = []
     
+    # 핵심 대형 테마 정의 (보너스 점수 +10)
+    MAJOR_THEMES = {
+        "반도체": 10, "2차전지": 10, "AI": 10, "인공지능": 10,
+        "배터리": 8, "자율주행": 8, "로봇": 8, "바이오": 8,
+        "방산": 7, "원자력": 7, "조선": 7, "건설": 6,
+        "플랫폼": 6, "클라우드": 6, "게임": 5, "엔터": 5
+    }
+
     for theme in themes:
+        theme_name = theme.get("name", theme.get("theme", ""))
+
         # 필드명 호환성 처리
         avg_return = theme.get("avg_return_5d") or theme.get("avg_change_rate", 0)
-        
-        # 직접 점수 계산 (버그 회피)
+
+        # 1. 모멘텀 점수 (30점)
         m_score = calculate_momentum_score(avg_return) if avg_return else 0
-        s_score = 0  # 수급 데이터 없음
-        n_score = 0  # 뉴스 데이터 없음
-        a_score = 0  # AI 데이터 없음
-        
-        total = m_score + s_score + n_score + a_score
-        
-        # 등급 산정
-        if total >= 20:
+
+        # 2. 수급 점수 (25점) - 실제 데이터 사용
+        foreign_ratio = theme.get("foreign_buy_ratio", 0)
+        inst_ratio = theme.get("institution_buy_ratio", 0)
+        foreign_amt = theme.get("foreign_net_buy", 0)
+        inst_amt = theme.get("institution_net_buy", 0)
+
+        if foreign_ratio or inst_ratio:
+            s_score = calculate_supply_score(foreign_ratio, inst_ratio)
+        elif foreign_amt or inst_amt:
+            s_score = calculate_supply_score_from_amount(foreign_amt, inst_amt)
+        else:
+            # 수급 데이터 없으면 종목수 기반 기본 점수 (대형 테마 우대)
+            stock_count = theme.get("stock_count", len(theme.get("stocks", [])))
+            s_score = min(15, stock_count * 0.8) if stock_count >= 10 else 5
+
+        # 3. 뉴스 점수 (20점)
+        news_count = theme.get("news_count", 0)
+        n_score = calculate_news_score(news_count) if news_count else 5  # 기본 5점
+
+        # 4. AI 감성 점수 (25점)
+        ai_sentiment = theme.get("ai_sentiment", 0)
+        a_score = calculate_ai_sentiment_score(ai_sentiment) if ai_sentiment else 10  # 기본 10점
+
+        # 5. 대형 테마 보너스 점수
+        bonus = 0
+        bonus_reason = ""
+        for major_name, major_bonus in MAJOR_THEMES.items():
+            if major_name in theme_name:
+                bonus = major_bonus
+                bonus_reason = f"핵심테마({major_name})"
+                break
+
+        total = m_score + s_score + n_score + a_score + bonus
+
+        # 등급 산정 (보너스 포함 기준 상향)
+        if total >= 50:
             grade = "A"
-        elif total >= 15:
+        elif total >= 40:
             grade = "B"
-        elif total >= 10:
+        elif total >= 30:
             grade = "C"
         else:
             grade = "D"
-        
+
+        # 선정 이유 생성
+        reasons = []
+        if m_score >= 20:
+            reasons.append(f"강한모멘텀({avg_return:+.1f}%)")
+        elif m_score >= 15:
+            reasons.append(f"양호한모멘텀({avg_return:+.1f}%)")
+        if s_score >= 15:
+            reasons.append("외국인/기관순매수")
+        if n_score >= 15:
+            reasons.append(f"높은화제성({news_count}건)")
+        if bonus_reason:
+            reasons.append(bonus_reason)
+
+        selection_reason = ", ".join(reasons) if reasons else "기본조건충족"
+
         # 원본 테마 정보에 점수 추가
         scored_theme = {
             **theme,
-            "theme": theme.get("name", theme.get("theme", "")),
+            "theme": theme_name,
             "total_score": round(total, 2),
             "score": round(total, 2),
             "momentum": round(m_score, 2),
@@ -448,7 +502,9 @@ def score_themes(themes: list[dict]) -> list[dict]:
             "supply_score": round(s_score, 2),
             "news_score": round(n_score, 2),
             "ai_score": round(a_score, 2),
-            "grade": grade
+            "bonus_score": bonus,
+            "grade": grade,
+            "selection_reason": selection_reason
         }
         scored_themes.append(scored_theme)
     

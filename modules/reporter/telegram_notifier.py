@@ -339,15 +339,21 @@ class TelegramNotifier:
     def send_daily_report(
         self,
         portfolio: list[dict],
-        metrics: dict
+        metrics: dict,
+        themes: list[dict] = None,
+        ai_analysis: list[dict] = None,
+        today_trades: list[dict] = None
     ) -> bool:
         """
         일일 성과 리포트 전송
-        
+
         Args:
             portfolio: 포트폴리오
             metrics: 성과 지표
-        
+            themes: 오늘 선정된 테마 (선정 이유 포함)
+            ai_analysis: AI 분석 결과 (선정 이유 포함)
+            today_trades: 오늘 거래 내역
+
         Returns:
             전송 성공 여부
         """
@@ -362,19 +368,18 @@ class TelegramNotifier:
         )
         total_profit = total_value - total_cost
         profit_rate = (total_profit / total_cost * 100) if total_cost > 0 else 0
-        
+
         # 상위/하위 종목
         sorted_positions = sorted(
             portfolio,
             key=lambda x: x.get("profit_rate", 0),
             reverse=True
         )
-        
+
         best_3 = sorted_positions[:3]
         worst_3 = [p for p in reversed(sorted_positions[-3:]) if p.get("profit_rate", 0) < 0]
-        
-        text = f"""
-📊 *일일 성과 리포트*
+
+        text = f"""📊 *일일 성과 리포트*
 📅 {date.today()}
 
 💰 *포트폴리오*
@@ -384,19 +389,55 @@ class TelegramNotifier:
 오늘 수익: {total_profit:>+12,}원
 수익률:    {profit_rate:>+11.2f}%
 ```
-
-🔥 *Best 3*
 """
+
+        # 테마 선정 이유 추가
+        if themes:
+            text += "\n🎯 *오늘의 테마*\n"
+            for i, t in enumerate(themes[:3], 1):
+                theme_name = t.get("theme", t.get("name", ""))
+                score = t.get("total_score", t.get("score", 0))
+                reason = t.get("selection_reason", "")[:35]
+                text += f"  {i}. {theme_name} ({score:.0f}점)\n"
+                if reason:
+                    text += f"     └ {reason}\n"
+
+        # 오늘 거래 + AI 분석 이유
+        if today_trades:
+            buys = [t for t in today_trades if t.get("action") == "buy"]
+            sells = [t for t in today_trades if t.get("action") == "sell"]
+
+            if buys:
+                text += "\n🟢 *오늘 매수*\n"
+                for t in buys[:4]:
+                    stock_name = t.get('stock_name', '')
+                    # AI 분석 이유 찾기
+                    ai_reason = ""
+                    if ai_analysis:
+                        for a in ai_analysis:
+                            if a.get("stock_code") == t.get("stock_code") or a.get("stock_name") == stock_name:
+                                ai_reason = a.get("ai_summary", a.get("reason", ""))[:40]
+                                break
+                    text += f"  • {stock_name}\n"
+                    if ai_reason:
+                        text += f"    └ {ai_reason}\n"
+
+            if sells:
+                text += "\n🔴 *오늘 매도*\n"
+                for t in sells[:3]:
+                    text += f"  • {t.get('stock_name')}: {t.get('reason', '')[:25]}\n"
+
+        text += "\n🔥 *Best 3*\n"
         for i, p in enumerate(best_3, 1):
             pct = p.get("profit_rate", 0)
             text += f"  {i}. {p.get('stock_name', '')}: {pct:+.1f}%\n"
-        
+
         if worst_3:
             text += "\n😰 *Worst 3*\n"
             for i, p in enumerate(worst_3, 1):
                 pct = p.get("profit_rate", 0)
                 text += f"  {i}. {p.get('stock_name', '')}: {pct:+.1f}%\n"
-        
+
         text += f"""
 📈 *성과 지표*
   • 샤프 비율: {metrics.get('sharpe_ratio', 0):.2f}

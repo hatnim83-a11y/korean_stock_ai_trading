@@ -52,17 +52,21 @@ class ReportGenerator:
         portfolio: list[dict],
         trades: Optional[list[dict]] = None,
         metrics: Optional[dict] = None,
-        format_type: str = "text"
+        format_type: str = "text",
+        themes: Optional[list[dict]] = None,
+        ai_analysis: Optional[list[dict]] = None
     ) -> str:
         """
         일일 성과 리포트 생성
-        
+
         Args:
             portfolio: 현재 포트폴리오
             trades: 오늘 거래 내역
             metrics: 성과 지표
             format_type: 포맷 유형 ("text", "markdown", "telegram")
-        
+            themes: 선정된 테마 리스트 (선정 이유 포함)
+            ai_analysis: AI 분석 결과 리스트 (선정 이유 포함)
+
         Returns:
             리포트 문자열
         """
@@ -92,7 +96,7 @@ class ReportGenerator:
         if format_type == "telegram":
             return self._format_daily_telegram(
                 today, portfolio, total_value, total_cost, total_profit, profit_rate,
-                today_buys, today_sells, best_3, worst_3, metrics
+                today_buys, today_sells, best_3, worst_3, metrics, themes, ai_analysis
             )
         elif format_type == "markdown":
             return self._format_daily_markdown(
@@ -102,12 +106,12 @@ class ReportGenerator:
         else:
             return self._format_daily_text(
                 today, portfolio, total_value, total_cost, total_profit, profit_rate,
-                today_buys, today_sells, best_3, worst_3, metrics
+                today_buys, today_sells, best_3, worst_3, metrics, themes, ai_analysis
             )
     
     def _format_daily_text(
         self, today, portfolio, total_value, total_cost, total_profit, profit_rate,
-        buys, sells, best_3, worst_3, metrics
+        buys, sells, best_3, worst_3, metrics, themes=None, ai_analysis=None
     ) -> str:
         """텍스트 포맷"""
         lines = [
@@ -124,8 +128,24 @@ class ReportGenerator:
             f"  보유 종목:   {len(portfolio):>15}개",
             ""
         ]
-        
-        # 오늘 거래
+
+        # 테마 선정 이유 (신규 추가)
+        if themes:
+            lines.extend([
+                "🎯 오늘의 테마 (선정 이유)",
+                "-" * 40
+            ])
+            for i, t in enumerate(themes[:5], 1):
+                theme_name = t.get("theme", t.get("name", ""))
+                score = t.get("total_score", t.get("score", 0))
+                grade = t.get("grade", "")
+                reason = t.get("selection_reason", "")
+                lines.append(f"  {i}. {theme_name} ({score:.1f}점, {grade}등급)")
+                if reason:
+                    lines.append(f"     └ {reason}")
+            lines.append("")
+
+        # 오늘 거래 + AI 선정 이유
         if buys or sells:
             lines.extend([
                 "📈 오늘 거래",
@@ -134,13 +154,40 @@ class ReportGenerator:
             if buys:
                 lines.append(f"  매수: {len(buys)}건")
                 for t in buys:
-                    lines.append(f"    - {t.get('stock_name')}: {t.get('shares')}주")
+                    stock_name = t.get('stock_name', '')
+                    shares = t.get('shares', 0)
+                    # AI 분석 이유 찾기
+                    ai_reason = ""
+                    if ai_analysis:
+                        for a in ai_analysis:
+                            if a.get("stock_code") == t.get("stock_code") or a.get("stock_name") == stock_name:
+                                ai_reason = a.get("ai_summary", a.get("reason", ""))[:50]
+                                break
+                    lines.append(f"    - {stock_name}: {shares}주")
+                    if ai_reason:
+                        lines.append(f"      └ AI: {ai_reason}")
             if sells:
                 lines.append(f"  매도: {len(sells)}건")
                 for t in sells:
                     lines.append(f"    - {t.get('stock_name')}: {t.get('reason', '')}")
             lines.append("")
-        
+
+        # AI 종목 선정 상세 (신규 추가)
+        if ai_analysis and not buys:
+            lines.extend([
+                "🤖 AI 종목 분석",
+                "-" * 40
+            ])
+            for i, a in enumerate(ai_analysis[:5], 1):
+                stock_name = a.get("stock_name", "")
+                ai_score = a.get("ai_score", 0)
+                decision = a.get("decision", "")
+                reason = a.get("ai_summary", a.get("reason", ""))[:60]
+                lines.append(f"  {i}. {stock_name} (AI:{ai_score}/10, {decision})")
+                if reason:
+                    lines.append(f"     └ {reason}")
+            lines.append("")
+
         # Best/Worst
         if best_3:
             lines.extend([
@@ -151,7 +198,7 @@ class ReportGenerator:
                 pct = p.get("profit_rate", 0)
                 lines.append(f"  {i}. {p.get('stock_name', '')}: {pct:+.2f}%")
             lines.append("")
-        
+
         if worst_3:
             lines.extend([
                 "😰 손실 Top 3",
@@ -161,7 +208,7 @@ class ReportGenerator:
                 pct = p.get("profit_rate", 0)
                 lines.append(f"  {i}. {p.get('stock_name', '')}: {pct:+.2f}%")
             lines.append("")
-        
+
         # 성과 지표
         if metrics:
             lines.extend([
@@ -172,9 +219,9 @@ class ReportGenerator:
                 f"  승률:        {metrics.get('win_rate', 0):>10.1%}",
                 ""
             ])
-        
+
         lines.append("=" * 60)
-        
+
         return "\n".join(lines)
     
     def _format_daily_markdown(
@@ -214,12 +261,12 @@ class ReportGenerator:
     
     def _format_daily_telegram(
         self, today, portfolio, total_value, total_cost, total_profit, profit_rate,
-        buys, sells, best_3, worst_3, metrics
+        buys, sells, best_3, worst_3, metrics, themes=None, ai_analysis=None
     ) -> str:
         """텔레그램 마크다운 포맷"""
         # 이모지로 상태 표시
         status_emoji = "📈" if profit_rate >= 0 else "📉"
-        
+
         lines = [
             f"📊 *일일 성과 리포트*",
             f"📅 {today}",
@@ -233,18 +280,40 @@ class ReportGenerator:
             "```",
             ""
         ]
-        
-        # 오늘 거래
+
+        # 테마 선정 이유 (신규)
+        if themes:
+            lines.append("🎯 *오늘의 테마*")
+            for i, t in enumerate(themes[:3], 1):
+                theme_name = t.get("theme", t.get("name", ""))
+                score = t.get("total_score", t.get("score", 0))
+                reason = t.get("selection_reason", "")[:30]
+                lines.append(f"  {i}. {theme_name} ({score:.0f}점)")
+                if reason:
+                    lines.append(f"     └ {reason}")
+            lines.append("")
+
+        # 오늘 거래 + AI 이유
         if buys or sells:
             lines.append("📈 *오늘 거래*")
             if buys:
-                for t in buys[:3]:
-                    lines.append(f"  🟢 매수: {t.get('stock_name')}")
+                for t in buys[:4]:
+                    stock_name = t.get('stock_name', '')
+                    # AI 분석 이유 찾기
+                    ai_reason = ""
+                    if ai_analysis:
+                        for a in ai_analysis:
+                            if a.get("stock_code") == t.get("stock_code") or a.get("stock_name") == stock_name:
+                                ai_reason = a.get("ai_summary", a.get("reason", ""))[:35]
+                                break
+                    lines.append(f"  🟢 {stock_name}")
+                    if ai_reason:
+                        lines.append(f"     └ {ai_reason}")
             if sells:
                 for t in sells[:3]:
-                    lines.append(f"  🔴 매도: {t.get('stock_name')}")
+                    lines.append(f"  🔴 {t.get('stock_name')}: {t.get('reason', '')[:20]}")
             lines.append("")
-        
+
         # Best 3
         if best_3:
             lines.append("🔥 *Best 3*")
@@ -253,7 +322,7 @@ class ReportGenerator:
                 emoji = "🚀" if pct > 5 else "📈"
                 lines.append(f"  {emoji} {p.get('stock_name', '')}: {pct:+.1f}%")
             lines.append("")
-        
+
         # Worst 3
         if worst_3 and any(p.get("profit_rate", 0) < 0 for p in worst_3):
             lines.append("😰 *Worst 3*")
@@ -262,10 +331,10 @@ class ReportGenerator:
                 if pct < 0:
                     lines.append(f"  📉 {p.get('stock_name', '')}: {pct:+.1f}%")
             lines.append("")
-        
+
         # 요약
         lines.append(f"{status_emoji} 현재 {len(portfolio)}개 종목 보유 중")
-        
+
         return "\n".join(lines)
     
     # ===== 주간 리포트 =====
@@ -456,11 +525,13 @@ def generate_daily_report(
     portfolio: list[dict],
     trades: Optional[list[dict]] = None,
     metrics: Optional[dict] = None,
-    format_type: str = "text"
+    format_type: str = "text",
+    themes: Optional[list[dict]] = None,
+    ai_analysis: Optional[list[dict]] = None
 ) -> str:
     """일일 리포트 생성 (편의 함수)"""
     generator = ReportGenerator()
-    return generator.generate_daily_report(portfolio, trades, metrics, format_type)
+    return generator.generate_daily_report(portfolio, trades, metrics, format_type, themes, ai_analysis)
 
 
 def generate_weekly_report(
