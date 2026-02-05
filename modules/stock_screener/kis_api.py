@@ -171,8 +171,48 @@ class KISApi:
             "tr_id": tr_id
         }
     
+    # ===== 종목명 조회 =====
+
+    def get_stock_name(self, stock_code: str) -> str:
+        """
+        종목코드로 종목명 조회 (네이버 금융 사용)
+
+        Args:
+            stock_code: 종목코드 (6자리)
+
+        Returns:
+            종목명 (조회 실패 시 빈 문자열)
+        """
+        # 캐시에서 먼저 확인
+        if not hasattr(self, '_stock_name_cache'):
+            self._stock_name_cache = {}
+
+        if stock_code in self._stock_name_cache:
+            return self._stock_name_cache[stock_code]
+
+        try:
+            url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+            }
+            response = httpx.get(url, headers=headers, timeout=5.0, follow_redirects=True)
+
+            if response.status_code == 200:
+                # HTML에서 종목명 추출
+                import re
+                match = re.search(r'<title>([^:]+):', response.text)
+                if match:
+                    name = match.group(1).strip()
+                    self._stock_name_cache[stock_code] = name
+                    return name
+
+        except Exception as e:
+            logger.debug(f"[{stock_code}] 종목명 조회 실패: {e}")
+
+        return ""
+
     # ===== 현재가/시세 조회 =====
-    
+
     def get_current_price(self, stock_code: str) -> Optional[dict]:
         """
         주식 현재가 조회
@@ -226,10 +266,15 @@ class KISApi:
                 return None
             
             output = data.get("output", {})
-            
+
+            # 종목명: API에서 없으면 네이버에서 조회
+            stock_name = output.get("hts_kor_isnm", "")
+            if not stock_name:
+                stock_name = self.get_stock_name(stock_code)
+
             result = {
                 "code": stock_code,
-                "name": output.get("hts_kor_isnm", ""),  # 종목명
+                "name": stock_name,
                 "price": int(output.get("stck_prpr", 0)),  # 현재가
                 "change": int(output.get("prdy_vrss", 0)),  # 전일대비
                 "change_rate": float(output.get("prdy_ctrt", 0)),  # 등락률
