@@ -36,8 +36,9 @@ from modules.trading_engine.trading_engine import TradingEngine
 
 # ===== 상수 정의 =====
 CHECK_INTERVAL = 1  # 체크 간격 (초)
-TRAILING_STOP_ACTIVATION = 0.05  # 트레일링 스탑 활성화 (5% 수익 시)
-TRAILING_STOP_DISTANCE = 0.03  # 트레일링 스탑 거리 (3%)
+# 트레일링 스탑 설정은 settings에서 로드
+TRAILING_STOP_ACTIVATION = settings.MIN_PROFIT_FOR_LONG_HOLD  # 트레일링 스탑 활성화 (수익률)
+TRAILING_STOP_DISTANCE = settings.TRAILING_STOP_PERCENT  # 트레일링 스탑 거리
 
 
 @dataclass

@@ -85,7 +85,7 @@ class TradingSystem:
     
     def __init__(
         self,
-        use_mock: bool = True,
+        use_mock: bool = None,
         test_mode: bool = False
     ):
         """
@@ -95,7 +95,7 @@ class TradingSystem:
             use_mock: 모의투자 모드
             test_mode: 테스트 모드 (실제 주문 없음)
         """
-        self.use_mock = use_mock or settings.IS_MOCK
+        self.use_mock = use_mock if use_mock is not None else settings.IS_MOCK
         self.test_mode = test_mode
         
         # 컴포넌트
@@ -321,7 +321,7 @@ class TradingSystem:
             
             # 현재 잔고 확인
             balance = self.trading_engine.get_balance()
-            available_cash = balance.get("cash", settings.INITIAL_CAPITAL)
+            available_cash = balance.get("cash", settings.TOTAL_CAPITAL)
             
             # 포트폴리오 최적화 (후보 풀)
             optimization_result = await asyncio.to_thread(
@@ -517,9 +517,9 @@ class TradingSystem:
         """실시간 모니터링 시작 (V2)"""
         logger.info("=" * 70)
         logger.info("📊 실시간 모니터링 V2 시작")
-        logger.info("   - 분할 익절: +10%/+15%/+20%")
-        logger.info("   - 트레일링 스탑: 최고가 -5%")
-        logger.info("   - 보유 기간: 수익 14일, 손실 7일")
+        logger.info(f"   - 분할 익절: +{settings.TAKE_PROFIT_1:.0%}/+{settings.TAKE_PROFIT_2:.0%}/+{settings.TAKE_PROFIT_3:.0%}")
+        logger.info(f"   - 트레일링 스탑: 최고가 -{settings.TRAILING_STOP_PERCENT:.0%}")
+        logger.info(f"   - 보유 기간: 수익 {settings.MAX_HOLD_DAYS_PROFIT}일, 손실 {settings.MAX_HOLD_DAYS_LOSS}일")
         logger.info("=" * 70)
         
         self.monitor = PortfolioMonitorV2(use_mock=self.test_mode)

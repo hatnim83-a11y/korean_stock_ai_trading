@@ -44,11 +44,11 @@ from modules.portfolio_optimizer.calculators import (
 )
 
 
-# ===== 상수 정의 =====
-MAX_POSITIONS = 10  # 최대 보유 종목 수
-MIN_POSITION_WEIGHT = 0.05  # 최소 비중 5%
-MAX_POSITION_WEIGHT = 0.15  # 최대 비중 15%
-CASH_BUFFER = 0.05  # 현금 버퍼 5%
+# ===== 상수 정의 (settings에서 로드) =====
+MAX_POSITIONS = settings.MAX_POSITIONS  # 최대 보유 종목 수
+MIN_POSITION_WEIGHT = settings.MIN_POSITION_WEIGHT  # 최소 비중
+MAX_POSITION_WEIGHT = settings.MAX_POSITION_WEIGHT  # 최대 비중
+CASH_BUFFER = 0.05  # 현금 버퍼 5% (고정)
 
 
 # ===== 가중치 계산 =====
@@ -507,7 +507,7 @@ def run_daily_optimization(
     """
     # 자본금 설정
     if capital is None:
-        capital = settings.INITIAL_CAPITAL
+        capital = settings.TOTAL_CAPITAL
     
     # 1. 포트폴리오 최적화
     portfolio = optimize_portfolio(

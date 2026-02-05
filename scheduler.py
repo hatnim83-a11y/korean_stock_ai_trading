@@ -248,7 +248,7 @@ class TradingScheduler:
             self._send_error_notification("자동 매수", str(e))
     
     async def _run_monitoring_start(self) -> None:
-        """09:01 - 모니터링 시작"""
+        """09:26 - 모니터링 시작"""
         logger.info("📊 실시간 모니터링 시작")
         
         try:

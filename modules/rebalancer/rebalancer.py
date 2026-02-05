@@ -33,10 +33,10 @@ from config import settings
 from database import Database
 
 
-# ===== 상수 정의 =====
-MAX_POSITIONS = 10  # 최대 보유 종목 수
-MIN_CASH_RATIO = 0.05  # 최소 현금 비율
-SUPPLY_EXIT_THRESHOLD = -30  # 수급 이탈 기준 (외국인+기관 순매도 30억)
+# ===== 상수 정의 (settings에서 로드) =====
+MAX_POSITIONS = settings.MAX_POSITIONS  # 최대 보유 종목 수
+MIN_CASH_RATIO = 0.05  # 최소 현금 비율 (고정)
+SUPPLY_EXIT_THRESHOLD = -30  # 수급 이탈 기준 (외국인+기관 순매도 30억, 고정)
 
 
 class Rebalancer:
@@ -197,14 +197,14 @@ class Rebalancer:
             if supply_score < SUPPLY_EXIT_THRESHOLD:
                 sell_reason = f"수급 이탈 ({supply_score:.0f}억)"
             
-            # 3. 보유 기간 체크 (7일 초과)
+            # 3. 보유 기간 체크 (손실 시 최대 보유 기간 초과)
             buy_date = pos.get("date")
             if buy_date:
                 try:
                     if isinstance(buy_date, str):
                         buy_date = datetime.strptime(buy_date, "%Y-%m-%d").date()
                     holding_days = (today - buy_date).days
-                    if holding_days > 7:
+                    if holding_days > settings.MAX_HOLD_DAYS_LOSS:
                         # 수익 중이면 유지, 손실 중이면 매도 고려
                         profit_rate = pos.get("profit_rate", 0)
                         if profit_rate < 0:
