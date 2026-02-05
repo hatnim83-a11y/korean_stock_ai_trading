@@ -881,6 +881,7 @@ def main():
     parser.add_argument("--test-rotation", action="store_true", help="테마 로테이션 주기 테스트 (14일 vs 7일)")
     parser.add_argument("--test-holding", action="store_true", help="보유기간 비교 테스트 (14일/20일/25일/30일)")
     parser.add_argument("--test-themes", action="store_true", help="테마 수 비교 테스트 (2/3/4/5개)")
+    parser.add_argument("--test-stocks", action="store_true", help="테마당 종목 수 비교 테스트 (2/3/4/5개)")
     args = parser.parse_args()
 
     # ============================================================
@@ -1382,6 +1383,95 @@ def main():
         # 3개 대비 개선폭
         if best_themes != 3:
             improvement = returns[best_themes] - returns[3]
+            print(f"   3개 대비 {improvement:+.2f}% {'개선' if improvement > 0 else '하락'}")
+
+    # ============================================================
+    # 테마당 종목 수 비교 테스트: 2개 vs 3개 vs 4개 vs 5개
+    # ============================================================
+    elif args.test_stocks:
+        print("\n" + "=" * 80)
+        print("🔬 테마당 종목 수 비교 테스트: 2개 vs 3개 vs 4개 vs 5개")
+        print("=" * 80)
+        print("기준: 이익 추종 전략 + 7일 로테이션 + 3개 테마 + 14일 보유")
+        print("=" * 80)
+
+        stocks_list = [2, 3, 4, 5]
+        results = {}
+
+        # base_config에서 stocks_per_theme 제외 (중복 방지)
+        base_without_stocks = {k: v for k, v in base_config.items() if k != 'stocks_per_theme'}
+
+        for i, num_stocks in enumerate(stocks_list, 1):
+            print(f"\n{'=' * 60}")
+            print(f"📊 [{i}/{len(stocks_list)}] 테마당 {num_stocks}개 종목")
+            print("=" * 60)
+
+            config = BacktestConfig(
+                **base_without_stocks,
+                **profit_trailing_config,
+                stocks_per_theme=num_stocks,
+            )
+            bt = LiveLogicBacktester(config)
+            bt.run()
+
+            equity = pd.Series([e["equity"] for e in bt.equity_curve])
+            mdd = ((equity - equity.cummax()) / equity.cummax() * 100).min()
+
+            results[num_stocks] = {
+                'final': bt.equity_curve[-1]["equity"] if bt.equity_curve else 0,
+                'trades': len(bt.trades),
+                'mdd': mdd,
+                'wins': len([t for t in bt.trades if t.pnl > 0]),
+            }
+
+        # 비교 결과
+        initial = base_config["initial_capital"]
+        print("\n" + "=" * 80)
+        print("📈 테마당 종목 수 비교 결과")
+        print("=" * 80)
+        print(f"{'구분':<15} {'2개':>15} {'3개 (원본)':>15} {'4개':>15} {'5개':>15}")
+        print("-" * 80)
+
+        # 수익률
+        returns = {n: (results[n]['final'] - initial) / initial * 100 for n in stocks_list}
+        print(f"{'총 수익률':.<15}", end="")
+        for n in stocks_list:
+            print(f" {returns[n]:>14.2f}%", end="")
+        print()
+
+        # 최종 자산
+        print(f"{'최종 자산':.<15}", end="")
+        for n in stocks_list:
+            print(f" {results[n]['final']:>14,.0f}", end="")
+        print()
+
+        # MDD
+        print(f"{'MDD':.<15}", end="")
+        for n in stocks_list:
+            print(f" {results[n]['mdd']:>14.2f}%", end="")
+        print()
+
+        # 거래 수
+        print(f"{'총 거래':.<15}", end="")
+        for n in stocks_list:
+            print(f" {results[n]['trades']:>15}", end="")
+        print()
+
+        # 승률
+        print(f"{'승률':.<15}", end="")
+        for n in stocks_list:
+            wr = results[n]['wins'] / results[n]['trades'] * 100 if results[n]['trades'] > 0 else 0
+            print(f" {wr:>14.1f}%", end="")
+        print()
+        print("=" * 80)
+
+        # 최고 성과 찾기
+        best_stocks = max(stocks_list, key=lambda n: returns[n])
+        print(f"\n✅ 결론: 테마당 {best_stocks}개 종목이 가장 좋은 성과! (수익률 {returns[best_stocks]:.2f}%)")
+
+        # 3개 대비 개선폭
+        if best_stocks != 3:
+            improvement = returns[best_stocks] - returns[3]
             print(f"   3개 대비 {improvement:+.2f}% {'개선' if improvement > 0 else '하락'}")
 
     else:
