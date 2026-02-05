@@ -880,6 +880,7 @@ def main():
     parser.add_argument("--test-stoploss", action="store_true", help="손절률 비교 테스트 (-7% vs -5%)")
     parser.add_argument("--test-rotation", action="store_true", help="테마 로테이션 주기 테스트 (14일 vs 7일)")
     parser.add_argument("--test-holding", action="store_true", help="보유기간 비교 테스트 (14일/20일/25일/30일)")
+    parser.add_argument("--test-themes", action="store_true", help="테마 수 비교 테스트 (2/3/4/5개)")
     args = parser.parse_args()
 
     # ============================================================
@@ -1287,6 +1288,101 @@ def main():
         if best_days != 14:
             improvement = returns[best_days] - returns[14]
             print(f"   14일 대비 +{improvement:.2f}% 개선")
+
+    # ============================================================
+    # 테마 수 비교 테스트: 2개 vs 3개 vs 4개 vs 5개
+    # ============================================================
+    elif args.test_themes:
+        print("\n" + "=" * 80)
+        print("🔬 테마 수 비교 테스트: 2개 vs 3개 vs 4개 vs 5개")
+        print("=" * 80)
+        print("기준: 이익 추종 전략 + 7일 로테이션 + 14일 보유")
+        print("=" * 80)
+
+        themes_list = [2, 3, 4, 5]
+        results = {}
+
+        # base_config에서 top_themes 제외 (중복 방지)
+        base_without_themes = {k: v for k, v in base_config.items() if k != 'top_themes'}
+
+        for i, num_themes in enumerate(themes_list, 1):
+            print(f"\n{'=' * 60}")
+            print(f"📊 [{i}/{len(themes_list)}] 테마 {num_themes}개")
+            print("=" * 60)
+
+            config = BacktestConfig(
+                **base_without_themes,
+                **profit_trailing_config,
+                top_themes=num_themes,
+            )
+            bt = LiveLogicBacktester(config)
+            bt.run()
+
+            equity = pd.Series([e["equity"] for e in bt.equity_curve])
+            mdd = ((equity - equity.cummax()) / equity.cummax() * 100).min()
+
+            # 테마별 거래 수 계산
+            theme_counts = {}
+            for t in bt.trades:
+                theme_counts[t.theme] = theme_counts.get(t.theme, 0) + 1
+
+            results[num_themes] = {
+                'final': bt.equity_curve[-1]["equity"] if bt.equity_curve else 0,
+                'trades': len(bt.trades),
+                'mdd': mdd,
+                'wins': len([t for t in bt.trades if t.pnl > 0]),
+                'unique_themes': len(theme_counts),
+            }
+
+        # 비교 결과
+        initial = base_config["initial_capital"]
+        print("\n" + "=" * 80)
+        print("📈 테마 수 비교 결과")
+        print("=" * 80)
+        print(f"{'구분':<15} {'2개':>15} {'3개 (원본)':>15} {'4개':>15} {'5개':>15}")
+        print("-" * 80)
+
+        # 수익률
+        returns = {n: (results[n]['final'] - initial) / initial * 100 for n in themes_list}
+        print(f"{'총 수익률':.<15}", end="")
+        for n in themes_list:
+            print(f" {returns[n]:>14.2f}%", end="")
+        print()
+
+        # 최종 자산
+        print(f"{'최종 자산':.<15}", end="")
+        for n in themes_list:
+            print(f" {results[n]['final']:>14,.0f}", end="")
+        print()
+
+        # MDD
+        print(f"{'MDD':.<15}", end="")
+        for n in themes_list:
+            print(f" {results[n]['mdd']:>14.2f}%", end="")
+        print()
+
+        # 거래 수
+        print(f"{'총 거래':.<15}", end="")
+        for n in themes_list:
+            print(f" {results[n]['trades']:>15}", end="")
+        print()
+
+        # 승률
+        print(f"{'승률':.<15}", end="")
+        for n in themes_list:
+            wr = results[n]['wins'] / results[n]['trades'] * 100 if results[n]['trades'] > 0 else 0
+            print(f" {wr:>14.1f}%", end="")
+        print()
+        print("=" * 80)
+
+        # 최고 성과 찾기
+        best_themes = max(themes_list, key=lambda n: returns[n])
+        print(f"\n✅ 결론: {best_themes}개 테마가 가장 좋은 성과! (수익률 {returns[best_themes]:.2f}%)")
+
+        # 3개 대비 개선폭
+        if best_themes != 3:
+            improvement = returns[best_themes] - returns[3]
+            print(f"   3개 대비 {improvement:+.2f}% {'개선' if improvement > 0 else '하락'}")
 
     else:
         # ============================================================
