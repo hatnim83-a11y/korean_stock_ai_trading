@@ -360,8 +360,12 @@ class KISOrderApi:
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
         
         # 계좌번호 분리 (8자리 + 2자리)
-        cano = self.account_no[:8]
-        acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
+        # 계좌번호에서 CANO와 ACNT_PRDT_CD 추출 (하이픈 처리)
+        if "-" in self.account_no:
+            cano, acnt_prdt_cd = self.account_no.split("-")
+        else:
+            cano = self.account_no[:8]
+            acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
         
         body = {
             "CANO": cano,
@@ -443,8 +447,12 @@ class KISOrderApi:
         
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-rvsecncl"
         
-        cano = self.account_no[:8]
-        acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
+        # 계좌번호에서 CANO와 ACNT_PRDT_CD 추출 (하이픈 처리)
+        if "-" in self.account_no:
+            cano, acnt_prdt_cd = self.account_no.split("-")
+        else:
+            cano = self.account_no[:8]
+            acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
         
         body = {
             "CANO": cano,
@@ -504,8 +512,12 @@ class KISOrderApi:
         if order_date is None:
             order_date = date.today().strftime("%Y%m%d")
         
-        cano = self.account_no[:8]
-        acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
+        # 계좌번호에서 CANO와 ACNT_PRDT_CD 추출 (하이픈 처리)
+        if "-" in self.account_no:
+            cano, acnt_prdt_cd = self.account_no.split("-")
+        else:
+            cano = self.account_no[:8]
+            acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
         
         params = {
             "CANO": cano,
@@ -589,8 +601,12 @@ class KISOrderApi:
         
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
         
-        cano = self.account_no[:8]
-        acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
+        # 계좌번호에서 CANO와 ACNT_PRDT_CD 추출 (하이픈 처리)
+        if "-" in self.account_no:
+            cano, acnt_prdt_cd = self.account_no.split("-")
+        else:
+            cano = self.account_no[:8]
+            acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
         
         params = {
             "CANO": cano,
