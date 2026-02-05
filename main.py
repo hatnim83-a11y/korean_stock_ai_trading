@@ -348,15 +348,38 @@ class TradingSystem:
             # 후보 목록 출력
             logger.info("\n📋 관찰 대상 종목:")
             for i, order in enumerate(self.today_candidates[:10], 1):
-                logger.info(f"   {i}. {order.get('stock_name', order.get('code'))}")
-            
-            # 알림 발송
+                stock_name = order.get('stock_name', order.get('stock_code', 'N/A'))
+                stock_code = order.get('stock_code', '')
+                amount = order.get('amount', 0)
+                logger.info(f"   {i}. {stock_name} ({stock_code}) - {amount:,}원")
+
+            # 알림 발송 (상세 정보 포함)
             if self.notifier:
+                # 종목 목록 생성
+                stock_list = []
+                for i, order in enumerate(self.today_candidates[:8], 1):
+                    stock_name = order.get('stock_name', 'N/A')
+                    stock_code = order.get('stock_code', '')
+                    amount = order.get('amount', 0)
+                    theme = order.get('theme', '')
+                    score = order.get('final_score', 0)
+                    stock_list.append(
+                        f"{i}. {stock_name} ({stock_code})\n"
+                        f"   └ {theme} | {amount:,}원 | 점수:{score:.1f}"
+                    )
+
+                stock_text = "\n".join(stock_list)
+
                 self.notifier.send_message(
-                    f"📋 08:30 분석 완료\n"
-                    f"- 관찰 후보: {len(self.today_candidates)}개\n"
-                    f"- 09:00 장 초반 관찰 시작\n"
-                    f"- 09:25 필터링 후 매수 예정"
+                    f"📋 08:30 분석 완료\n\n"
+                    f"🎯 선정 테마: {len(themes)}개\n"
+                    f"{''.join([f'  • {t.get(\"theme\", \"\")}({t.get(\"score\", 0):.1f}점)\n' for t in themes[:5]])}\n"
+                    f"📊 관찰 후보: {len(self.today_candidates)}개\n"
+                    f"─────────────────\n"
+                    f"{stock_text}\n"
+                    f"─────────────────\n"
+                    f"⏰ 09:00 장 초반 관찰 시작\n"
+                    f"⏰ 09:25 필터링 후 매수 예정"
                 )
             
             return {
