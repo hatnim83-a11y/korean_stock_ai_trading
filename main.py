@@ -375,10 +375,18 @@ class TradingSystem:
 
                 stock_text = "\n".join(stock_list)
 
+                # 테마 목록 문자열 생성
+                theme_list = []
+                for t in themes[:5]:
+                    t_name = t.get("theme", "")
+                    t_score = t.get("score", 0)
+                    theme_list.append(f"  • {t_name}({t_score:.1f}점)")
+                theme_text = "\n".join(theme_list)
+
                 self.notifier.send_message(
                     f"📋 08:30 분석 완료\n\n"
                     f"🎯 선정 테마: {len(themes)}개\n"
-                    f"{''.join([f'  • {t.get(\"theme\", \"\")}({t.get(\"score\", 0):.1f}점)\n' for t in themes[:5]])}\n"
+                    f"{theme_text}\n\n"
                     f"📊 관찰 후보: {len(self.today_candidates)}개\n"
                     f"─────────────────\n"
                     f"{stock_text}\n"

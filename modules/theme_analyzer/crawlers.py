@@ -185,10 +185,15 @@ def crawl_naver_themes(max_pages: int = 3) -> list[dict]:
                 
                 # 최근 3일 등락률 (있는 경우)
                 three_day_rate = _safe_float(cols[2].get_text(strip=True)) if len(cols) > 2 else 0.0
-                
-                # 종목 수 (컬럼 3)
-                stock_count = int(cols[3].get_text(strip=True)) if len(cols) > 3 and cols[3].get_text(strip=True).isdigit() else 0
-                
+
+                # 종목 수 = 상승(cols[3]) + 보합(cols[4]) + 하락(cols[5])
+                stock_count = 0
+                if len(cols) >= 6:
+                    up_count = _safe_int(cols[3].get_text(strip=True))
+                    flat_count = _safe_int(cols[4].get_text(strip=True))
+                    down_count = _safe_int(cols[5].get_text(strip=True))
+                    stock_count = up_count + flat_count + down_count
+
                 themes.append({
                     "name": theme_name,
                     "stock_count": stock_count,
@@ -490,15 +495,16 @@ def crawl_multiple_theme_news(theme_names: list[str], days: int = 3) -> dict[str
 def get_predefined_themes() -> list[dict]:
     """
     자체 정의된 20개 핵심 테마 반환
-    
+
     네이버/한경에 없거나 중요한 테마를 직접 정의합니다.
-    
+
     Returns:
         테마 정보 리스트
     """
     predefined = [
         {"name": "2차전지", "category": "신성장", "keywords": ["배터리", "리튬", "전기차"]},
         {"name": "AI반도체", "category": "반도체", "keywords": ["AI칩", "HBM", "GPU"]},
+        {"name": "반도체", "category": "반도체", "keywords": ["반도체", "메모리", "파운드리"]},
         {"name": "K-방산", "category": "방위산업", "keywords": ["방산", "무기", "수출"]},
         {"name": "바이오", "category": "헬스케어", "keywords": ["신약", "임상", "바이오텍"]},
         {"name": "로봇", "category": "신성장", "keywords": ["로봇", "자동화", "휴머노이드"]},
@@ -518,7 +524,7 @@ def get_predefined_themes() -> list[dict]:
         {"name": "화학", "category": "소재", "keywords": ["화학", "석유화학", "정밀화학"]},
         {"name": "통신", "category": "통신", "keywords": ["5G", "6G", "통신장비"]},
     ]
-    
+
     return [
         {
             "name": t["name"],
@@ -530,45 +536,227 @@ def get_predefined_themes() -> list[dict]:
     ]
 
 
+def search_naver_theme(theme_name: str) -> Optional[dict]:
+    """
+    네이버 증권에서 특정 테마를 검색하여 데이터 반환
+
+    predefined 테마가 일반 크롤링에서 누락된 경우 직접 검색합니다.
+
+    Args:
+        theme_name: 검색할 테마명
+
+    Returns:
+        테마 정보 딕셔너리 또는 None
+    """
+    try:
+        # 네이버 테마 검색 URL (테마명으로 검색)
+        search_url = "https://finance.naver.com/sise/theme.naver"
+
+        response = httpx.get(
+            search_url,
+            headers=DEFAULT_HEADERS,
+            timeout=10.0,
+            follow_redirects=True
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "lxml")
+        table = soup.find("table", class_="type_1")
+
+        if not table:
+            return None
+
+        rows = table.find_all("tr")
+
+        # 테마명과 유사한 것 찾기 (부분 매칭)
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 5:
+                continue
+
+            theme_link = cols[0].find("a")
+            if not theme_link:
+                continue
+
+            found_name = theme_link.get_text(strip=True)
+
+            # 부분 매칭 (예: "2차전지" in "2차전지 관련주")
+            if theme_name in found_name or found_name in theme_name:
+                theme_url = "https://finance.naver.com" + theme_link.get("href", "")
+
+                # 등락률 추출
+                change_rate_elem = cols[1].find("span")
+                change_rate = 0.0
+                if change_rate_elem:
+                    change_text = change_rate_elem.get_text(strip=True)
+                    change_rate = _safe_float(change_text)
+                    if "하락" in cols[1].get_text() or "down" in str(cols[1]).lower():
+                        change_rate = -abs(change_rate)
+
+                # 3일 등락률
+                three_day_rate = _safe_float(cols[2].get_text(strip=True)) if len(cols) > 2 else 0.0
+
+                # 종목 수 = 상승 + 보합 + 하락
+                stock_count = 0
+                if len(cols) >= 6:
+                    stock_count = _safe_int(cols[3].get_text(strip=True)) + _safe_int(cols[4].get_text(strip=True)) + _safe_int(cols[5].get_text(strip=True))
+
+                logger.debug(f"[{theme_name}] 네이버에서 발견: {found_name} ({change_rate:+.2f}%, {stock_count}종목)")
+
+                return {
+                    "name": theme_name,  # 원래 검색한 이름 유지
+                    "naver_name": found_name,
+                    "stock_count": stock_count,
+                    "avg_change_rate": change_rate,
+                    "three_day_rate": three_day_rate,
+                    "source": "naver_search",
+                    "url": theme_url
+                }
+
+        # 전체 페이지 검색 (최대 5페이지)
+        for page in range(2, 6):
+            _random_delay()
+
+            page_url = f"{search_url}?&page={page}"
+            response = httpx.get(page_url, headers=DEFAULT_HEADERS, timeout=10.0, follow_redirects=True)
+            soup = BeautifulSoup(response.text, "lxml")
+            table = soup.find("table", class_="type_1")
+
+            if not table:
+                continue
+
+            rows = table.find_all("tr")
+
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) < 5:
+                    continue
+
+                theme_link = cols[0].find("a")
+                if not theme_link:
+                    continue
+
+                found_name = theme_link.get_text(strip=True)
+
+                if theme_name in found_name or found_name in theme_name:
+                    theme_url = "https://finance.naver.com" + theme_link.get("href", "")
+
+                    change_rate_elem = cols[1].find("span")
+                    change_rate = 0.0
+                    if change_rate_elem:
+                        change_text = change_rate_elem.get_text(strip=True)
+                        change_rate = _safe_float(change_text)
+                        if "하락" in cols[1].get_text() or "down" in str(cols[1]).lower():
+                            change_rate = -abs(change_rate)
+
+                    three_day_rate = _safe_float(cols[2].get_text(strip=True)) if len(cols) > 2 else 0.0
+
+                    # 종목 수 = 상승 + 보합 + 하락
+                    stock_count = 0
+                    if len(cols) >= 6:
+                        stock_count = _safe_int(cols[3].get_text(strip=True)) + _safe_int(cols[4].get_text(strip=True)) + _safe_int(cols[5].get_text(strip=True))
+
+                    logger.debug(f"[{theme_name}] 네이버 페이지{page}에서 발견: {found_name} ({change_rate:+.2f}%, {stock_count}종목)")
+
+                    return {
+                        "name": theme_name,
+                        "naver_name": found_name,
+                        "stock_count": stock_count,
+                        "avg_change_rate": change_rate,
+                        "three_day_rate": three_day_rate,
+                        "source": "naver_search",
+                        "url": theme_url
+                    }
+
+        logger.debug(f"[{theme_name}] 네이버에서 찾지 못함")
+        return None
+
+    except Exception as e:
+        logger.warning(f"[{theme_name}] 네이버 검색 실패: {e}")
+        return None
+
+
 # ===== 통합 크롤링 함수 =====
 
 def crawl_all_themes() -> list[dict]:
     """
     모든 소스에서 테마 데이터 통합 수집
-    
+
     네이버, 한경, 자체정의 테마를 모두 수집하여 병합합니다.
-    
+    predefined 테마는 네이버에서 실제 시장 데이터를 조회합니다.
+
     Returns:
         통합된 테마 정보 리스트
-        
+
     Example:
         >>> all_themes = crawl_all_themes()
         >>> print(f"총 {len(all_themes)}개 테마 수집")
     """
     all_themes = []
-    
+
     logger.info("🔄 전체 테마 크롤링 시작")
-    
-    # 1. 네이버 테마
+
+    # 1. 네이버 테마 (최대 5페이지로 확장)
     try:
-        naver_themes = crawl_naver_themes()
+        naver_themes = crawl_naver_themes(max_pages=5)
         all_themes.extend(naver_themes)
     except Exception as e:
         logger.error(f"네이버 테마 수집 실패: {e}")
-    
+
     _random_delay()
-    
+
     # 2. 한경 테마
     try:
         hankyung_themes = crawl_hankyung_themes()
         all_themes.extend(hankyung_themes)
     except Exception as e:
         logger.error(f"한경 테마 수집 실패: {e}")
-    
-    # 3. 자체 정의 테마
+
+    # 현재 수집된 테마명 목록
+    collected_names = {t["name"] for t in all_themes}
+
+    # 3. 자체 정의 테마 - 네이버에서 실제 데이터 조회
     predefined_themes = get_predefined_themes()
-    all_themes.extend(predefined_themes)
-    
+    enriched_count = 0
+
+    logger.info(f"📊 주요 테마 {len(predefined_themes)}개 데이터 보강 중...")
+
+    for predef in predefined_themes:
+        theme_name = predef["name"]
+
+        # 이미 수집된 테마면 스킵 (실제 데이터가 있음)
+        if theme_name in collected_names:
+            logger.debug(f"[{theme_name}] 이미 수집됨 - 스킵")
+            continue
+
+        # 네이버에서 검색하여 실제 데이터 가져오기
+        _random_delay()
+        naver_data = search_naver_theme(theme_name)
+
+        if naver_data:
+            # 네이버에서 찾은 데이터와 predefined 정보 병합
+            enriched_theme = {
+                **predef,
+                **naver_data,
+                "category": predef.get("category", "기타"),
+                "keywords": predef.get("keywords", []),
+            }
+            all_themes.append(enriched_theme)
+            enriched_count += 1
+            logger.info(f"  ✓ [{theme_name}] 데이터 보강 완료: {naver_data.get('avg_change_rate', 0):+.2f}%, {naver_data.get('stock_count', 0)}종목")
+        else:
+            # 네이버에서 못 찾으면 기본값으로 추가 (모멘텀 0점이지만 포함)
+            predef_with_defaults = {
+                **predef,
+                "avg_change_rate": 0.0,
+                "stock_count": 15,  # 주요 테마는 최소 15종목 가정
+                "source": "predefined_default"
+            }
+            all_themes.append(predef_with_defaults)
+            logger.warning(f"  ✗ [{theme_name}] 네이버 미발견 - 기본값 사용")
+
+    logger.info(f"📊 주요 테마 {enriched_count}개 데이터 보강 완료")
+
     # 중복 제거 (테마명 기준, 첫 번째 것 유지)
     seen = set()
     unique_themes = []
@@ -576,9 +764,9 @@ def crawl_all_themes() -> list[dict]:
         if theme["name"] not in seen:
             seen.add(theme["name"])
             unique_themes.append(theme)
-    
+
     logger.info(f"✅ 전체 테마 {len(unique_themes)}개 수집 완료")
-    
+
     return unique_themes
 
 
