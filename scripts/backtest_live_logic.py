@@ -879,6 +879,7 @@ def main():
     parser.add_argument("--compare", action="store_true", help="기존 vs 이익추종 비교 실행")
     parser.add_argument("--test-stoploss", action="store_true", help="손절률 비교 테스트 (-7% vs -5%)")
     parser.add_argument("--test-rotation", action="store_true", help="테마 로테이션 주기 테스트 (14일 vs 7일)")
+    parser.add_argument("--test-holding", action="store_true", help="보유기간 비교 테스트 (14일/20일/25일/30일)")
     args = parser.parse_args()
 
     # ============================================================
@@ -1182,6 +1183,110 @@ def main():
             print("\n✅ 결론: 7일 로테이션이 더 좋은 성과!")
         else:
             print("\n❌ 결론: 14일 로테이션 유지 권장")
+
+    # ============================================================
+    # 보유기간 비교 테스트: 14일 vs 20일 vs 25일 vs 30일
+    # ============================================================
+    elif args.test_holding:
+        print("\n" + "=" * 80)
+        print("🔬 수익 종목 보유기간 비교 테스트: 14일 vs 20일 vs 25일 vs 30일")
+        print("=" * 80)
+        print("기준: 이익 추종 전략 (Let Profits Run) + 7일 테마 로테이션")
+        print("=" * 80)
+
+        holding_days_list = [14, 20, 25, 30]
+        results = {}
+
+        # base_config에서 max_holding_days 제외 (중복 방지)
+        base_without_holding = {k: v for k, v in base_config.items()}
+        # profit_trailing_config에서도 max_holding_days 제외
+        trailing_without_holding = {k: v for k, v in profit_trailing_config.items() if k != 'max_holding_days'}
+
+        for i, days in enumerate(holding_days_list, 1):
+            print(f"\n{'=' * 60}")
+            print(f"📊 [{i}/{len(holding_days_list)}] 보유기간 {days}일")
+            print("=" * 60)
+
+            config = BacktestConfig(
+                **base_without_holding,
+                **trailing_without_holding,
+                max_holding_days=days,
+            )
+            bt = LiveLogicBacktester(config)
+            bt.run()
+
+            equity = pd.Series([e["equity"] for e in bt.equity_curve])
+            mdd = ((equity - equity.cummax()) / equity.cummax() * 100).min()
+
+            # 평균 보유일 계산
+            if bt.trades:
+                avg_hold = sum(t.holding_days for t in bt.trades) / len(bt.trades)
+            else:
+                avg_hold = 0
+
+            results[days] = {
+                'final': bt.equity_curve[-1]["equity"] if bt.equity_curve else 0,
+                'trades': len(bt.trades),
+                'mdd': mdd,
+                'wins': len([t for t in bt.trades if t.pnl > 0]),
+                'avg_hold': avg_hold,
+            }
+
+        # 비교 결과
+        initial = base_config["initial_capital"]
+        print("\n" + "=" * 80)
+        print("📈 보유기간 비교 결과")
+        print("=" * 80)
+        print(f"{'구분':<15} {'14일 (원본)':>15} {'20일':>15} {'25일':>15} {'30일':>15}")
+        print("-" * 80)
+
+        # 수익률
+        returns = {d: (results[d]['final'] - initial) / initial * 100 for d in holding_days_list}
+        print(f"{'총 수익률':.<15}", end="")
+        for d in holding_days_list:
+            print(f" {returns[d]:>14.2f}%", end="")
+        print()
+
+        # 최종 자산
+        print(f"{'최종 자산':.<15}", end="")
+        for d in holding_days_list:
+            print(f" {results[d]['final']:>14,.0f}", end="")
+        print()
+
+        # MDD
+        print(f"{'MDD':.<15}", end="")
+        for d in holding_days_list:
+            print(f" {results[d]['mdd']:>14.2f}%", end="")
+        print()
+
+        # 거래 수
+        print(f"{'총 거래':.<15}", end="")
+        for d in holding_days_list:
+            print(f" {results[d]['trades']:>15}", end="")
+        print()
+
+        # 평균 보유일
+        print(f"{'평균 보유일':.<15}", end="")
+        for d in holding_days_list:
+            print(f" {results[d]['avg_hold']:>14.1f}일", end="")
+        print()
+
+        # 승률
+        print(f"{'승률':.<15}", end="")
+        for d in holding_days_list:
+            wr = results[d]['wins'] / results[d]['trades'] * 100 if results[d]['trades'] > 0 else 0
+            print(f" {wr:>14.1f}%", end="")
+        print()
+        print("=" * 80)
+
+        # 최고 성과 찾기
+        best_days = max(holding_days_list, key=lambda d: returns[d])
+        print(f"\n✅ 결론: {best_days}일 보유가 가장 좋은 성과! (수익률 {returns[best_days]:.2f}%)")
+
+        # 14일 대비 개선폭
+        if best_days != 14:
+            improvement = returns[best_days] - returns[14]
+            print(f"   14일 대비 +{improvement:.2f}% 개선")
 
     else:
         # ============================================================
