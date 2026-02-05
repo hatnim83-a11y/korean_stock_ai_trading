@@ -129,7 +129,11 @@ class Settings(BaseSettings):
         default=0.40,
         description="테마당 최대 투자 비중 (40%)"
     )
-    
+    THEME_ROTATION_DAYS: int = Field(
+        default=7,
+        description="테마 로테이션 주기 (7일, 14일 대비 +75% 수익)"
+    )
+
     # ===== 보유 기간 설정 =====
     MAX_HOLD_DAYS_PROFIT: int = Field(
         default=14,

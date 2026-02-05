@@ -148,7 +148,7 @@ class BacktestConfig:
 
     # 테마 선정
     top_themes: int = 3  # 상위 N개 테마
-    theme_rotation_days: int = 14  # 테마 로테이션 주기
+    theme_rotation_days: int = 7  # 테마 로테이션 주기 (7일이 14일 대비 +75% 수익)
 
     # 종목 선정
     max_positions: int = 10  # 최대 종목 수
@@ -877,17 +877,42 @@ def main():
     parser = argparse.ArgumentParser(description="실전 로직 백테스트")
     parser.add_argument("--old-strategy", action="store_true", help="기존 전략 (고정 익절)")
     parser.add_argument("--compare", action="store_true", help="기존 vs 이익추종 비교 실행")
+    parser.add_argument("--test-stoploss", action="store_true", help="손절률 비교 테스트 (-7% vs -5%)")
+    parser.add_argument("--test-rotation", action="store_true", help="테마 로테이션 주기 테스트 (14일 vs 7일)")
     args = parser.parse_args()
 
+    # ============================================================
+    # 기본 설정 (원본 - 수정 금지)
+    # ============================================================
+    # 이 설정이 백테스트의 기준선입니다.
+    # 새로운 테스트는 이 값을 기준으로 비교합니다.
+    # ============================================================
     base_config = {
         "start_date": "2023-01-01",
         "end_date": "2026-01-31",
-        "initial_capital": 100_000_000,
-        "top_themes": 3,
-        "theme_rotation_days": 14,
-        "max_positions": 10,
-        "stocks_per_theme": 3,
-        "stop_loss_pct": -0.07,
+        "initial_capital": 100_000_000,  # 1억원
+        "top_themes": 3,                  # 상위 3개 테마
+        "theme_rotation_days": 7,         # 테마 로테이션 1주 (14일 대비 +75% 수익)
+        "max_positions": 10,              # 최대 10종목
+        "stocks_per_theme": 3,            # 테마당 3종목
+        "stop_loss_pct": -0.07,           # 손절 -7% (원본)
+    }
+
+    # ============================================================
+    # 이익 추종 전략 기본 설정 (최적화 완료)
+    # 백테스트 결과: +261.66%, CAGR 51.70%, MDD -9.88%
+    # ============================================================
+    profit_trailing_config = {
+        "enable_profit_trailing": True,
+        "enable_fixed_take_profit": False,
+        "enable_partial_profit": False,
+        "max_holding_days": 14,
+        "trail_activation_pct": 0.08,    # +8%에서 트레일링 시작
+        "trail_level1_pct": 0.05,        # L1: 고점 -5%
+        "trail_level2_threshold": 0.15,  # +15%에서 L2
+        "trail_level2_pct": 0.03,        # L2: 고점 -3%
+        "trail_level3_threshold": 0.25,  # +25%에서 L3
+        "trail_level3_pct": 0.02,        # L3: 고점 -2%
     }
 
     if args.compare:
@@ -980,9 +1005,190 @@ def main():
         print(f"{'승률':.<20} {win_rate_old:>14.1f}% {win_rate_new:>14.1f}% {win_rate_new - win_rate_old:>+14.1f}%")
         print("=" * 70)
 
+    # ============================================================
+    # 손절률 비교 테스트: -7% vs -5%
+    # ============================================================
+    elif args.test_stoploss:
+        print("\n" + "=" * 70)
+        print("🔬 손절률 비교 테스트: -7% vs -5%")
+        print("=" * 70)
+        print("기준: 이익 추종 전략 (Let Profits Run)")
+        print("=" * 70)
+
+        results = {}
+
+        # base_config에서 stop_loss_pct 제외한 설정 생성
+        base_without_stoploss = {k: v for k, v in base_config.items() if k != 'stop_loss_pct'}
+
+        # 1. 원본: 손절 -7%
+        print("\n" + "=" * 60)
+        print("📊 [1/2] 손절 -7% (원본)")
+        print("=" * 60)
+        config_7pct = BacktestConfig(
+            **base_without_stoploss,
+            **profit_trailing_config,
+            stop_loss_pct=-0.07,  # 원본: -7%
+        )
+        bt_7pct = LiveLogicBacktester(config_7pct)
+        bt_7pct.run()
+
+        equity_7pct = pd.Series([e["equity"] for e in bt_7pct.equity_curve])
+        mdd_7pct = ((equity_7pct - equity_7pct.cummax()) / equity_7pct.cummax() * 100).min()
+        avg_loss_7pct = np.mean([t.pnl_pct for t in bt_7pct.trades if t.pnl < 0]) if bt_7pct.trades else 0
+
+        results['7pct'] = {
+            'final': bt_7pct.equity_curve[-1]["equity"] if bt_7pct.equity_curve else 0,
+            'trades': len(bt_7pct.trades),
+            'mdd': mdd_7pct,
+            'wins': len([t for t in bt_7pct.trades if t.pnl > 0]),
+            'losses': len([t for t in bt_7pct.trades if t.pnl <= 0]),
+            'avg_loss': avg_loss_7pct,
+        }
+
+        # 2. 테스트: 손절 -5%
+        print("\n" + "=" * 60)
+        print("📊 [2/2] 손절 -5% (테스트)")
+        print("=" * 60)
+        config_5pct = BacktestConfig(
+            **base_without_stoploss,
+            **profit_trailing_config,
+            stop_loss_pct=-0.05,  # 테스트: -5%
+        )
+        bt_5pct = LiveLogicBacktester(config_5pct)
+        bt_5pct.run()
+
+        equity_5pct = pd.Series([e["equity"] for e in bt_5pct.equity_curve])
+        mdd_5pct = ((equity_5pct - equity_5pct.cummax()) / equity_5pct.cummax() * 100).min()
+        avg_loss_5pct = np.mean([t.pnl_pct for t in bt_5pct.trades if t.pnl < 0]) if bt_5pct.trades else 0
+
+        results['5pct'] = {
+            'final': bt_5pct.equity_curve[-1]["equity"] if bt_5pct.equity_curve else 0,
+            'trades': len(bt_5pct.trades),
+            'mdd': mdd_5pct,
+            'wins': len([t for t in bt_5pct.trades if t.pnl > 0]),
+            'losses': len([t for t in bt_5pct.trades if t.pnl <= 0]),
+            'avg_loss': avg_loss_5pct,
+        }
+
+        # 비교 결과
+        initial = base_config["initial_capital"]
+        print("\n" + "=" * 70)
+        print("📈 손절률 비교 결과")
+        print("=" * 70)
+        print(f"{'구분':<20} {'손절 -7%':>15} {'손절 -5%':>15} {'차이':>15}")
+        print("-" * 70)
+
+        ret_7pct = (results['7pct']['final'] - initial) / initial * 100
+        ret_5pct = (results['5pct']['final'] - initial) / initial * 100
+        print(f"{'총 수익률':.<20} {ret_7pct:>14.2f}% {ret_5pct:>14.2f}% {ret_5pct - ret_7pct:>+14.2f}%")
+        print(f"{'최종 자산':.<20} {results['7pct']['final']:>14,.0f} {results['5pct']['final']:>14,.0f} {results['5pct']['final'] - results['7pct']['final']:>+14,.0f}")
+        print(f"{'MDD':.<20} {results['7pct']['mdd']:>14.2f}% {results['5pct']['mdd']:>14.2f}% {results['5pct']['mdd'] - results['7pct']['mdd']:>+14.2f}%")
+        print(f"{'총 거래':.<20} {results['7pct']['trades']:>15} {results['5pct']['trades']:>15} {results['5pct']['trades'] - results['7pct']['trades']:>+15}")
+        print(f"{'손절 횟수':.<20} {results['7pct']['losses']:>15} {results['5pct']['losses']:>15} {results['5pct']['losses'] - results['7pct']['losses']:>+15}")
+        print(f"{'평균 손실':.<20} {results['7pct']['avg_loss']:>14.2f}% {results['5pct']['avg_loss']:>14.2f}% {results['5pct']['avg_loss'] - results['7pct']['avg_loss']:>+14.2f}%")
+
+        win_rate_7 = results['7pct']['wins'] / results['7pct']['trades'] * 100 if results['7pct']['trades'] > 0 else 0
+        win_rate_5 = results['5pct']['wins'] / results['5pct']['trades'] * 100 if results['5pct']['trades'] > 0 else 0
+        print(f"{'승률':.<20} {win_rate_7:>14.1f}% {win_rate_5:>14.1f}% {win_rate_5 - win_rate_7:>+14.1f}%")
+        print("=" * 70)
+
+        # 결론
+        if ret_5pct > ret_7pct:
+            print("\n✅ 결론: 손절 -5%가 더 좋은 성과!")
+        else:
+            print("\n❌ 결론: 손절 -7% 유지 권장")
+
+    # ============================================================
+    # 테마 로테이션 주기 테스트: 14일 vs 7일
+    # ============================================================
+    elif args.test_rotation:
+        print("\n" + "=" * 70)
+        print("🔬 테마 로테이션 주기 테스트: 14일 vs 7일")
+        print("=" * 70)
+        print("기준: 이익 추종 전략 (Let Profits Run)")
+        print("=" * 70)
+
+        results = {}
+
+        # base_config에서 theme_rotation_days 제외 (중복 방지)
+        base_without_rotation = {k: v for k, v in base_config.items() if k != 'theme_rotation_days'}
+
+        # 1. 원본: 14일
+        print("\n" + "=" * 60)
+        print("📊 [1/2] 테마 로테이션 14일 (원본)")
+        print("=" * 60)
+        config_14d = BacktestConfig(
+            **base_without_rotation,
+            **profit_trailing_config,
+            theme_rotation_days=14,  # 원본: 14일
+        )
+        bt_14d = LiveLogicBacktester(config_14d)
+        bt_14d.run()
+
+        equity_14d = pd.Series([e["equity"] for e in bt_14d.equity_curve])
+        mdd_14d = ((equity_14d - equity_14d.cummax()) / equity_14d.cummax() * 100).min()
+
+        results['14d'] = {
+            'final': bt_14d.equity_curve[-1]["equity"] if bt_14d.equity_curve else 0,
+            'trades': len(bt_14d.trades),
+            'mdd': mdd_14d,
+            'wins': len([t for t in bt_14d.trades if t.pnl > 0]),
+        }
+
+        # 2. 테스트: 7일
+        print("\n" + "=" * 60)
+        print("📊 [2/2] 테마 로테이션 7일 (테스트)")
+        print("=" * 60)
+        config_7d = BacktestConfig(
+            **base_without_rotation,
+            **profit_trailing_config,
+            theme_rotation_days=7,  # 테스트: 7일
+        )
+        bt_7d = LiveLogicBacktester(config_7d)
+        bt_7d.run()
+
+        equity_7d = pd.Series([e["equity"] for e in bt_7d.equity_curve])
+        mdd_7d = ((equity_7d - equity_7d.cummax()) / equity_7d.cummax() * 100).min()
+
+        results['7d'] = {
+            'final': bt_7d.equity_curve[-1]["equity"] if bt_7d.equity_curve else 0,
+            'trades': len(bt_7d.trades),
+            'mdd': mdd_7d,
+            'wins': len([t for t in bt_7d.trades if t.pnl > 0]),
+        }
+
+        # 비교 결과
+        initial = base_config["initial_capital"]
+        print("\n" + "=" * 70)
+        print("📈 테마 로테이션 주기 비교 결과")
+        print("=" * 70)
+        print(f"{'구분':<20} {'14일 (원본)':>15} {'7일 (테스트)':>15} {'차이':>15}")
+        print("-" * 70)
+
+        ret_14d = (results['14d']['final'] - initial) / initial * 100
+        ret_7d = (results['7d']['final'] - initial) / initial * 100
+        print(f"{'총 수익률':.<20} {ret_14d:>14.2f}% {ret_7d:>14.2f}% {ret_7d - ret_14d:>+14.2f}%")
+        print(f"{'최종 자산':.<20} {results['14d']['final']:>14,.0f} {results['7d']['final']:>14,.0f} {results['7d']['final'] - results['14d']['final']:>+14,.0f}")
+        print(f"{'MDD':.<20} {results['14d']['mdd']:>14.2f}% {results['7d']['mdd']:>14.2f}% {results['7d']['mdd'] - results['14d']['mdd']:>+14.2f}%")
+        print(f"{'총 거래':.<20} {results['14d']['trades']:>15} {results['7d']['trades']:>15} {results['7d']['trades'] - results['14d']['trades']:>+15}")
+
+        win_rate_14 = results['14d']['wins'] / results['14d']['trades'] * 100 if results['14d']['trades'] > 0 else 0
+        win_rate_7 = results['7d']['wins'] / results['7d']['trades'] * 100 if results['7d']['trades'] > 0 else 0
+        print(f"{'승률':.<20} {win_rate_14:>14.1f}% {win_rate_7:>14.1f}% {win_rate_7 - win_rate_14:>+14.1f}%")
+        print("=" * 70)
+
+        # 결론
+        if ret_7d > ret_14d:
+            print("\n✅ 결론: 7일 로테이션이 더 좋은 성과!")
+        else:
+            print("\n❌ 결론: 14일 로테이션 유지 권장")
+
     else:
-        # 단일 실행 (이익 추종 전략이 기본)
+        # ============================================================
+        # 단일 실행 모드
+        # ============================================================
         if args.old_strategy:
+            # 기존 전략 (레거시 - 비교용)
             print("📊 기존 전략 (분할익절 + 트레일링)")
             config = BacktestConfig(
                 **base_config,
@@ -997,13 +1203,12 @@ def main():
                 max_holding_days=10,
             )
         else:
+            # 이익 추종 전략 (기본값 - 최적화 완료)
             print("📊 이익 추종 전략 (단계별 트레일링)")
+            print("   손절: -7%, 트레일링 L1(5%)/L2(3%)/L3(2%)")
             config = BacktestConfig(
                 **base_config,
-                enable_profit_trailing=True,
-                enable_fixed_take_profit=False,
-                enable_partial_profit=False,
-                max_holding_days=14,
+                **profit_trailing_config,
             )
 
         backtester = LiveLogicBacktester(config)
