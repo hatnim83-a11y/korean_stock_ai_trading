@@ -193,7 +193,37 @@ class Settings(BaseSettings):
         default=0.05,
         description="트레일링 스탑 비율 (최고가 대비 -5%)"
     )
-    
+
+    # ===== 이익 추종 전략 (Let Profits Run) =====
+    ENABLE_PROFIT_TRAILING: bool = Field(
+        default=True,
+        description="이익 추종 전략 활성화 (단계별 트레일링)"
+    )
+    TRAIL_ACTIVATION_PCT: float = Field(
+        default=0.08,
+        description="트레일링 시작 수익률 (+8%)"
+    )
+    TRAIL_LEVEL1_PCT: float = Field(
+        default=0.05,
+        description="레벨1 트레일링 (8~15%: 고점 대비 -5%)"
+    )
+    TRAIL_LEVEL2_THRESHOLD: float = Field(
+        default=0.15,
+        description="레벨2 진입 수익률 (+15%)"
+    )
+    TRAIL_LEVEL2_PCT: float = Field(
+        default=0.03,
+        description="레벨2 트레일링 (15~25%: 고점 대비 -3%)"
+    )
+    TRAIL_LEVEL3_THRESHOLD: float = Field(
+        default=0.25,
+        description="레벨3 진입 수익률 (+25%)"
+    )
+    TRAIL_LEVEL3_PCT: float = Field(
+        default=0.02,
+        description="레벨3 트레일링 (25%+: 고점 대비 -2%)"
+    )
+
     ATR_MULTIPLIER: float = Field(
         default=2.0,
         description="ATR 기반 손절 계산 시 배수"

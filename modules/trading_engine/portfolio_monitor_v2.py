@@ -44,6 +44,9 @@ class SellReason(Enum):
     TAKE_PROFIT_2 = "2차 익절"
     TAKE_PROFIT_3 = "3차 익절"
     TRAILING_STOP = "트레일링 스탑"
+    TRAILING_L1 = "트레일링L1"  # +8%~15%
+    TRAILING_L2 = "트레일링L2"  # +15%~25%
+    TRAILING_L3 = "트레일링L3"  # +25%+
     MAX_HOLD_DAYS = "최대 보유 기간"
     SUPPLY_EXIT = "수급 이탈"
 
@@ -62,11 +65,16 @@ class Position:
     trailing_stop: Optional[float] = None
     theme: str = ""
     buy_date: datetime = field(default_factory=datetime.now)
-    
+
     # 분할 익절 상태
     partial_1_executed: bool = False
     partial_2_executed: bool = False
     partial_3_executed: bool = False
+
+    # 이익 추종 전략 상태 (Let Profits Run)
+    trailing_active: bool = False  # 트레일링 활성화 여부
+    trailing_level: int = 0  # 트레일링 레벨 (0=미활성, 1=5%, 2=3%, 3=2%)
+    max_profit_rate: float = 0.0  # 최대 수익률 기록
     
     @property
     def profit(self) -> float:
@@ -162,31 +170,45 @@ class PortfolioMonitorV2:
     
     def _load_settings(self):
         """설정 로드"""
-        # 익절 설정
+        # 익절 설정 (레거시 - 이익 추종 전략 비활성화 시 사용)
         self.take_profit_1 = settings.TAKE_PROFIT_1
         self.take_profit_2 = settings.TAKE_PROFIT_2
         self.take_profit_3 = settings.TAKE_PROFIT_3
         self.partial_sell_ratio_1 = settings.PARTIAL_SELL_RATIO_1
         self.partial_sell_ratio_2 = settings.PARTIAL_SELL_RATIO_2
-        
-        # 트레일링 스탑
+
+        # 기존 트레일링 스탑
         self.enable_trailing_stop = settings.ENABLE_TRAILING_STOP
         self.trailing_stop_percent = settings.TRAILING_STOP_PERCENT
-        
+
+        # 이익 추종 전략 (Let Profits Run) - 새 전략
+        self.enable_profit_trailing = getattr(settings, 'ENABLE_PROFIT_TRAILING', True)
+        self.trail_activation_pct = getattr(settings, 'TRAIL_ACTIVATION_PCT', 0.08)
+        self.trail_level1_pct = getattr(settings, 'TRAIL_LEVEL1_PCT', 0.05)
+        self.trail_level2_threshold = getattr(settings, 'TRAIL_LEVEL2_THRESHOLD', 0.15)
+        self.trail_level2_pct = getattr(settings, 'TRAIL_LEVEL2_PCT', 0.03)
+        self.trail_level3_threshold = getattr(settings, 'TRAIL_LEVEL3_THRESHOLD', 0.25)
+        self.trail_level3_pct = getattr(settings, 'TRAIL_LEVEL3_PCT', 0.02)
+
         # 손절
         self.stop_loss = settings.DEFAULT_STOP_LOSS
         self.stop_loss_fast = settings.STOP_LOSS_FAST
-        
+
         # 보유 기간
         self.max_hold_days_profit = settings.MAX_HOLD_DAYS_PROFIT
         self.max_hold_days_loss = settings.MAX_HOLD_DAYS_LOSS
         self.min_profit_for_long_hold = settings.MIN_PROFIT_FOR_LONG_HOLD
-        
+
         # 수급 이탈 무시
         self.min_profit_to_ignore_supply = settings.MIN_PROFIT_TO_IGNORE_SUPPLY
-        
-        logger.info(f"설정 로드: 익절 {self.take_profit_1:.0%}/{self.take_profit_2:.0%}/{self.take_profit_3:.0%}")
-        logger.info(f"설정 로드: 트레일링 스탑 {self.trailing_stop_percent:.0%}")
+
+        if self.enable_profit_trailing:
+            logger.info("설정 로드: 이익 추종 전략 활성화")
+            logger.info(f"  - 트레일링 시작: +{self.trail_activation_pct:.0%}")
+            logger.info(f"  - L1: 5% | L2 (+{self.trail_level2_threshold:.0%}): 3% | L3 (+{self.trail_level3_threshold:.0%}): 2%")
+        else:
+            logger.info(f"설정 로드: 익절 {self.take_profit_1:.0%}/{self.take_profit_2:.0%}/{self.take_profit_3:.0%}")
+            logger.info(f"설정 로드: 트레일링 스탑 {self.trailing_stop_percent:.0%}")
     
     # ===== 포지션 관리 =====
     
@@ -284,8 +306,13 @@ class PortfolioMonitorV2:
         logger.info("=" * 70)
         logger.info("📊 포트폴리오 모니터링 V2 시작")
         logger.info(f"   포지션: {len(self.positions)}개")
-        logger.info(f"   익절: {self.take_profit_1:.0%}/{self.take_profit_2:.0%}/{self.take_profit_3:.0%}")
-        logger.info(f"   트레일링: 최고가 -{self.trailing_stop_percent:.0%}")
+        if self.enable_profit_trailing:
+            logger.info("   전략: 이익 추종 (Let Profits Run)")
+            logger.info(f"   트레일링 시작: +{self.trail_activation_pct:.0%}")
+            logger.info(f"   L1: -{self.trail_level1_pct:.0%} | L2 (+{self.trail_level2_threshold:.0%}): -{self.trail_level2_pct:.0%} | L3 (+{self.trail_level3_threshold:.0%}): -{self.trail_level3_pct:.0%}")
+        else:
+            logger.info(f"   익절: {self.take_profit_1:.0%}/{self.take_profit_2:.0%}/{self.take_profit_3:.0%}")
+            logger.info(f"   트레일링: 최고가 -{self.trailing_stop_percent:.0%}")
         logger.info("=" * 70)
         
         self._running = True
@@ -527,40 +554,95 @@ class PortfolioMonitorV2:
             self.on_partial_profit(pos, pos.current_price, stage)
     
     # ===== 트레일링 스탑 =====
-    
+
     def _update_trailing_stop(self, pos: Position) -> None:
         """
         트레일링 스탑 업데이트
-        
-        최고가 갱신 시 트레일링 스탑가 상향 조정
+
+        이익 추종 전략 활성화 시: 단계별 트레일링 (L1: 5%, L2: 3%, L3: 2%)
+        비활성화 시: 기존 고정 트레일링 (5%)
         """
-        if not self.enable_trailing_stop:
-            return
-        
         profit_rate = pos.profit_rate
-        
-        # 수익 중일 때만 활성화
-        if profit_rate > 0:
-            # 트레일링 스탑가 = 최고가 × (1 - 비율)
-            trailing_stop = pos.highest_price * (1 - self.trailing_stop_percent)
-            
-            # 기존 손절가보다 높아야 함
-            if trailing_stop > pos.stop_loss_price:
-                if pos.trailing_stop is None or trailing_stop > pos.trailing_stop:
+
+        # 최대 수익률 기록
+        if profit_rate > pos.max_profit_rate:
+            pos.max_profit_rate = profit_rate
+
+        # ===== 이익 추종 전략 (Let Profits Run) =====
+        if self.enable_profit_trailing:
+            # 트레일링 레벨 업데이트
+            old_level = pos.trailing_level
+
+            if profit_rate >= self.trail_level3_threshold:
+                # +25% 이상: 레벨 3 (2% 트레일링)
+                if pos.trailing_level < 3:
+                    pos.trailing_level = 3
+                    pos.trailing_active = True
+                    logger.info(f"🔥 {pos.stock_name} 레벨3 트레일링 활성화 (고점 -2%)")
+            elif profit_rate >= self.trail_level2_threshold:
+                # +15% 이상: 레벨 2 (3% 트레일링)
+                if pos.trailing_level < 2:
+                    pos.trailing_level = 2
+                    pos.trailing_active = True
+                    logger.info(f"📈 {pos.stock_name} 레벨2 트레일링 활성화 (고점 -3%)")
+            elif profit_rate >= self.trail_activation_pct:
+                # +8% 이상: 레벨 1 (5% 트레일링) + 본전 손절
+                if pos.trailing_level < 1:
+                    pos.trailing_level = 1
+                    pos.trailing_active = True
+                    pos.stop_loss_price = pos.buy_price  # 본전 손절로 이동
+                    logger.info(f"📊 {pos.stock_name} 트레일링L1 활성화 (고점 -5%), 본전 손절")
+
+            # 트레일링 스탑 가격 계산 (레벨별)
+            if pos.trailing_active:
+                if pos.trailing_level == 3:
+                    trail_pct = self.trail_level3_pct  # 2%
+                elif pos.trailing_level == 2:
+                    trail_pct = self.trail_level2_pct  # 3%
+                else:
+                    trail_pct = self.trail_level1_pct  # 5%
+
+                new_trailing_stop = pos.highest_price * (1 - trail_pct)
+
+                # 트레일링 스탑은 올라가기만 함 (내려가지 않음)
+                if pos.trailing_stop is None or new_trailing_stop > pos.trailing_stop:
                     old_stop = pos.trailing_stop
-                    pos.trailing_stop = trailing_stop
-                    
-                    if old_stop:
+                    pos.trailing_stop = new_trailing_stop
+
+                    if old_stop and old_level == pos.trailing_level:
                         logger.debug(
-                            f"트레일링 스탑 업데이트: {pos.stock_name} "
-                            f"{old_stop:,.0f}원 → {trailing_stop:,.0f}원 "
-                            f"(최고가: {pos.highest_price:,.0f}원)"
+                            f"트레일링 스탑 상향: {pos.stock_name} "
+                            f"{old_stop:,.0f}원 → {new_trailing_stop:,.0f}원"
                         )
-                    else:
-                        logger.info(
-                            f"트레일링 스탑 활성화: {pos.stock_name} @ {trailing_stop:,.0f}원 "
-                            f"(수익률: {profit_rate:.1%})"
-                        )
+
+                # 트레일링 스탑이 손절가보다 높으면 손절가 상향
+                if pos.trailing_stop and pos.trailing_stop > pos.stop_loss_price:
+                    pos.stop_loss_price = pos.trailing_stop
+
+        # ===== 기존 트레일링 스탑 (레거시) =====
+        else:
+            if not self.enable_trailing_stop:
+                return
+
+            # 수익 중일 때만 활성화
+            if profit_rate > 0:
+                trailing_stop = pos.highest_price * (1 - self.trailing_stop_percent)
+
+                if trailing_stop > pos.stop_loss_price:
+                    if pos.trailing_stop is None or trailing_stop > pos.trailing_stop:
+                        old_stop = pos.trailing_stop
+                        pos.trailing_stop = trailing_stop
+
+                        if old_stop:
+                            logger.debug(
+                                f"트레일링 스탑 업데이트: {pos.stock_name} "
+                                f"{old_stop:,.0f}원 → {trailing_stop:,.0f}원"
+                            )
+                        else:
+                            logger.info(
+                                f"트레일링 스탑 활성화: {pos.stock_name} @ {trailing_stop:,.0f}원 "
+                                f"(수익률: {profit_rate:.1%})"
+                            )
     
     def _check_trailing_stop(self, pos: Position) -> bool:
         """트레일링 스탑 체크"""
@@ -571,12 +653,22 @@ class PortfolioMonitorV2:
     
     async def _execute_trailing_stop(self, pos: Position) -> None:
         """트레일링 스탑 실행"""
-        logger.info(f"📉 트레일링 스탑 발동: {pos.stock_name}")
+        # 트레일링 레벨에 따른 로그 메시지
+        if pos.trailing_level == 3:
+            level_str = "L3 (2%)"
+        elif pos.trailing_level == 2:
+            level_str = "L2 (3%)"
+        elif pos.trailing_level == 1:
+            level_str = "L1 (5%)"
+        else:
+            level_str = "기본"
+
+        logger.info(f"📉 트레일링 스탑 발동: {pos.stock_name} [{level_str}]")
         logger.info(f"   현재가: {pos.current_price:,}원")
         logger.info(f"   트레일링: {pos.trailing_stop:,.0f}원")
-        logger.info(f"   최고가: {pos.highest_price:,.0f}원")
-        logger.info(f"   수익: {pos.profit_rate:.1%} (보유 {pos.hold_days}일)")
-        
+        logger.info(f"   최고가: {pos.highest_price:,.0f}원 (최대수익 {pos.max_profit_rate:.1%})")
+        logger.info(f"   청산수익: {pos.profit_rate:.1%} (보유 {pos.hold_days}일)")
+
         # 남은 수량 전량 매도
         result = self.trading_engine.execute_take_profit(
             position={
@@ -587,10 +679,10 @@ class PortfolioMonitorV2:
             },
             current_price=pos.current_price
         )
-        
+
         if result.get("success"):
             self.remove_position(pos.stock_code)
-        
+
         if self.on_trailing_stop:
             self.on_trailing_stop(pos, pos.current_price)
     
@@ -670,8 +762,11 @@ class PortfolioMonitorV2:
                 "highest_price": pos.highest_price,
                 "profit": pos.profit,
                 "profit_rate": pos.profit_rate * 100,
+                "max_profit_rate": pos.max_profit_rate * 100,
                 "stop_loss_price": pos.stop_loss_price,
                 "trailing_stop": pos.trailing_stop,
+                "trailing_level": pos.trailing_level,
+                "trailing_active": pos.trailing_active,
                 "hold_days": pos.hold_days,
                 "partial_1": pos.partial_1_executed,
                 "partial_2": pos.partial_2_executed,
@@ -690,42 +785,42 @@ class PortfolioMonitorV2:
     def display_status(self) -> None:
         """현재 상태 출력"""
         status = self.get_portfolio_status()
-        
-        print("\n" + "=" * 80)
-        print("📊 포트폴리오 현황 V2 (분할 익절 + 트레일링 스탑)")
-        print("=" * 80)
+
+        print("\n" + "=" * 90)
+        print("📊 포트폴리오 현황 V2 (이익 추종 전략)")
+        print("=" * 90)
         print(f"  총 평가액: {status['total_value']:>12,.0f}원")
         print(f"  총 투자액: {status['total_cost']:>12,.0f}원")
         print(f"  총 수익금: {status['total_profit']:>+12,.0f}원")
         print(f"  수익률:    {status['profit_rate']:>+12.2f}%")
-        print("-" * 80)
-        print(f"{'종목':<10} {'현재가':>10} {'수익률':>8} {'남은수량':>8} {'보유일':>6} {'익절단계':>8} {'트레일링':>10}")
-        print("-" * 80)
-        
+        print("-" * 90)
+        print(f"{'종목':<10} {'현재가':>10} {'수익률':>8} {'최대':>6} {'남은수량':>8} {'보유일':>6} {'트레일링':>12}")
+        print("-" * 90)
+
         for pos in status["positions"]:
-            # 익절 단계 표시
-            partial_stage = ""
-            if pos["partial_3"]:
-                partial_stage = "3차완료"
-            elif pos["partial_2"]:
-                partial_stage = "2차완료"
-            elif pos["partial_1"]:
-                partial_stage = "1차완료"
+            # 트레일링 레벨 표시
+            if pos.get("trailing_level", 0) == 3:
+                trailing_str = f"L3 {pos['trailing_stop']:,.0f}" if pos['trailing_stop'] else "L3"
+            elif pos.get("trailing_level", 0) == 2:
+                trailing_str = f"L2 {pos['trailing_stop']:,.0f}" if pos['trailing_stop'] else "L2"
+            elif pos.get("trailing_level", 0) == 1:
+                trailing_str = f"L1 {pos['trailing_stop']:,.0f}" if pos['trailing_stop'] else "L1"
+            elif pos['trailing_stop']:
+                trailing_str = f"{pos['trailing_stop']:,.0f}"
             else:
-                partial_stage = "-"
-            
-            # 트레일링 스탑 표시
-            trailing = f"{pos['trailing_stop']:,.0f}" if pos['trailing_stop'] else "-"
-            
+                trailing_str = "-"
+
+            max_profit = pos.get('max_profit_rate', pos['profit_rate'])
+
             print(f"{pos['stock_name']:<9} "
                   f"{pos['current_price']:>10,} "
                   f"{pos['profit_rate']:>+7.2f}% "
+                  f"{max_profit:>+5.1f}% "
                   f"{pos['remaining_shares']:>6}/{pos['shares']:<2} "
                   f"{pos['hold_days']:>5}일 "
-                  f"{partial_stage:>8} "
-                  f"{trailing:>10}")
-        
-        print("=" * 80)
+                  f"{trailing_str:>12}")
+
+        print("=" * 90)
 
 
 # ===== 직접 실행 시 테스트 =====
