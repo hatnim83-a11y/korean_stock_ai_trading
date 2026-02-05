@@ -118,12 +118,12 @@ class Settings(BaseSettings):
     
     # ===== 포트폴리오 제약 조건 =====
     MIN_POSITION_WEIGHT: float = Field(
-        default=0.03,
-        description="종목당 최소 투자 비중 (3%)"
+        default=0.05,
+        description="종목당 최소 투자 비중 (5%)"
     )
     MAX_POSITION_WEIGHT: float = Field(
-        default=0.15,
-        description="종목당 최대 투자 비중 (15%)"
+        default=0.25,
+        description="종목당 최대 투자 비중 (25%)"
     )
     MAX_THEME_WEIGHT: float = Field(
         default=0.40,
