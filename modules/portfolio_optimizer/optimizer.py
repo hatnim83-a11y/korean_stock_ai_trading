@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 from modules.portfolio_optimizer.calculators import (
     calculate_volatility,
@@ -462,7 +462,7 @@ def save_portfolio_to_db(
                 pos.get("final_score", 0),
                 pos.get("ai_sentiment", 0),
                 pos.get("weight", 0),
-                datetime.now().isoformat()
+                now_kst().isoformat()
             ))
         
         db.conn.commit()

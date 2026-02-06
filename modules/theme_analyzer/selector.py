@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 
 
 # ===== 설정 로드 =====
@@ -193,7 +193,7 @@ def format_theme_report(themes: list[dict]) -> str:
     
     lines = []
     lines.append("━" * 55)
-    lines.append(f"📊 테마 분석 결과 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
+    lines.append(f"📊 테마 분석 결과 ({now_kst().strftime('%Y-%m-%d %H:%M')})")
     lines.append("━" * 55)
     
     for i, theme in enumerate(themes, 1):

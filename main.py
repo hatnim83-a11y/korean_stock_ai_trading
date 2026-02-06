@@ -44,7 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 from scheduler import TradingScheduler
 
@@ -138,7 +138,7 @@ class TradingSystem:
         logger.info("=" * 70)
         logger.info("🚀 한국 주식 AI 스윙 트레이딩 시스템")
         logger.info("=" * 70)
-        logger.info(f"   시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"   시작 시간: {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST")
         logger.info(f"   모드: {'모의투자' if self.use_mock else '실전투자'}")
         logger.info(f"   테스트: {'활성화' if self.test_mode else '비활성화'}")
         logger.info("=" * 70)
@@ -237,8 +237,8 @@ class TradingSystem:
         logger.info("🔍 일일 분석 파이프라인 시작 (08:30)")
         logger.info("=" * 70)
         
-        start_time = datetime.now()
-        
+        start_time = now_kst()
+
         try:
             # 1. 테마 분석
             logger.info("\n📊 Step 1: 테마 분석")
@@ -343,7 +343,7 @@ class TradingSystem:
             self.today_portfolio = optimization_result["portfolio"]
             
             # 소요 시간
-            elapsed = (datetime.now() - start_time).total_seconds()
+            elapsed = (now_kst() - start_time).total_seconds()
             
             logger.info(f"\n✅ 일일 분석 완료 (소요 시간: {elapsed:.1f}초)")
             logger.info(f"   관찰 후보: {len(self.today_candidates)}개")

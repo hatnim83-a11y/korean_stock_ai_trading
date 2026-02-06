@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 # ===== 콘솔 출력 =====
@@ -426,7 +427,7 @@ def generate_optimization_report(
     report.append("=" * 70)
     report.append("📊 포트폴리오 최적화 리포트")
     report.append("=" * 70)
-    report.append(f"생성 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report.append(f"생성 일시: {now_kst().strftime('%Y-%m-%d %H:%M:%S')}")
     report.append(f"최적화 전략: {summary.get('strategy', 'score_based')}")
     report.append("")
     

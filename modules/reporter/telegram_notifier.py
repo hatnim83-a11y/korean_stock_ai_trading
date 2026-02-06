@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 
 
 class TelegramNotifier:
@@ -180,7 +180,7 @@ class TelegramNotifier:
         text = f"""
 🚀 *시스템 시작*
 
-📅 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+📅 {now_kst().strftime("%Y-%m-%d %H:%M:%S")}
 💻 한국 주식 AI 스윙 트레이딩 시스템
 
 ✅ 시스템이 정상 시작되었습니다.
@@ -192,7 +192,7 @@ class TelegramNotifier:
         text = f"""
 🔴 *시스템 종료*
 
-📅 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+📅 {now_kst().strftime("%Y-%m-%d %H:%M:%S")}
 📝 사유: {reason or "정상 종료"}
 """
         return self.send_message(text)
@@ -219,7 +219,7 @@ class TelegramNotifier:
 
 ⚠️ 유형: {error_type}
 📝 메시지: {message}
-📅 시간: {datetime.now().strftime("%H:%M:%S")}
+📅 시간: {now_kst().strftime("%H:%M:%S")}
 """
         if details:
             text += f"\n📋 상세:\n```\n{details[:500]}\n```"
@@ -264,7 +264,7 @@ class TelegramNotifier:
         if score:
             text += f"⭐ 점수: {score:.1f}\n"
         
-        text += f"📅 {datetime.now().strftime('%H:%M:%S')}"
+        text += f"📅 {now_kst().strftime('%H:%M:%S')}"
         
         return self.send_message(text)
     
@@ -310,7 +310,7 @@ class TelegramNotifier:
 매도가: {sell_price:,}원
 수익금: {profit:+,}원 ({profit_rate:+.2f}%)
 
-📅 {datetime.now().strftime('%H:%M:%S')}
+📅 {now_kst().strftime('%H:%M:%S')}
 """
         return self.send_message(text)
     
@@ -518,7 +518,7 @@ class TelegramNotifier:
         text = f"""
 🧪 *테스트 메시지*
 
-📅 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+📅 {now_kst().strftime("%Y-%m-%d %H:%M:%S")}
 ✅ 텔레그램 연결 정상!
 """
         return self.send_message(text)

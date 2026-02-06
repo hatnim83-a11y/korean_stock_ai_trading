@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 # ===== 상수 정의 =====
@@ -119,8 +120,8 @@ def fetch_dart_disclosures(
         return []
     
     # 날짜 범위 설정
-    end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    end_date = now_kst().strftime("%Y%m%d")
+    start_date = (now_kst() - timedelta(days=days)).strftime("%Y%m%d")
     
     url = f"{DART_BASE_URL}/list.json"
     
@@ -308,8 +309,8 @@ def get_mock_disclosures(stock_code: str) -> list[dict]:
     """
     테스트용 모의 공시 데이터 반환
     """
-    today = datetime.now()
-    
+    today = now_kst()
+
     mock_data = {
         "005930": [  # 삼성전자
             {

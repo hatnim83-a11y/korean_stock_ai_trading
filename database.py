@@ -23,6 +23,7 @@ from typing import Optional
 from contextlib import contextmanager
 
 from logger import logger
+from config import now_kst
 
 
 class Database:
@@ -451,7 +452,7 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade.get('date', date.today()),
-                trade.get('time', datetime.now().strftime("%H:%M:%S")),
+                trade.get('time', now_kst().strftime("%H:%M:%S")),
                 trade['stock_code'],
                 trade['stock_name'],
                 trade['action'],

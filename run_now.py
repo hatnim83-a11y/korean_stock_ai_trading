@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from logger import logger
+from config import now_kst
 from main import TradingSystem
 
 
@@ -37,7 +38,7 @@ async def run_pipeline():
 
     logger.info("=" * 70)
     logger.info("🔧 수동 즉시 실행 파이프라인")
-    logger.info(f"   시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"   시간: {now_kst().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"   모드: {'실전투자' if args.real else '모의투자'}")
     logger.info("=" * 70)
 

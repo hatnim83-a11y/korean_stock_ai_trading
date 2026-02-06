@@ -39,8 +39,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
+
+# CronTrigger용 KST timezone 문자열
+_KST_TZ = "Asia/Seoul"
 
 
 class TradingScheduler:
@@ -95,73 +98,73 @@ class TradingScheduler:
     def setup_schedules(self) -> None:
         """기본 스케줄 등록"""
         
-        # 0. 테마 로테이션 체크 (08:00) - 2주 단위
+        # 0. 테마 로테이션 체크 (KST 08:00) - 2주 단위
         self.scheduler.add_job(
             self._run_theme_check,
-            CronTrigger(hour=8, minute=0, day_of_week='mon-fri'),
+            CronTrigger(hour=8, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
             id='theme_check',
             name='테마 로테이션 체크',
             replace_existing=True
         )
-        
-        # 1. 일일 분석 (08:30) - 테마/종목 분석, 후보 선정
+
+        # 1. 일일 분석 (KST 08:30) - 테마/종목 분석, 후보 선정
         self.scheduler.add_job(
             self._run_daily_analysis,
-            CronTrigger(hour=8, minute=30, day_of_week='mon-fri'),
+            CronTrigger(hour=8, minute=30, day_of_week='mon-fri', timezone=_KST_TZ),
             id='daily_analysis',
             name='일일 분석 (후보 선정)',
             replace_existing=True
         )
-        
-        # 2. 장 초반 관찰 시작 (09:00) - 시초가/수급/거래량 관찰
+
+        # 2. 장 초반 관찰 시작 (KST 09:00) - 시초가/수급/거래량 관찰
         self.scheduler.add_job(
             self._run_morning_observation,
-            CronTrigger(hour=9, minute=0, day_of_week='mon-fri'),
+            CronTrigger(hour=9, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
             id='morning_observation',
             name='장 초반 관찰',
             replace_existing=True
         )
-        
-        # 3. 자동 매수 (09:25) - 필터링 후 최종 매수
+
+        # 3. 자동 매수 (KST 09:25) - 필터링 후 최종 매수
         self.scheduler.add_job(
             self._run_execute_buy,
-            CronTrigger(hour=9, minute=25, day_of_week='mon-fri'),
+            CronTrigger(hour=9, minute=25, day_of_week='mon-fri', timezone=_KST_TZ),
             id='execute_buy',
             name='자동 매수',
             replace_existing=True
         )
-        
-        # 4. 모니터링 시작 (09:26)
+
+        # 4. 모니터링 시작 (KST 09:26)
         self.scheduler.add_job(
             self._run_monitoring_start,
-            CronTrigger(hour=9, minute=26, day_of_week='mon-fri'),
+            CronTrigger(hour=9, minute=26, day_of_week='mon-fri', timezone=_KST_TZ),
             id='monitoring_start',
             name='모니터링 시작',
             replace_existing=True
         )
-        
-        # 5. 모니터링 종료 (15:30)
+
+        # 5. 모니터링 종료 (KST 15:30)
         self.scheduler.add_job(
             self._run_monitoring_stop,
-            CronTrigger(hour=15, minute=30, day_of_week='mon-fri'),
+            CronTrigger(hour=15, minute=30, day_of_week='mon-fri', timezone=_KST_TZ),
             id='monitoring_stop',
             name='모니터링 종료',
             replace_existing=True
         )
-        
-        # 6. 장 마감 정리 (15:35)
+
+        # 6. 장 마감 정리 (KST 15:35)
         self.scheduler.add_job(
             self._run_market_close,
-            CronTrigger(hour=15, minute=35, day_of_week='mon-fri'),
+            CronTrigger(hour=15, minute=35, day_of_week='mon-fri', timezone=_KST_TZ),
             id='market_close',
             name='장 마감 정리',
             replace_existing=True
         )
-        
-        # 7. 일일 리포트 (16:00)
+
+        # 7. 일일 리포트 (KST 16:00)
         self.scheduler.add_job(
             self._run_daily_report,
-            CronTrigger(hour=16, minute=0, day_of_week='mon-fri'),
+            CronTrigger(hour=16, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
             id='daily_report',
             name='일일 리포트',
             replace_existing=True
@@ -171,12 +174,15 @@ class TradingScheduler:
         self._print_schedules()
     
     def _print_schedules(self) -> None:
-        """등록된 스케줄 출력"""
+        """등록된 스케줄 출력 (KST 기준)"""
         jobs = self.scheduler.get_jobs()
-        
-        logger.info("\n📅 등록된 스케줄:")
+
+        logger.info("\n📅 등록된 스케줄 (KST 기준):")
         for job in jobs:
-            logger.info(f"   - {job.name}: {job.trigger}")
+            next_run = ""
+            if hasattr(job, 'next_run_time') and job.next_run_time:
+                next_run = f" → 다음 실행: {job.next_run_time.strftime('%m-%d %H:%M KST')}"
+            logger.info(f"   - {job.name}: {job.trigger}{next_run}")
     
     # ===== 작업 실행 =====
     

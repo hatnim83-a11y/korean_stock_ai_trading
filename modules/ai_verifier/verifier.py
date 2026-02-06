@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 # ===== 검증 상수 =====
@@ -268,7 +269,7 @@ def format_verification_report(stocks: list[dict]) -> str:
     
     lines = []
     lines.append("━" * 70)
-    lines.append(f"🤖 AI 검증 결과 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
+    lines.append(f"🤖 AI 검증 결과 ({now_kst().strftime('%Y-%m-%d %H:%M')})")
     lines.append("━" * 70)
     
     # 통과/미통과 분류

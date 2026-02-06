@@ -323,19 +323,20 @@ class MorningScreener:
         if wait_until is None:
             # 09:00 + observation_minutes
             wait_until = dtime(9, self.observation_minutes)
-        
-        now = datetime.now()
-        target_time = datetime.combine(now.date(), wait_until)
-        
+
+        from config import now_kst
+        now = now_kst()
+        target_time = datetime.combine(now.date(), wait_until, tzinfo=now.tzinfo)
+
         # 현재 시간이 09:00 이전이면 09:00까지 대기
-        market_open = datetime.combine(now.date(), dtime(9, 0))
+        market_open = datetime.combine(now.date(), dtime(9, 0), tzinfo=now.tzinfo)
         if now < market_open:
             wait_seconds = (market_open - now).total_seconds()
             logger.info(f"⏰ 장 시작까지 {wait_seconds/60:.1f}분 대기...")
             await asyncio.sleep(wait_seconds)
-        
+
         # 관찰 시간까지 대기
-        now = datetime.now()
+        now = now_kst()
         if now < target_time:
             wait_seconds = (target_time - now).total_seconds()
             logger.info(f"⏰ 관찰 시간까지 {wait_seconds/60:.1f}분 대기...")

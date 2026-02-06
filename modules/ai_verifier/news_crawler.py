@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 # ===== 상수 정의 =====
@@ -96,7 +97,7 @@ def fetch_stock_news(
     
     try:
         page = 1
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = now_kst() - timedelta(days=days)
         
         while len(news_list) < max_articles and page <= 5:
             params["page"] = page
@@ -136,9 +137,9 @@ def fetch_stock_news(
                     try:
                         news_date = datetime.strptime(date_str, "%Y.%m.%d %H:%M")
                     except ValueError:
-                        news_date = datetime.now()
+                        news_date = now_kst()
                 else:
-                    news_date = datetime.now()
+                    news_date = now_kst()
                 
                 # 기간 체크
                 if news_date < cutoff_date:

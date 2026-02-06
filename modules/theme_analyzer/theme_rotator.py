@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 
 
@@ -125,7 +125,7 @@ class ThemeRotator:
             start_date: 시작일
         """
         if start_date is None:
-            start_date = datetime.now()
+            start_date = now_kst()
         
         self.current_main_theme = MainTheme(
             theme_name=theme_name,
@@ -160,7 +160,7 @@ class ThemeRotator:
         self.current_main_theme.current_score = new_score
         
         # 보유 일수 계산
-        days_held = (datetime.now() - self.current_main_theme.start_date).days
+        days_held = (now_kst() - self.current_main_theme.start_date).days
         self.current_main_theme.days_held = days_held
         
         score_change = new_score - old_score
@@ -356,7 +356,7 @@ class ThemeRotator:
             reason: 이유
         """
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_kst().isoformat(),
             "theme_name": theme_name,
             "score": score,
             "action": action,
@@ -409,7 +409,7 @@ class ThemeRotator:
         Returns:
             히스토리 리스트
         """
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = now_kst() - timedelta(days=days)
         
         recent_history = [
             entry for entry in self.theme_history

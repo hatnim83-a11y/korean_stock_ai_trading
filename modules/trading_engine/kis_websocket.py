@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 
 # websockets 라이브러리 임포트
 try:
@@ -487,7 +487,7 @@ class KISWebSocket:
                 stock_code=stock_code,
                 asks=asks,
                 bids=bids,
-                timestamp=datetime.now().strftime("%H:%M:%S")
+                timestamp=now_kst().strftime("%H:%M:%S")
             )
             
             if self.on_orderbook_update:
@@ -579,7 +579,7 @@ class MockWebSocket:
                     change_rate=change_pct * 100,
                     prev_close=base_price,
                     volume=random.randint(1000, 10000),
-                    trade_time=datetime.now().strftime("%H%M%S")
+                    trade_time=now_kst().strftime("%H%M%S")
                 )
                 
                 self.price_cache[code] = price_data

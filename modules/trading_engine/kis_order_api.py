@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -861,7 +861,7 @@ class MockOrderApi:
         order = {
             "success": True,
             "order_id": order_id,
-            "order_time": datetime.now().strftime("%H%M%S"),
+            "order_time": now_kst().strftime("%H%M%S"),
             "stock_code": stock_code,
             "quantity": quantity,
             "price": mock_price,
@@ -905,7 +905,7 @@ class MockOrderApi:
         order = {
             "success": True,
             "order_id": order_id,
-            "order_time": datetime.now().strftime("%H%M%S"),
+            "order_time": now_kst().strftime("%H%M%S"),
             "stock_code": stock_code,
             "quantity": quantity,
             "price": mock_price,

@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 # ===== 상수 정의 =====
@@ -427,7 +428,7 @@ def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
     try:
         # 네이버 뉴스 검색 URL
         # 날짜 필터: ds (시작일), de (종료일)
-        today = datetime.now()
+        today = now_kst()
         start_date = (today - timedelta(days=days)).strftime("%Y.%m.%d")
         end_date = today.strftime("%Y.%m.%d")
         

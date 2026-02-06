@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 # ===== 스크리닝 상수 =====
@@ -303,7 +304,7 @@ def format_screening_report(candidates: list[dict]) -> str:
     
     lines = []
     lines.append("━" * 70)
-    lines.append(f"📊 종목 스크리닝 결과 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
+    lines.append(f"📊 종목 스크리닝 결과 ({now_kst().strftime('%Y-%m-%d %H:%M')})")
     lines.append("━" * 70)
     
     # 테마별 그룹화

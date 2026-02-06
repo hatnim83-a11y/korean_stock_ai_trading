@@ -10,6 +10,7 @@ config.py - 환경 변수 관리 모듈
 """
 
 import os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -18,6 +19,14 @@ from typing import Optional
 
 # 프로젝트 루트 디렉토리 경로
 PROJECT_ROOT = Path(__file__).parent.absolute()
+
+# ===== KST 타임존 =====
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    """현재 한국 시간 반환 (timezone-aware)"""
+    return datetime.now(KST)
 
 
 class Settings(BaseSettings):

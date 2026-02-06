@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 from modules.trading_engine.kis_websocket import KISWebSocket, MockWebSocket, PriceData
 from modules.trading_engine.trading_engine import TradingEngine
@@ -76,7 +76,7 @@ class Position:
 @dataclass
 class MonitoringResult:
     """모니터링 결과"""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=now_kst)
     total_value: float = 0
     total_profit: float = 0
     total_profit_rate: float = 0
@@ -135,7 +135,7 @@ class PortfolioMonitor:
         
         # 상태
         self._running = False
-        self._last_check = datetime.now()
+        self._last_check = now_kst()
         
         logger.info(f"포트폴리오 모니터 초기화 ({'모의' if use_mock else '실전'})")
     
@@ -278,11 +278,12 @@ class PortfolioMonitor:
             await self._check_all_positions()
     
     def _is_market_hours(self) -> bool:
-        """장 시간 여부"""
-        now = datetime.now().time()
+        """장 시간 여부 (KST 기준)"""
+        from config import now_kst
+        now = now_kst().time()
         market_open = dt_time(9, 0)
         market_close = dt_time(15, 30)
-        
+
         return market_open <= now <= market_close
     
     def _on_price_update(self, price_data: PriceData) -> None:

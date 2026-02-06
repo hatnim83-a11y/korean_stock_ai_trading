@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 
 # WebSocket 모듈 임포트
 try:
@@ -170,23 +170,24 @@ class MorningMonitor:
             data.strength = min(100, max(0, 50 + change_rate * 5))
         
         data.update_count += 1
-        data.last_update = datetime.now().strftime("%H:%M:%S")
+        data.last_update = now_kst().strftime("%H:%M:%S")
         
         # 콜백 호출
         if self.on_data_update:
             self.on_data_update(data)
     
     def _get_trading_minutes(self) -> int:
-        """장 시작 후 경과 분"""
+        """장 시작 후 경과 분 (KST 기준)"""
         if not self._start_time:
             return 20  # 기본값
-        
-        now = datetime.now()
-        market_open = datetime.combine(now.date(), dtime(9, 0))
-        
+
+        from config import now_kst
+        now = now_kst()
+        market_open = datetime.combine(now.date(), dtime(9, 0), tzinfo=now.tzinfo)
+
         if now < market_open:
             return 0
-        
+
         return min(int((now - market_open).total_seconds() / 60), 390)
     
     async def start_monitoring(
@@ -213,7 +214,7 @@ class MorningMonitor:
         
         self.candidates = candidates
         self._running = True
-        self._start_time = datetime.now()
+        self._start_time = now_kst()
         
         # 종목 데이터 초기화
         for stock in candidates:
@@ -256,9 +257,9 @@ class MorningMonitor:
         
         logger.info("   📊 API 폴링 모드")
         
-        end_time = datetime.now().timestamp() + (duration_minutes * 60)
-        
-        while self._running and datetime.now().timestamp() < end_time:
+        end_time = now_kst().timestamp() + (duration_minutes * 60)
+
+        while self._running and now_kst().timestamp() < end_time:
             for code in list(self.realtime_data.keys()):
                 if not self._running:
                     break
@@ -277,7 +278,7 @@ class MorningMonitor:
                         data.current_price = price_data.get("price", 0)
                         data.current_volume = price_data.get("volume", 0)
                         data.update_count += 1
-                        data.last_update = datetime.now().strftime("%H:%M:%S")
+                        data.last_update = now_kst().strftime("%H:%M:%S")
                     
                     await asyncio.sleep(settings.KIS_API_DELAY)
                     

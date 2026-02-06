@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import now_kst
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -351,8 +352,8 @@ class KISApi:
         headers = self._get_headers(tr_id)
         
         # 날짜 범위 설정
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=count * 2)).strftime("%Y%m%d")
+        end_date = now_kst().strftime("%Y%m%d")
+        start_date = (now_kst() - timedelta(days=count * 2)).strftime("%Y%m%d")
         
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",

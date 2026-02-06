@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 from modules.trading_engine.kis_websocket import KISWebSocket, MockWebSocket, PriceData
 from modules.trading_engine.trading_engine import TradingEngine
@@ -64,7 +64,7 @@ class Position:
     highest_price: float = 0  # 트레일링용
     trailing_stop: Optional[float] = None
     theme: str = ""
-    buy_date: datetime = field(default_factory=datetime.now)
+    buy_date: datetime = field(default_factory=now_kst)
 
     # 분할 익절 상태
     partial_1_executed: bool = False
@@ -96,13 +96,13 @@ class Position:
     @property
     def hold_days(self) -> int:
         """보유 일수"""
-        return (datetime.now() - self.buy_date).days
+        return (now_kst() - self.buy_date).days
 
 
 @dataclass
 class MonitoringResult:
     """모니터링 결과"""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=now_kst)
     total_value: float = 0
     total_profit: float = 0
     total_profit_rate: float = 0
@@ -161,8 +161,8 @@ class PortfolioMonitorV2:
         
         # 상태
         self._running = False
-        self._last_check = datetime.now()
-        
+        self._last_check = now_kst()
+
         # 설정 로드
         self._load_settings()
         
@@ -244,7 +244,7 @@ class PortfolioMonitorV2:
             current_price=buy_price,
             highest_price=buy_price,
             theme=theme,
-            buy_date=buy_date or datetime.now()
+            buy_date=buy_date or now_kst()
         )
         
         self.positions[stock_code] = position
@@ -278,7 +278,7 @@ class PortfolioMonitorV2:
                     buy_price=item["buy_price"],
                     stop_loss_price=item["stop_loss"],
                     theme=item.get("theme", ""),
-                    buy_date=item.get("buy_date", datetime.now())
+                    buy_date=item.get("buy_date", now_kst())
                 )
             
             db.close()
@@ -349,11 +349,12 @@ class PortfolioMonitorV2:
             await self._check_all_positions()
     
     def _is_market_hours(self) -> bool:
-        """장 시간 여부"""
-        now = datetime.now().time()
+        """장 시간 여부 (KST 기준)"""
+        from config import now_kst
+        now = now_kst().time()
         market_open = dt_time(9, 0)
         market_close = dt_time(15, 30)
-        
+
         return market_open <= now <= market_close
     
     def _on_price_update(self, price_data: PriceData) -> None:
