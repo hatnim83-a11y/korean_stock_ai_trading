@@ -103,8 +103,8 @@ def select_top_themes(
             logger.debug(f"[{theme_name}] 점수 부족 ({score:.1f} < {min_score}) - 제외")
             continue
         
-        # 최소 종목 수 체크
-        if stock_count < MIN_STOCK_COUNT:
+        # 최소 종목 수 체크 (stock_count=0이면 장외시간 데이터 미제공이므로 스킵)
+        if stock_count > 0 and stock_count < MIN_STOCK_COUNT:
             logger.debug(f"[{theme_name}] 종목수 부족 ({stock_count}개 < {MIN_STOCK_COUNT}개) - 제외")
             continue
         
