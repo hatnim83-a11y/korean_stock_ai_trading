@@ -7,10 +7,14 @@ run_now.py - 수동 즉시 실행 스크립트
 사용법:
     python run_now.py --real     # 실전 투자
     python run_now.py --test     # 테스트 모드 (주문 안함)
+
+주의: systemd 서비스(trading_system)가 실행 중이면 이중 봇 방지를 위해
+      자동으로 서비스를 중지한 후 수동 실행합니다.
 """
 
 import asyncio
 import argparse
+import subprocess
 import sys
 from datetime import datetime
 
@@ -19,7 +23,45 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from logger import logger
 from config import now_kst
-from main import TradingSystem
+from main import TradingSystem, acquire_pid_lock, release_pid_lock, PID_FILE
+
+
+def check_systemd_service() -> bool:
+    """systemd 서비스 실행 여부 확인. True면 실행 중."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "trading_system"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def stop_systemd_service() -> bool:
+    """systemd 서비스 중지. 성공 시 True."""
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "stop", "trading_system"],
+            capture_output=True, text=True, timeout=15
+        )
+        return result.returncode == 0
+    except Exception as e:
+        print(f"[ERROR] 서비스 중지 실패: {e}")
+        return False
+
+
+def start_systemd_service() -> bool:
+    """systemd 서비스 시작. 성공 시 True."""
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "start", "trading_system"],
+            capture_output=True, text=True, timeout=15
+        )
+        return result.returncode == 0
+    except Exception as e:
+        print(f"[ERROR] 서비스 시작 실패: {e}")
+        return False
 
 
 async def run_pipeline():
@@ -27,6 +69,27 @@ async def run_pipeline():
     parser.add_argument("--real", action="store_true", help="실전투자 모드")
     parser.add_argument("--test", action="store_true", help="테스트 모드")
     args = parser.parse_args()
+
+    # === 이중 봇 방지 ===
+    service_was_running = False
+    if check_systemd_service():
+        print("[WARNING] systemd 서비스(trading_system)가 실행 중입니다.")
+        print("   이중 봇 방지를 위해 서비스를 중지합니다...")
+        if stop_systemd_service():
+            service_was_running = True
+            print("   [OK] 서비스 중지 완료")
+        else:
+            print("   [ERROR] 서비스 중지 실패. sudo 권한을 확인하세요.")
+            print("   수동 중지: sudo systemctl stop trading_system")
+            sys.exit(1)
+
+    # PID 락 확인
+    if not acquire_pid_lock():
+        old_pid = PID_FILE.read_text().strip() if PID_FILE.exists() else "?"
+        print(f"[ERROR] 트레이딩 시스템이 이미 실행 중입니다 (PID: {old_pid})")
+        print(f"   확인: ps -p {old_pid}")
+        print(f"   강제 해제: rm {PID_FILE}")
+        sys.exit(1)
 
     system = TradingSystem(
         use_mock=not args.real,
@@ -77,15 +140,13 @@ async def run_pipeline():
         logger.warning(f"모니터링 시작 실패: {e}")
 
     # 15:30까지 대기 (모니터가 없어도 유지)
-    import pytz
     from datetime import time as dt_time
-    kst = pytz.timezone("Asia/Seoul")
 
     try:
         while True:
-            now_kst = datetime.now(kst)
+            current = now_kst()
             # 15:30 KST 이후면 종료
-            if now_kst.time() >= dt_time(15, 30):
+            if current.time() >= dt_time(15, 30):
                 logger.info("15:30 도달 - 모니터링 종료")
                 break
             await asyncio.sleep(10)
@@ -105,6 +166,18 @@ async def run_pipeline():
         await system.send_daily_report()
     except Exception:
         pass
+
+    # PID 락 해제
+    release_pid_lock()
+
+    # systemd 서비스 복원
+    if service_was_running:
+        logger.info("\n🔄 systemd 서비스를 재시작합니다...")
+        if start_systemd_service():
+            logger.info("   [OK] 서비스 재시작 완료")
+        else:
+            logger.warning("   [WARNING] 서비스 재시작 실패!")
+            logger.warning("   수동 시작: sudo systemctl start trading_system")
 
     logger.info("\n✅ 수동 실행 완료")
 

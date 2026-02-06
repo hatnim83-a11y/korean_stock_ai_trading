@@ -35,6 +35,7 @@ main.py - 한국 주식 AI 스윙 트레이딩 시스템 메인 엔트리
 
 import asyncio
 import argparse
+import os
 import signal
 import sys
 from datetime import datetime, date
@@ -42,6 +43,9 @@ from typing import Optional
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
+
+# PID 락 파일 경로
+PID_FILE = Path(__file__).parent / "trading_system.pid"
 
 from logger import logger
 from config import settings, now_kst
@@ -734,23 +738,66 @@ def parse_args():
     return parser.parse_args()
 
 
+def acquire_pid_lock() -> bool:
+    """PID 락 파일 획득. 이미 실행 중이면 False 반환."""
+    if PID_FILE.exists():
+        try:
+            old_pid = int(PID_FILE.read_text().strip())
+            # 프로세스가 실제로 살아있는지 확인
+            os.kill(old_pid, 0)
+            # 살아있으면 이중 실행
+            return False
+        except (ProcessLookupError, ValueError):
+            # 프로세스가 죽었거나 PID 파일이 깨진 경우 → 락 재획득
+            pass
+        except PermissionError:
+            # 다른 유저 프로세스가 살아있음
+            return False
+
+    PID_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def release_pid_lock():
+    """PID 락 파일 해제."""
+    try:
+        if PID_FILE.exists():
+            # 자기 PID인 경우에만 삭제
+            stored_pid = int(PID_FILE.read_text().strip())
+            if stored_pid == os.getpid():
+                PID_FILE.unlink()
+    except Exception:
+        pass
+
+
 async def main():
     """메인 함수"""
     args = parse_args()
-    
-    # 시스템 초기화
-    system = TradingSystem(
-        use_mock=not args.real,
-        test_mode=args.test
-    )
-    
-    if args.manual:
-        # 수동 분석
-        result = await system.run_manual_analysis()
-        print(f"\n분석 결과: {result}")
-    else:
-        # 전체 시스템 실행
-        await system.start()
+
+    # PID 락 체크 (이중 실행 방지)
+    if not acquire_pid_lock():
+        old_pid = PID_FILE.read_text().strip() if PID_FILE.exists() else "?"
+        print(f"[ERROR] 트레이딩 시스템이 이미 실행 중입니다 (PID: {old_pid})")
+        print(f"   확인: ps -p {old_pid}")
+        print(f"   강제 해제: rm {PID_FILE}")
+        sys.exit(1)
+
+    try:
+        # 시스템 초기화
+        system = TradingSystem(
+            use_mock=not args.real,
+            test_mode=args.test
+        )
+
+        if args.manual:
+            # 수동 분석
+            result = await system.run_manual_analysis()
+            print(f"\n분석 결과: {result}")
+        else:
+            # 전체 시스템 실행
+            await system.start()
+    finally:
+        release_pid_lock()
 
 
 # ===== 엔트리 포인트 =====
