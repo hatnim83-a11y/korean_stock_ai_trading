@@ -301,7 +301,7 @@ class TradingScheduler:
             from modules.reporter.telegram_notifier import TelegramNotifier
             notifier = TelegramNotifier()
             notifier.send_error_alert("스케줄 에러", f"{task} 실패: {error}")
-        except:
+        except Exception:
             pass
     
     # ===== 스케줄러 제어 =====
@@ -363,7 +363,7 @@ class TradingScheduler:
         for job in jobs:
             try:
                 next_run = str(job.next_run_time) if hasattr(job, 'next_run_time') and job.next_run_time else None
-            except:
+            except Exception:
                 next_run = None
             
             job_list.append({

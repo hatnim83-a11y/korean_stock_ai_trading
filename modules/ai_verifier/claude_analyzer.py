@@ -133,22 +133,28 @@ def _parse_response(response_text: str) -> Optional[dict]:
         
         # ```json ... ``` 형식 제거
         if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
+            parts = text.split("```json")
+            if len(parts) >= 2:
+                inner = parts[1].split("```")
+                text = inner[0] if inner else parts[1]
         elif "```" in text:
             parts = text.split("```")
             if len(parts) >= 2:
                 text = parts[1]
                 if text.startswith(("json", "JSON")):
                     text = text[4:]
-        
+
         result = json.loads(text.strip())
-        
+
         # 필수 필드 검증
         if "sentiment" not in result or "recommend" not in result:
             raise ValueError("필수 필드 누락")
-        
+
         # 값 범위 검증
-        result["sentiment"] = max(0.0, min(10.0, float(result["sentiment"])))
+        try:
+            result["sentiment"] = max(0.0, min(10.0, float(result["sentiment"])))
+        except (ValueError, TypeError):
+            result["sentiment"] = 5.0
         
         if "confidence" not in result:
             result["confidence"] = 0.7

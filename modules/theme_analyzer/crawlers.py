@@ -286,7 +286,9 @@ def crawl_naver_theme_stocks(theme_url: str) -> list[dict]:
             # URL에서 종목 코드 추출
             stock_code = ""
             if "code=" in href:
-                stock_code = href.split("code=")[-1].split("&")[0]
+                import re
+                match = re.search(r'code=([^&]+)', href)
+                stock_code = match.group(1) if match else ""
             
             # 현재가
             price = _safe_int(cols[1].get_text(strip=True).replace(",", ""))

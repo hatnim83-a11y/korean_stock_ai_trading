@@ -176,10 +176,13 @@ class PerformanceCalculator:
         """
         if not portfolio_values:
             return {"mdd": 0, "mdd_start_date": None, "mdd_end_date": None}
-        
+
         # 날짜순 정렬
         sorted_values = sorted(portfolio_values, key=lambda x: x.get("date", ""))
-        
+
+        if not sorted_values:
+            return {"mdd": 0, "mdd_start_date": None, "mdd_end_date": None}
+
         peak = sorted_values[0].get("value", 0)
         peak_date = sorted_values[0].get("date")
         
@@ -355,8 +358,8 @@ class PerformanceCalculator:
             종합 성과 지표
         """
         # 기본 정보
-        if portfolio_values:
-            sorted_values = sorted(portfolio_values, key=lambda x: x.get("date", ""))
+        sorted_values = sorted(portfolio_values, key=lambda x: x.get("date", "")) if portfolio_values else []
+        if sorted_values:
             start_date = sorted_values[0].get("date")
             end_date = sorted_values[-1].get("date")
             current_value = sorted_values[-1].get("value", initial_capital)

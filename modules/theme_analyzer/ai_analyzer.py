@@ -106,27 +106,31 @@ def _parse_claude_response(response_text: str) -> dict:
         
         # ```json ... ``` 형식 제거
         if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
+            parts = text.split("```json")
+            if len(parts) >= 2:
+                inner = parts[1].split("```")
+                text = inner[0] if inner else parts[1]
         elif "```" in text:
-            # 첫 번째 코드 블록 추출
             parts = text.split("```")
             if len(parts) >= 2:
                 text = parts[1]
-                # 언어 태그 제거 (json, JSON 등)
                 if text.startswith(("json", "JSON")):
                     text = text[4:]
-        
+
         # JSON 파싱
         result = json.loads(text.strip())
-        
+
         # 필수 필드 검증
         required_fields = ["score", "reason", "outlook"]
         for field in required_fields:
             if field not in result:
                 raise ValueError(f"필수 필드 누락: {field}")
-        
+
         # score 범위 검증 (0-10)
-        result["score"] = max(0.0, min(10.0, float(result["score"])))
+        try:
+            result["score"] = max(0.0, min(10.0, float(result["score"])))
+        except (ValueError, TypeError):
+            result["score"] = 5.0
         
         # confidence 기본값
         if "confidence" not in result:

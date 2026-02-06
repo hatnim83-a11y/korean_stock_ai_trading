@@ -104,8 +104,9 @@ class MorningMonitor:
         
         # 수집 데이터
         self.realtime_data: dict[str, RealtimeStockData] = {}
+        self._data_lock = asyncio.Lock()
         self.candidates: list[dict] = []
-        
+
         # 상태
         self._running = False
         self._start_time: Optional[datetime] = None
@@ -258,14 +259,14 @@ class MorningMonitor:
         end_time = datetime.now().timestamp() + (duration_minutes * 60)
         
         while self._running and datetime.now().timestamp() < end_time:
-            for code in self.realtime_data.keys():
+            for code in list(self.realtime_data.keys()):
                 if not self._running:
                     break
-                
+
                 try:
                     # 현재가 조회
                     price_data = kis_api.get_current_price(code)
-                    if price_data:
+                    if price_data and code in self.realtime_data:
                         data = self.realtime_data[code]
                         
                         if data.open_price == 0 and price_data.get("open_price", 0) > 0:

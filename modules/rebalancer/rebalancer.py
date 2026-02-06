@@ -209,8 +209,8 @@ class Rebalancer:
                         profit_rate = pos.get("profit_rate", 0)
                         if profit_rate < 0:
                             sell_reason = f"보유 기간 초과 ({holding_days}일, 손실 중)"
-                except:
-                    pass
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"보유 기간 계산 실패: {e}")
             
             if sell_reason:
                 pos["sell_reason"] = sell_reason

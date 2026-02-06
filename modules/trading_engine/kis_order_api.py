@@ -35,6 +35,26 @@ from logger import logger
 from config import settings
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """빈 문자열이나 잘못된 값을 안전하게 int로 변환"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """빈 문자열이나 잘못된 값을 안전하게 float로 변환"""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 # ===== 상수 정의 =====
 # 주문 유형 코드
 ORDER_TYPE_MARKET = "01"  # 시장가
@@ -409,8 +429,9 @@ class KISOrderApi:
         try:
             self._rate_limit()
             response = httpx.post(url, headers=headers, json=body, timeout=10)
+            response.raise_for_status()
             data = response.json()
-            
+
             # 성공 여부 확인
             rt_cd = data.get("rt_cd", "1")
             msg = data.get("msg1", "알 수 없는 오류")
@@ -581,10 +602,10 @@ class KISOrderApi:
                         "order_id": item.get("odno", ""),
                         "stock_code": item.get("pdno", ""),
                         "stock_name": item.get("prdt_name", ""),
-                        "order_qty": int(item.get("ord_qty", 0)),
-                        "filled_qty": int(item.get("tot_ccld_qty", 0)),
-                        "order_price": int(item.get("ord_unpr", 0)),
-                        "filled_price": int(float(item.get("avg_prvs", 0))),
+                        "order_qty": _safe_int(item.get("ord_qty")),
+                        "filled_qty": _safe_int(item.get("tot_ccld_qty")),
+                        "order_price": _safe_int(item.get("ord_unpr")),
+                        "filled_price": _safe_int(_safe_float(item.get("avg_prvs"))),
                         "order_time": item.get("ord_tmd", ""),
                         "order_type": item.get("sll_buy_dvsn_cd_name", ""),
                         "status": "체결" if item.get("ord_qty") == item.get("tot_ccld_qty") else "미체결"
@@ -660,18 +681,19 @@ class KISOrderApi:
             
             if rt_cd == "0":
                 output1 = data.get("output1", [])  # 종목별
-                output2 = data.get("output2", [{}])[0]  # 합계
-                
+                output2_list = data.get("output2") or [{}]
+                output2 = output2_list[0] if output2_list else {}
+
                 # 보유 종목
                 positions = []
                 for item in output1:
-                    qty = int(item.get("hldg_qty", 0))
+                    qty = _safe_int(item.get("hldg_qty"))
                     if qty > 0:
-                        buy_price = int(float(item.get("pchs_avg_pric", 0)))
-                        current_price = int(item.get("prpr", 0))
-                        profit = int(item.get("evlu_pfls_amt", 0))
-                        profit_rate = float(item.get("evlu_pfls_rt", 0))
-                        
+                        buy_price = _safe_int(_safe_float(item.get("pchs_avg_pric")))
+                        current_price = _safe_int(item.get("prpr"))
+                        profit = _safe_int(item.get("evlu_pfls_amt"))
+                        profit_rate = _safe_float(item.get("evlu_pfls_rt"))
+
                         positions.append({
                             "stock_code": item.get("pdno", ""),
                             "stock_name": item.get("prdt_name", ""),
@@ -683,15 +705,15 @@ class KISOrderApi:
                             "profit": profit,
                             "profit_rate": profit_rate
                         })
-                
+
                 # 총계
                 result = {
-                    "total_value": int(output2.get("tot_evlu_amt", 0)),
-                    "cash": int(output2.get("dnca_tot_amt", 0)),
-                    "total_buy_amount": int(output2.get("pchs_amt_smtl_amt", 0)),
-                    "total_eval_amount": int(output2.get("evlu_amt_smtl_amt", 0)),
-                    "total_profit": int(output2.get("evlu_pfls_smtl_amt", 0)),
-                    "profit_rate": float(output2.get("tot_evlu_pfls_rt", 0)) if output2.get("tot_evlu_pfls_rt") else 0,
+                    "total_value": _safe_int(output2.get("tot_evlu_amt")),
+                    "cash": _safe_int(output2.get("dnca_tot_amt")),
+                    "total_buy_amount": _safe_int(output2.get("pchs_amt_smtl_amt")),
+                    "total_eval_amount": _safe_int(output2.get("evlu_amt_smtl_amt")),
+                    "total_profit": _safe_int(output2.get("evlu_pfls_smtl_amt")),
+                    "profit_rate": _safe_float(output2.get("tot_evlu_pfls_rt")),
                     "positions": positions,
                     "position_count": len(positions)
                 }

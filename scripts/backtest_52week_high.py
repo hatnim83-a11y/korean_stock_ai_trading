@@ -254,7 +254,7 @@ class High52WeekBacktester:
 
             # 정배열: 5일 > 20일 > 60일
             return ma5 > ma20 > ma60
-        except:
+        except Exception:
             return False
 
     def _calculate_rsi(self, df: pd.DataFrame, date: str, period: int = 14) -> Optional[float]:
@@ -280,7 +280,7 @@ class High52WeekBacktester:
             rsi = 100 - (100 / (1 + rs))
 
             return rsi
-        except:
+        except Exception:
             return None
 
     def _calculate_supply_score(self, df: pd.DataFrame, date: str) -> float:
@@ -309,7 +309,7 @@ class High52WeekBacktester:
             score = min(max(vol_increase * 100, 0), 30)
 
             return score
-        except:
+        except Exception:
             return 0
 
     def calculate_weights(self, candidates: list[dict]) -> list[dict]:
