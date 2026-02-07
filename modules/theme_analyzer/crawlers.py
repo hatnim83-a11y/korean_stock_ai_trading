@@ -1,24 +1,24 @@
 """
 crawlers.py - 테마 데이터 크롤링 모듈
 
-이 파일은 네이버 증권, 한국경제 등에서 테마 정보를 크롤링합니다.
+이 파일은 네이버 증권, KRX 테마지수 등에서 테마 정보를 크롤링합니다.
 
 주요 기능:
 - 네이버 증권 인기 테마 크롤링
-- 한국경제 테마 정보 크롤링
+- KRX 공식 테마지수 수집 (pykrx)
 - 테마별 종목 목록 수집
 - 뉴스 언급 빈도 수집
 
 사용법:
     from modules.theme_analyzer.crawlers import (
         crawl_naver_themes,
-        crawl_hankyung_themes,
+        crawl_krx_themes,
         crawl_theme_stocks,
         crawl_theme_news_count
     )
-    
+
     naver_themes = crawl_naver_themes()
-    hankyung_themes = crawl_hankyung_themes()
+    krx_themes = crawl_krx_themes()
 """
 
 import time
@@ -313,13 +313,13 @@ def crawl_naver_theme_stocks(theme_url: str) -> list[dict]:
     return stocks
 
 
-# ===== 한국경제 테마 크롤링 =====
+# ===== KRX 테마지수 크롤링 (pykrx) =====
 
-def crawl_hankyung_themes() -> list[dict]:
+def crawl_krx_themes() -> list[dict]:
     """
-    한국경제 증권 테마 크롤링
+    KRX 공식 테마지수 데이터 수집 (pykrx)
 
-    한국경제의 테마 페이지에서 테마 목록을 수집합니다.
+    KRX에서 제공하는 테마지수 42개의 등락률과 구성종목 수를 조회합니다.
 
     Returns:
         테마 정보 리스트:
@@ -327,80 +327,66 @@ def crawl_hankyung_themes() -> list[dict]:
             {
                 'name': '2차전지',
                 'avg_change_rate': 2.5,
-                'source': 'hankyung'
+                'stock_count': 15,
+                'source': 'krx'
             },
             ...
         ]
     """
     themes = []
-    urls = [
-        "https://markets.hankyung.com/stock/themes",
-        "https://markets.hankyung.com/theme",
-    ]
 
-    logger.info("📊 한국경제 테마 크롤링 시작")
-
-    response = None
-    for url in urls:
-        try:
-            response = httpx.get(
-                url,
-                headers=DEFAULT_HEADERS,
-                timeout=15.0,
-                follow_redirects=True
-            )
-            response.raise_for_status()
-            logger.debug(f"한경 테마 URL 성공: {url}")
-            break
-        except httpx.HTTPStatusError as e:
-            logger.warning(f"한경 테마 URL 실패 ({e.response.status_code}): {url}")
-            response = None
-            continue
-        except httpx.TimeoutException:
-            logger.warning(f"한경 테마 URL 타임아웃: {url}")
-            response = None
-            continue
-        except Exception as e:
-            logger.warning(f"한경 테마 URL 오류: {url} - {e}")
-            response = None
-            continue
-
-    if response is None:
-        logger.warning("한국경제 테마 크롤링: 모든 URL 실패 - 빈 리스트 반환")
-        return themes
+    logger.info("📊 KRX 테마지수 수집 시작")
 
     try:
-        soup = BeautifulSoup(response.text, "lxml")
+        from pykrx import stock
 
-        # 테마 목록 찾기 (한경 사이트 구조에 따라 조정 필요)
-        theme_items = soup.select(".theme_item, .theme-list li, [class*='theme']")
+        tickers = stock.get_index_ticker_list(market='테마')
 
-        for item in theme_items:
-            # 테마명 추출
-            name_elem = item.find("a") or item.find(class_="name") or item.find("span")
-            if not name_elem:
+        if not tickers:
+            logger.warning("KRX 테마지수 티커 조회 결과 0개")
+            return themes
+
+        # 최근 영업일 기준 5일간 데이터로 등락률 계산
+        end = datetime.now().strftime('%Y%m%d')
+        start = (datetime.now() - timedelta(days=14)).strftime('%Y%m%d')
+
+        for ticker in tickers:
+            try:
+                name = stock.get_index_ticker_name(ticker)
+
+                # OHLCV 조회
+                df = stock.get_index_ohlcv(start, end, ticker)
+                if df.empty or len(df) < 2:
+                    continue
+
+                # 최근일 등락률 계산
+                last_close = df['종가'].iloc[-1]
+                prev_close = df['종가'].iloc[-2]
+                change_rate = ((last_close - prev_close) / prev_close) * 100 if prev_close else 0
+
+                # 구성종목 수
+                try:
+                    components = stock.get_index_portfolio_deposit_file(ticker)
+                    stock_count = len(components)
+                except Exception:
+                    stock_count = 10  # 기본값
+
+                themes.append({
+                    'name': name,
+                    'avg_change_rate': round(change_rate, 2),
+                    'stock_count': stock_count,
+                    'source': 'krx',
+                })
+            except Exception as e:
+                logger.debug(f"KRX 테마 [{ticker}] 처리 실패: {e}")
                 continue
 
-            theme_name = name_elem.get_text(strip=True)
-            if not theme_name or len(theme_name) < 2:
-                continue
+        logger.info(f"✅ KRX 테마지수 {len(themes)}개 수집 완료")
 
-            # 등락률 추출
-            rate_elem = item.find(class_="rate") or item.find(class_="change")
-            change_rate = 0.0
-            if rate_elem:
-                change_rate = _safe_float(rate_elem.get_text(strip=True))
-
-            themes.append({
-                "name": theme_name,
-                "avg_change_rate": change_rate,
-                "source": "hankyung"
-            })
-
-        logger.info(f"✅ 한국경제 테마 {len(themes)}개 수집 완료")
-
+    except ImportError:
+        logger.error("pykrx 라이브러리 미설치: pip install pykrx")
     except Exception as e:
-        logger.error(f"한국경제 테마 크롤링 실패: {e}")
+        logger.error(f"KRX 테마지수 수집 실패: {e}")
 
     return themes
 
@@ -726,12 +712,12 @@ def crawl_all_themes() -> list[dict]:
 
     _random_delay()
 
-    # 2. 한경 테마
+    # 2. KRX 테마지수
     try:
-        hankyung_themes = crawl_hankyung_themes()
-        all_themes.extend(hankyung_themes)
+        krx_themes = crawl_krx_themes()
+        all_themes.extend(krx_themes)
     except Exception as e:
-        logger.error(f"한경 테마 수집 실패: {e}")
+        logger.error(f"KRX 테마 수집 실패: {e}")
 
     # 현재 수집된 테마명 목록
     collected_names = {t["name"] for t in all_themes}

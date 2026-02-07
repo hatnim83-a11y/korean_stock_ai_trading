@@ -29,7 +29,7 @@ theme_analyzer - 테마 분석 모듈
 # 크롤러
 from .crawlers import (
     crawl_naver_themes,
-    crawl_hankyung_themes,
+    crawl_krx_themes,
     crawl_naver_theme_stocks,
     crawl_theme_news_count,
     crawl_multiple_theme_news,
@@ -74,7 +74,7 @@ from .theme_rotator import (
 __all__ = [
     # 크롤러
     "crawl_naver_themes",
-    "crawl_hankyung_themes",
+    "crawl_krx_themes",
     "crawl_naver_theme_stocks",
     "crawl_theme_news_count",
     "crawl_multiple_theme_news",

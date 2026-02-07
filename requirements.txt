@@ -24,6 +24,9 @@ websockets==12.0           # 실시간 시세 수신
 beautifulsoup4==4.12.2     # HTML 파싱
 lxml==4.9.4                # XML/HTML 파서
 
+# ===== KRX 데이터 =====
+pykrx==1.0.45              # KRX 공식 데이터 (테마지수 등)
+
 # ===== AI API =====
 anthropic==0.18.1          # Claude API 클라이언트
 
