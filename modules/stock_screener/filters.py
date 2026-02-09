@@ -37,9 +37,9 @@ MIN_INSTITUTION_NET_BUY = 0  # 기관 순매수 최소 (원)
 REQUIRE_BOTH_BUYING = False  # True면 외국인+기관 모두 매수여야 함
 
 # 기술적 필터 기준
-RSI_UPPER_LIMIT = 75.0  # RSI 상한 (과열 방지)
+RSI_UPPER_LIMIT = 80.0  # RSI 상한 (과열 방지)
 RSI_LOWER_LIMIT = 30.0  # RSI 하한 (과매도)
-VOLUME_RATIO_MIN = 1.2  # 거래량 비율 하한 (20일 평균 대비)
+VOLUME_RATIO_MIN = 1.0  # 거래량 비율 하한 (20일 평균 대비)
 REQUIRE_MA_BULLISH = True  # 정배열 필수 여부
 
 # 재무 필터 기준
@@ -47,7 +47,7 @@ MAX_DEBT_RATIO = 200.0  # 최대 부채비율 (%)
 MIN_OPERATING_MARGIN = 0.0  # 최소 영업이익률 (%)
 
 # 거래 대금 필터
-MIN_TRADE_VALUE = 5_000_000_000  # 최소 거래대금 (50억원)
+MIN_TRADE_VALUE = 2_000_000_000  # 최소 거래대금 (20억원)
 
 
 # ===== 수급 필터 =====
@@ -168,9 +168,9 @@ def apply_technical_filter(
     기술적 필터 적용
     
     조건:
-    - RSI < 75 (과열 아님)
+    - RSI < 80 (과열 아님)
     - RSI > 30 (과매도 아님, 선택)
-    - 거래량 > 20일 평균 × 1.2
+    - 거래량 > 20일 평균 × 1.0
     - 이동평균선 정배열 (MA5 > MA20 > MA60, 선택)
     
     Args:
@@ -365,7 +365,7 @@ def apply_liquidity_filter(
     유동성 필터 적용
     
     조건:
-    - 거래대금 > 50억원 (유동성 확보)
+    - 거래대금 > 20억원 (유동성 확보)
     
     Args:
         stock: 종목 정보 (trade_value 필요)
@@ -469,13 +469,17 @@ def apply_all_filters(
     if all_passed:
         logger.info(f"✅ [{code}] {name} 모든 필터 통과 (점수: {result['final_score']:.1f})")
     else:
-        # 실패한 필터 목록
-        failed = []
-        if not result.get("supply_passed"): failed.append("수급")
-        if not result.get("technical_passed"): failed.append("기술")
-        if not result.get("fundamental_passed"): failed.append("재무")
-        if not result.get("liquidity_passed"): failed.append("유동성")
-        logger.debug(f"❌ [{code}] {name} 필터 미통과: {', '.join(failed)}")
+        # 실패한 필터 목록 + 세부 사유
+        failed_details = []
+        if not result.get("supply_passed"):
+            failed_details.append(f"수급({result.get('supply_reason', '?')})")
+        if not result.get("technical_passed"):
+            failed_details.append(f"기술({result.get('technical_reason', '?')})")
+        if not result.get("fundamental_passed"):
+            failed_details.append(f"재무({result.get('fundamental_reason', '?')})")
+        if not result.get("liquidity_passed"):
+            failed_details.append(f"유동성({result.get('liquidity_reason', '?')})")
+        logger.info(f"❌ [{code}] {name} 미통과: {' | '.join(failed_details)}")
     
     return result
 
