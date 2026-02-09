@@ -17,8 +17,8 @@ main.py - 한국 주식 AI 스윙 트레이딩 시스템 메인 엔트리
     python main.py --manual     # 수동 분석 실행
 
 일일 흐름:
-    08:30 - 테마 분석 → 테마 로테이션 체크 → 종목 스크리닝 → AI 검증 → 후보 10-15개 선정
-    09:00 - 장 초반 관찰 시작 (시초가/수급/거래량 모니터링)
+    08:30 - 테마 분석 (크롤링 → 점수화 → 상위 테마 선정)
+    09:05 - 종목 스크리닝 (장 시작 후 실시간 데이터) → AI 검증 → 후보 선정
     09:25 - 필터링 후 최종 매수 (5-8개)
     09:26~15:30 - 실시간 모니터링 (분할 익절/트레일링 스탑/손절)
     15:35 - 장 마감 정리
@@ -75,8 +75,8 @@ class TradingSystem:
     전체 트레이딩 파이프라인을 관리합니다.
     
     일일 흐름:
-    1. 08:30 - 테마 분석 → 종목 스크리닝 → AI 검증 → 후보 선정 (10-15개)
-    2. 09:00 - 장 초반 관찰 (시초가/수급/거래량 모니터링)
+    1. 08:30 - 테마 분석 (크롤링/점수화/상위 테마 선정)
+    2. 09:05 - 종목 스크리닝 (장 시작 후 실시간 데이터) → AI 검증 → 후보 선정
     3. 09:25 - 필터링 후 자동 매수 (5-8개)
     4. 09:26~15:30 - 실시간 모니터링 (손절/익절)
     5. 15:35 - 리밸런싱 준비
@@ -114,7 +114,8 @@ class TradingSystem:
         # 상태
         self.is_running = False
         self.today_portfolio: Optional[dict] = None
-        self.today_candidates: list[dict] = []   # 08:30 선정 후보 (10-15개)
+        self.today_themes: list[dict] = []       # 08:30 선정 테마 (09:05 스크리닝용)
+        self.today_candidates: list[dict] = []   # 09:05 선정 후보 (10-15개)
         self.today_orders: list[dict] = []       # 09:25 최종 매수 (5-8개)
         self.current_themes: list[dict] = []     # 현재 테마 리스트
         self.today_ai_analysis: list[dict] = []  # AI 분석 결과 (선정 이유 포함)
@@ -210,8 +211,8 @@ class TradingSystem:
     
     def _setup_scheduler_callbacks(self) -> None:
         """스케줄러 콜백 등록"""
-        self.scheduler.on_daily_analysis = self.run_daily_analysis       # 08:30
-        self.scheduler.on_morning_observation = self.run_morning_observation  # 09:00
+        self.scheduler.on_theme_analysis = self.run_theme_analysis       # 08:30 테마 분석
+        self.scheduler.on_stock_screening = self.run_stock_screening     # 09:05 종목 스크리닝
         self.scheduler.on_execute_buy = self.execute_buy_orders          # 09:25
         self.scheduler.on_monitoring_start = self.start_monitoring       # 09:26
         self.scheduler.on_monitoring_stop = self.stop_monitoring         # 15:30
@@ -219,55 +220,48 @@ class TradingSystem:
         self.scheduler.on_daily_report = self.send_daily_report          # 16:00
         self.scheduler.on_theme_check = self.check_theme_rotation        # 08:00 테마 체크
     
-    # ===== 일일 분석 파이프라인 =====
-    
-    async def run_daily_analysis(self) -> dict:
+    # ===== 08:30 테마 분석 (장 시작 전) =====
+
+    async def run_theme_analysis(self) -> dict:
         """
-        일일 분석 실행 (08:30)
-        
-        파이프라인:
-        0. 테마 로테이션 체크 (2주 단위)
-        1. 테마 분석 → 상위 5개 테마
-        2. 종목 스크리닝 → 후보 종목
-        3. AI 검증 → 검증 통과 종목
-        4. 후보 선정 → 10-15개 (09:00 관찰용)
-        
-        ※ 최종 매수는 09:25에 장 초반 필터링 후 실행
-        
+        테마 분석 실행 (08:30)
+
+        장 시작 전에 테마를 크롤링하고 점수화하여 상위 테마를 선정합니다.
+        종목 스크리닝은 09:05에 별도로 실행됩니다.
+
         Returns:
-            분석 결과
+            테마 분석 결과
         """
         logger.info("=" * 70)
-        logger.info("🔍 일일 분석 파이프라인 시작 (08:30)")
+        logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
-        
+
         start_time = now_kst()
 
         try:
-            # 1. 테마 분석
-            logger.info("\n📊 Step 1: 테마 분석")
+            # 1. 테마 크롤링
+            logger.info("\n📊 Step 1: 테마 크롤링")
             from modules.theme_analyzer import (
                 crawl_all_themes,
                 score_themes,
                 select_top_themes
             )
-            
-            # 테마 크롤링
+
             raw_themes = crawl_all_themes()
             logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
-            
-            # 테마 점수화
+
+            # 2. 테마 점수화
             scored_themes = score_themes(raw_themes[:20])
             logger.info(f"   점수화 완료: {len(scored_themes)}개")
-            
-            # 현재 테마 저장 (로테이션 체크용)
+
+            # 현재 테마 저장
             self.current_themes = scored_themes
-            
-            # 1-2. 테마 로테이션 체크 (2주 단위)
-            logger.info("\n🔄 Step 1-2: 테마 로테이션 체크")
+
+            # 3. 테마 로테이션 체크
+            logger.info("\n🔄 Step 2: 테마 로테이션 체크")
             should_rotate, reason = self.theme_rotator.check_rotation_needed(scored_themes)
             logger.info(f"   로테이션 필요: {should_rotate} (이유: {reason})")
-            
+
             if should_rotate:
                 new_theme = self.theme_rotator.select_new_main_theme(scored_themes)
                 if new_theme:
@@ -278,35 +272,104 @@ class TradingSystem:
                         f"- 이유: {reason}"
                     )
             else:
-                # 메인 테마가 없으면 설정
                 if self.theme_rotator.current_main_theme is None and scored_themes:
                     self.theme_rotator.set_main_theme(
                         scored_themes[0]['theme'],
                         scored_themes[0]['score']
                     )
-            
-            # 상위 테마 선정
+
+            # 4. 상위 테마 선정
             themes = select_top_themes(scored_themes, count=5)
+            self.today_themes = themes  # 09:05 스크리닝에서 사용
             logger.info(f"   선정 테마: {len(themes)}개")
-            
+
             if not themes:
                 logger.warning("선정된 테마가 없습니다")
                 return {"success": False, "reason": "테마 없음"}
-            
-            # 2. 종목 스크리닝
-            logger.info("\n📈 Step 2: 종목 스크리닝")
+
+            # 테마 목록 출력
+            for t in themes:
+                t_name = t.get("theme", "")
+                t_score = t.get("score", 0)
+                logger.info(f"   - {t_name} ({t_score:.1f}점)")
+
+            elapsed = (now_kst() - start_time).total_seconds()
+            logger.info(f"\n✅ 테마 분석 완료 ({elapsed:.1f}초)")
+            logger.info("   └─ 09:05 장 시작 후 종목 스크리닝 예정")
+
+            # 알림
+            theme_list = []
+            for t in themes[:5]:
+                t_name = t.get("theme", "")
+                t_score = t.get("score", 0)
+                theme_list.append(f"  • {t_name}({t_score:.1f}점)")
+            theme_text = "\n".join(theme_list)
+
+            self.notifier.send_message(
+                f"📊 08:30 테마 분석 완료\n\n"
+                f"🎯 선정 테마: {len(themes)}개\n"
+                f"{theme_text}\n\n"
+                f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"
+            )
+
+            return {
+                "success": True,
+                "themes": len(themes),
+                "elapsed": elapsed
+            }
+
+        except Exception as e:
+            logger.error(f"테마 분석 실패: {e}")
+            self.notifier.send_error_alert("테마 분석", str(e))
+            return {"success": False, "error": str(e)}
+
+    # ===== 09:05 종목 스크리닝 (장 시작 후) =====
+
+    async def run_stock_screening(self) -> dict:
+        """
+        종목 스크리닝 실행 (09:05)
+
+        장 시작 후 실시간 데이터로 종목 스크리닝 → AI 검증 → 후보 선정.
+        08:30 테마 분석에서 선정된 테마를 사용합니다.
+
+        Returns:
+            스크리닝 결과
+        """
+        logger.info("=" * 70)
+        logger.info("🔍 종목 스크리닝 시작 (09:05, 장 시작 후)")
+        logger.info("=" * 70)
+
+        start_time = now_kst()
+
+        # 08:30 테마 분석 결과 확인
+        themes = getattr(self, 'today_themes', None)
+        if not themes:
+            logger.warning("선정된 테마가 없습니다 (08:30 테마 분석 확인 필요)")
+            return {"success": False, "reason": "테마 없음"}
+
+        logger.info(f"   대상 테마: {len(themes)}개")
+        for t in themes:
+            logger.info(f"   - {t.get('name', t.get('theme', '?'))}")
+
+        try:
+            # 1. 종목 스크리닝 (실시간 데이터)
+            logger.info("\n📈 Step 1: 종목 스크리닝 (실시간 데이터)")
             candidates = await asyncio.to_thread(
                 run_daily_screening,
                 themes=themes
             )
             logger.info(f"   후보 종목: {len(candidates)}개")
-            
+
             if not candidates:
                 logger.warning("후보 종목이 없습니다")
+                self.notifier.send_message(
+                    f"⚠️ 09:05 스크리닝 완료 - 후보 종목 없음\n"
+                    f"- {len(themes)}개 테마에서 통과 종목 없음"
+                )
                 return {"success": False, "reason": "후보 종목 없음"}
-            
-            # 3. AI 검증
-            logger.info("\n🤖 Step 3: AI 검증")
+
+            # 2. AI 검증
+            logger.info("\n🤖 Step 2: AI 검증")
             verified = await asyncio.to_thread(
                 run_daily_verification,
                 candidates=candidates,
@@ -315,56 +378,47 @@ class TradingSystem:
             )
             logger.info(f"   검증 통과: {len(verified)}개")
 
-            # AI 분석 결과 저장 (일일 리포트용)
             self.today_ai_analysis = verified
 
             if not verified:
                 logger.warning("AI 검증 통과 종목이 없습니다")
                 return {"success": False, "reason": "AI 검증 통과 없음"}
-            
-            # 4. 후보 풀 선정 (관찰용, 기존보다 더 많이)
-            logger.info("\n📋 Step 4: 관찰 후보 선정")
-            
-            # 설정된 후보 풀 크기 (기본 15개)
+
+            # 3. 포트폴리오 최적화 및 후보 선정
+            logger.info("\n📋 Step 3: 매수 후보 선정")
+
             candidate_pool_size = settings.CANDIDATE_POOL_SIZE
-            
-            # 현재 잔고 확인
             balance = self.trading_engine.get_balance()
             available_cash = balance.get("cash", settings.TOTAL_CAPITAL)
-            
-            # 포트폴리오 최적화 (후보 풀)
+
             optimization_result = await asyncio.to_thread(
                 run_daily_optimization,
-                verified_stocks=verified[:candidate_pool_size],  # 상위 15개
+                verified_stocks=verified[:candidate_pool_size],
                 capital=available_cash,
                 strategy="score_based",
-                save_to_db=False,  # 아직 저장 안함
+                save_to_db=False,
                 use_mock_data=self.test_mode
             )
-            
-            # 후보 저장 (09:00 관찰용)
+
             self.today_candidates = optimization_result["orders"]
             self.today_portfolio = optimization_result["portfolio"]
-            
-            # 소요 시간
+
             elapsed = (now_kst() - start_time).total_seconds()
-            
-            logger.info(f"\n✅ 일일 분석 완료 (소요 시간: {elapsed:.1f}초)")
-            logger.info(f"   관찰 후보: {len(self.today_candidates)}개")
-            logger.info("   └─ 09:00 장 시작 후 실시간 관찰 예정")
+
+            logger.info(f"\n✅ 종목 스크리닝 완료 ({elapsed:.1f}초)")
+            logger.info(f"   매수 후보: {len(self.today_candidates)}개")
             logger.info("   └─ 09:25 필터링 후 최종 매수 실행")
-            
+
             # 후보 목록 출력
-            logger.info("\n📋 관찰 대상 종목:")
+            logger.info("\n📋 매수 대상 종목:")
             for i, order in enumerate(self.today_candidates[:10], 1):
                 stock_name = order.get('stock_name', order.get('stock_code', 'N/A'))
                 stock_code = order.get('stock_code', '')
                 amount = order.get('amount', 0)
                 logger.info(f"   {i}. {stock_name} ({stock_code}) - {amount:,}원")
 
-            # 알림 발송 (상세 정보 포함)
+            # 알림 발송
             if self.notifier:
-                # 종목 목록 생성
                 stock_list = []
                 for i, order in enumerate(self.today_candidates[:8], 1):
                     stock_name = order.get('stock_name', 'N/A')
@@ -376,83 +430,29 @@ class TradingSystem:
                         f"{i}. {stock_name} ({stock_code})\n"
                         f"   └ {theme} | {amount:,}원 | 점수:{score:.1f}"
                     )
-
                 stock_text = "\n".join(stock_list)
 
-                # 테마 목록 문자열 생성
-                theme_list = []
-                for t in themes[:5]:
-                    t_name = t.get("theme", "")
-                    t_score = t.get("score", 0)
-                    theme_list.append(f"  • {t_name}({t_score:.1f}점)")
-                theme_text = "\n".join(theme_list)
-
                 self.notifier.send_message(
-                    f"📋 08:30 분석 완료\n\n"
-                    f"🎯 선정 테마: {len(themes)}개\n"
-                    f"{theme_text}\n\n"
-                    f"📊 관찰 후보: {len(self.today_candidates)}개\n"
+                    f"🔍 09:05 스크리닝 완료\n\n"
+                    f"📊 매수 후보: {len(self.today_candidates)}개\n"
                     f"─────────────────\n"
                     f"{stock_text}\n"
                     f"─────────────────\n"
-                    f"⏰ 09:00 장 초반 관찰 시작\n"
                     f"⏰ 09:25 필터링 후 매수 예정"
                 )
-            
+
             return {
                 "success": True,
-                "themes": len(themes),
                 "candidates": len(candidates),
                 "verified": len(verified),
-                "observation_pool": len(self.today_candidates),
+                "buy_candidates": len(self.today_candidates),
                 "elapsed": elapsed
             }
-            
+
         except Exception as e:
-            logger.error(f"일일 분석 실패: {e}")
-            self.notifier.send_error_alert("일일 분석", str(e))
+            logger.error(f"종목 스크리닝 실패: {e}")
+            self.notifier.send_error_alert("종목 스크리닝", str(e))
             return {"success": False, "error": str(e)}
-    
-    # ===== 장 초반 관찰 =====
-    
-    async def run_morning_observation(self) -> dict:
-        """
-        장 초반 관찰 실행 (09:00)
-        
-        후보 종목에 대해 실시간 데이터를 수집합니다.
-        실제 필터링은 09:25 매수 시점에 수행됩니다.
-        
-        Returns:
-            관찰 결과
-        """
-        logger.info("=" * 70)
-        logger.info("👀 장 초반 관찰 시작 (09:00)")
-        logger.info("=" * 70)
-        
-        if not self.today_candidates:
-            logger.warning("관찰할 후보 종목이 없습니다")
-            return {"success": False, "reason": "후보 없음"}
-        
-        logger.info(f"   관찰 대상: {len(self.today_candidates)}개")
-        logger.info("   모니터링 항목:")
-        logger.info("     - 시초가 갭 (전일 종가 대비)")
-        logger.info("     - 당일 수급 (외국인/기관)")
-        logger.info("     - 거래량 추이")
-        logger.info("")
-        logger.info("   09:25까지 대기 후 필터링 실행...")
-        
-        # 알림
-        if self.notifier:
-            self.notifier.send_message(
-                f"👀 09:00 장 초반 관찰 시작\n"
-                f"- 관찰 대상: {len(self.today_candidates)}개\n"
-                f"- 09:25 필터링 후 매수 예정"
-            )
-        
-        return {
-            "success": True,
-            "candidates": len(self.today_candidates)
-        }
     
     # ===== 매수 실행 =====
     
@@ -704,9 +704,12 @@ class TradingSystem:
     # ===== 수동 실행 =====
     
     async def run_manual_analysis(self) -> dict:
-        """수동 분석 실행"""
+        """수동 분석 실행 (테마 분석 + 종목 스크리닝 순차 실행)"""
         logger.info("🔧 수동 분석 모드")
-        return await self.run_daily_analysis()
+        theme_result = await self.run_theme_analysis()
+        if not theme_result.get("success"):
+            return theme_result
+        return await self.run_stock_screening()
 
 
 # ===== CLI 인터페이스 =====

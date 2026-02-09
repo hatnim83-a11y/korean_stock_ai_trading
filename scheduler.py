@@ -5,8 +5,8 @@ scheduler.py - APScheduler 스케줄링 모듈
 
 일정:
 - 08:00 - 테마 로테이션 체크 (2주 단위)
-- 08:30 - 일일 분석 시작 (테마 분석 → 종목 스크리닝 → AI 검증 → 후보 선정)
-- 09:00 - 장 초반 관찰 시작 (시초가/수급/거래량 모니터링)
+- 08:30 - 테마 분석 (크롤링 → 점수화 → 상위 테마 선정)
+- 09:05 - 종목 스크리닝 (장 시작 후 실시간 데이터 기반)
 - 09:25 - 자동 매수 실행 (필터링 후 최종 선정)
 - 09:26~15:30 - 실시간 모니터링 (분할 익절/트레일링 스탑/손절)
 - 15:35 - 장 마감 정리 (리밸런싱 준비)
@@ -55,11 +55,12 @@ class TradingScheduler:
     Attributes:
         scheduler: APScheduler 인스턴스
         is_running: 실행 중 여부
-        
+
     스케줄:
-        - 08:30 - 일일 분석
-        - 09:00 - 자동 매수
-        - 09:00~15:30 - 모니터링
+        - 08:30 - 테마 분석
+        - 09:05 - 종목 스크리닝
+        - 09:25 - 자동 매수
+        - 09:26~15:30 - 모니터링
         - 15:35 - 장 마감 정리
         - 16:00 - 일일 리포트
     """
@@ -71,8 +72,8 @@ class TradingScheduler:
         
         # 작업 콜백
         self.on_theme_check: Optional[Callable] = None          # 08:00 테마 로테이션 체크
-        self.on_daily_analysis: Optional[Callable] = None       # 08:30 일일 분석
-        self.on_morning_observation: Optional[Callable] = None  # 09:00 장 초반 관찰
+        self.on_theme_analysis: Optional[Callable] = None       # 08:30 테마 분석
+        self.on_stock_screening: Optional[Callable] = None      # 09:05 종목 스크리닝
         self.on_execute_buy: Optional[Callable] = None          # 09:25 자동 매수
         self.on_market_close: Optional[Callable] = None         # 15:35 장 마감 정리
         self.on_daily_report: Optional[Callable] = None         # 16:00 일일 리포트
@@ -107,21 +108,21 @@ class TradingScheduler:
             replace_existing=True
         )
 
-        # 1. 일일 분석 (KST 08:30) - 테마/종목 분석, 후보 선정
+        # 1. 테마 분석 (KST 08:30) - 장 시작 전 테마 크롤링/점수화/선정
         self.scheduler.add_job(
-            self._run_daily_analysis,
+            self._run_theme_analysis,
             CronTrigger(hour=8, minute=30, day_of_week='mon-fri', timezone=_KST_TZ),
-            id='daily_analysis',
-            name='일일 분석 (후보 선정)',
+            id='theme_analysis',
+            name='테마 분석',
             replace_existing=True
         )
 
-        # 2. 장 초반 관찰 시작 (KST 09:00) - 시초가/수급/거래량 관찰
+        # 2. 종목 스크리닝 (KST 09:05) - 장 시작 후 실시간 데이터 기반
         self.scheduler.add_job(
-            self._run_morning_observation,
-            CronTrigger(hour=9, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
-            id='morning_observation',
-            name='장 초반 관찰',
+            self._run_stock_screening,
+            CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='stock_screening',
+            name='종목 스크리닝 (09:05)',
             replace_existing=True
         )
 
@@ -202,39 +203,40 @@ class TradingScheduler:
             logger.error(f"테마 체크 실패: {e}")
             self._send_error_notification("테마 체크", str(e))
     
-    async def _run_daily_analysis(self) -> None:
-        """08:30 - 일일 분석 실행"""
+    async def _run_theme_analysis(self) -> None:
+        """08:30 - 테마 분석 (장 시작 전)"""
         logger.info("=" * 60)
-        logger.info("🔍 일일 분석 시작 (08:30)")
+        logger.info("📊 테마 분석 시작 (08:30)")
+        logger.info("   └─ 테마 크롤링 → 점수화 → 상위 테마 선정")
         logger.info("=" * 60)
-        
+
         try:
-            if self.on_daily_analysis:
-                await self.on_daily_analysis()
+            if self.on_theme_analysis:
+                await self.on_theme_analysis()
             else:
-                logger.warning("일일 분석 콜백 미등록")
-                
+                logger.warning("테마 분석 콜백 미등록")
+
         except Exception as e:
-            logger.error(f"일일 분석 실패: {e}")
-            self._send_error_notification("일일 분석", str(e))
-    
-    async def _run_morning_observation(self) -> None:
-        """09:00 - 장 초반 관찰 시작"""
+            logger.error(f"테마 분석 실패: {e}")
+            self._send_error_notification("테마 분석", str(e))
+
+    async def _run_stock_screening(self) -> None:
+        """09:05 - 종목 스크리닝 (장 시작 후)"""
         logger.info("=" * 60)
-        logger.info("👀 장 초반 관찰 시작 (09:00)")
-        logger.info("   └─ 시초가/수급/거래량 모니터링 중...")
-        logger.info("   └─ 09:25까지 관찰 후 필터링 예정")
+        logger.info("🔍 종목 스크리닝 시작 (09:05)")
+        logger.info("   └─ 장 시작 후 실시간 데이터로 스크리닝")
+        logger.info("   └─ 수급/기술/재무/유동성 필터 적용")
         logger.info("=" * 60)
-        
+
         try:
-            if self.on_morning_observation:
-                await self.on_morning_observation()
+            if self.on_stock_screening:
+                await self.on_stock_screening()
             else:
-                logger.warning("장 초반 관찰 콜백 미등록")
-                
+                logger.warning("종목 스크리닝 콜백 미등록")
+
         except Exception as e:
-            logger.error(f"장 초반 관찰 실패: {e}")
-            self._send_error_notification("장 초반 관찰", str(e))
+            logger.error(f"종목 스크리닝 실패: {e}")
+            self._send_error_notification("종목 스크리닝", str(e))
     
     async def _run_execute_buy(self) -> None:
         """09:25 - 자동 매수 실행 (관찰 후)"""

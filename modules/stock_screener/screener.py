@@ -83,41 +83,77 @@ def screen_stocks_in_theme(
         should_close = False
     
     candidates = []
-    
+
+    # 필터별 거부 통계
+    filter_stats = {
+        "total": 0,
+        "info_fail": 0,       # 종목 정보 조회 실패
+        "supply_fail": 0,     # 수급 필터 거부
+        "technical_fail": 0,  # 기술적 필터 거부
+        "fundamental_fail": 0,  # 재무 필터 거부
+        "liquidity_fail": 0,  # 유동성 필터 거부
+        "passed": 0,
+    }
+
     try:
         for code in stock_codes:
+            filter_stats["total"] += 1
             try:
                 # 종목 종합 정보 조회
                 stock_info = kis_api.get_stock_full_info(code)
-                
+
                 if not stock_info:
                     logger.warning(f"[{code}] 종목 정보 조회 실패")
+                    filter_stats["info_fail"] += 1
                     continue
-                
+
                 # 테마 정보 추가
                 stock_info["theme"] = theme_name
                 stock_info["theme_score"] = theme_score
-                
+
                 # 필터 적용
                 filtered = apply_all_filters(stock_info)
-                
+
                 if filtered.get("all_passed"):
                     candidates.append(filtered)
-                    
+                    filter_stats["passed"] += 1
+                else:
+                    # 어떤 필터에서 거부되었는지 추적
+                    if not filtered.get("supply_passed"):
+                        filter_stats["supply_fail"] += 1
+                    if not filtered.get("technical_passed"):
+                        filter_stats["technical_fail"] += 1
+                    if not filtered.get("fundamental_passed"):
+                        filter_stats["fundamental_fail"] += 1
+                    if not filtered.get("liquidity_passed"):
+                        filter_stats["liquidity_fail"] += 1
+
             except Exception as e:
                 logger.warning(f"[{code}] 스크리닝 중 오류: {e}")
+                filter_stats["info_fail"] += 1
                 continue
-        
+
         # 점수 순 정렬
         candidates.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-        
+
         # 최대 개수 제한
         candidates = candidates[:max_stocks]
-        
+
         logger.info(
             f"✅ [{theme_name}] 스크리닝 완료: "
             f"{len(candidates)}/{len(stock_codes)}개 통과"
         )
+
+        # 필터별 거부 통계 출력 (INFO 레벨)
+        if filter_stats["passed"] < filter_stats["total"]:
+            logger.info(
+                f"   📊 [{theme_name}] 필터 거부 현황: "
+                f"수급={filter_stats['supply_fail']}건 | "
+                f"기술={filter_stats['technical_fail']}건 | "
+                f"재무={filter_stats['fundamental_fail']}건 | "
+                f"유동성={filter_stats['liquidity_fail']}건 | "
+                f"조회실패={filter_stats['info_fail']}건"
+            )
         
     finally:
         if should_close:

@@ -376,14 +376,21 @@ class KISApi:
             
             result = []
             for item in output[:count]:
+                close = _safe_int(item.get("stck_clpr"))
+                high = _safe_int(item.get("stck_hgpr"))
+                low = _safe_int(item.get("stck_lwpr"))
+                volume = _safe_int(item.get("acml_vol"))
+                # inquire-daily-price API는 acml_tr_pbmn 미제공 → volume × 평균가로 근사
+                avg_price = (high + low) // 2 if (high and low) else close
+                trade_value = volume * avg_price if (volume and avg_price) else 0
                 result.append({
                     "date": item.get("stck_bsop_date", ""),
                     "open": _safe_int(item.get("stck_oprc")),
-                    "high": _safe_int(item.get("stck_hgpr")),
-                    "low": _safe_int(item.get("stck_lwpr")),
-                    "close": _safe_int(item.get("stck_clpr")),
-                    "volume": _safe_int(item.get("acml_vol")),
-                    "trade_value": _safe_int(item.get("acml_tr_pbmn")),
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
+                    "trade_value": trade_value,
                 })
             
             logger.debug(f"[{stock_code}] 일별 시세 {len(result)}건 조회")
@@ -538,14 +545,27 @@ class KISApi:
             logger.warning(f"[{stock_code}] 기술적 지표 계산 불가 (데이터 부족)")
             return None
         
-        # 종가 리스트 (최신순)
-        closes = [d["close"] for d in daily]
-        highs = [d["high"] for d in daily]
-        lows = [d["low"] for d in daily]
-        volumes = [d["volume"] for d in daily]
-        
+        # 당일 미완성 데이터 제외 (장중에는 당일 거래량이 하루 전체 대비 극히 적음)
+        today_str = now_kst().strftime("%Y%m%d")
+        today_entry = None
+        if daily and daily[0].get("date") == today_str:
+            today_entry = daily[0]
+            daily_complete = daily[1:]  # 당일 제외한 완성된 일봉 데이터
+        else:
+            daily_complete = daily
+
+        if not daily_complete or len(daily_complete) < 20:
+            logger.warning(f"[{stock_code}] 기술적 지표 계산 불가 (완성 데이터 부족)")
+            return None
+
+        # 종가 리스트 (최신순, 완성된 일봉만)
+        closes = [d["close"] for d in daily_complete]
+        highs = [d["high"] for d in daily_complete]
+        lows = [d["low"] for d in daily_complete]
+        volumes = [d["volume"] for d in daily_complete]
+
         current_price = closes[0]
-        
+
         # 이동평균선 계산
         ma_values = {}
         for period in ma_periods:
@@ -553,14 +573,14 @@ class KISApi:
                 ma_values[f"ma_{period}"] = sum(closes[:period]) / period
             else:
                 ma_values[f"ma_{period}"] = None
-        
+
         # RSI 계산
         rsi = self._calculate_rsi(closes, rsi_period)
-        
+
         # ATR 계산
         atr = self._calculate_atr(highs, lows, closes, atr_period)
-        
-        # 거래량 비율 (당일 vs 20일 평균)
+
+        # 거래량 비율: 전일 거래량 vs 20일 평균 (완성된 일봉 기준)
         avg_volume_20 = sum(volumes[:20]) / 20 if len(volumes) >= 20 else sum(volumes) / len(volumes)
         volume_ratio = volumes[0] / avg_volume_20 if avg_volume_20 > 0 else 0
         
@@ -572,6 +592,9 @@ class KISApi:
             elif ma_values["ma_5"] < ma_values["ma_20"] < ma_values["ma_60"]:
                 ma_alignment = "bearish"  # 역배열
         
+        # 전일 거래대금 (장 초반 trade_value 보정용)
+        prev_trade_value = daily_complete[0].get("trade_value", 0) if daily_complete else 0
+
         result = {
             "code": stock_code,
             "price": current_price,
@@ -579,7 +602,8 @@ class KISApi:
             "rsi": rsi,
             "atr": atr,
             "volume_ratio": round(volume_ratio, 2),
-            "ma_alignment": ma_alignment
+            "ma_alignment": ma_alignment,
+            "prev_trade_value": prev_trade_value,
         }
         
         logger.debug(
@@ -789,14 +813,14 @@ class KISApi:
         else:
             logger.warning(f"[{stock_code}] 현재가 조회 실패")
             return None
-        
+
         # 수급 조회
         investor_info = self.get_investor_trading(stock_code)
         if investor_info:
             result["foreign_net"] = investor_info["foreign_net"]
             result["institution_net"] = investor_info["institution_net"]
             result["foreign_ratio"] = investor_info.get("foreign_ratio", 0)
-        
+
         # 기술적 지표
         tech_info = self.get_technical_indicators(stock_code)
         if tech_info:
@@ -807,7 +831,11 @@ class KISApi:
             result["ma_5"] = tech_info.get("ma_5")
             result["ma_20"] = tech_info.get("ma_20")
             result["ma_60"] = tech_info.get("ma_60")
-        
+            # 장 초반 trade_value 보정: 당일 누적이 작으면 전일 거래대금 사용
+            prev_trade_value = tech_info.get("prev_trade_value")
+            if prev_trade_value and result.get("trade_value", 0) < prev_trade_value * 0.3:
+                result["trade_value"] = prev_trade_value
+
         # 재무 정보
         financial_info = self.get_financial_info(stock_code)
         if financial_info:
