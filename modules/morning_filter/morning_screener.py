@@ -63,6 +63,7 @@ class MorningScreenResult:
     supply_excluded: int = 0                # 수급 필터 제외 수
     volume_excluded: int = 0                # 거래량 필터 제외 수
     strength_excluded: int = 0              # 체결 강도 필터 제외 수
+    trend_excluded: int = 0                 # 트렌드 필터 제외 수
 
 
 class MorningScreener:
@@ -186,15 +187,17 @@ class MorningScreener:
     def filter_candidates(
         self,
         candidates: list[dict],
-        trading_minutes: int = 20
+        trading_minutes: int = 20,
+        observation_result=None
     ) -> MorningScreenResult:
         """
         후보 종목 필터링 (동기)
-        
+
         Args:
             candidates: 후보 종목 리스트
             trading_minutes: 장 시작 후 경과 시간 (분)
-            
+            observation_result: ObservationResult (실시간 관찰 결과, 없으면 Step 5 스킵)
+
         Returns:
             MorningScreenResult: 스크리닝 결과
         """
@@ -209,6 +212,7 @@ class MorningScreener:
         supply_excluded = 0
         volume_excluded = 0
         strength_excluded = 0
+        trend_excluded = 0
         all_excluded = []
         
         current_stocks = candidates.copy()
@@ -263,9 +267,34 @@ class MorningScreener:
             current_stocks = passed
             logger.info(f"   결과: {len(passed)}개 통과, {strength_excluded}개 제외")
         
+        # 5. 트렌드 필터 (관찰 결과 기반)
+        if observation_result and current_stocks:
+            logger.info("\n👁️ Step 5: 트렌드 필터 (실시간 관찰)")
+            logger.info(
+                f"   관찰 데이터: {observation_result.total_snapshots}회, "
+                f"플래그: {observation_result.stocks_flagged}건"
+            )
+            passed = []
+            for stock in current_stocks:
+                code = stock.get("stock_code", stock.get("code", ""))
+                obs = observation_result.observations.get(code)
+                if obs and obs.exclusion_reasons:
+                    reasons = ", ".join(obs.exclusion_reasons)
+                    name = stock.get("stock_name", stock.get("name", code))
+                    logger.info(f"   ❌ {name}: {reasons}")
+                    stock["exclusion_reason"] = f"트렌드: {reasons}"
+                    all_excluded.append(stock)
+                    trend_excluded += 1
+                else:
+                    passed.append(stock)
+            current_stocks = passed
+            logger.info(f"   결과: {len(passed)}개 통과, {trend_excluded}개 제외")
+        elif not observation_result:
+            logger.info("\n👁️ Step 5: 트렌드 필터 (스킵 - 관찰 데이터 없음)")
+
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
-        
+
         # 결과 로깅
         logger.info("\n" + "=" * 60)
         logger.info(f"✅ 장 초반 필터링 완료 ({elapsed:.1f}초)")
@@ -276,6 +305,7 @@ class MorningScreener:
         logger.info(f"     - 수급 필터: {supply_excluded}개")
         logger.info(f"     - 거래량 필터: {volume_excluded}개")
         logger.info(f"     - 체결 강도 필터: {strength_excluded}개")
+        logger.info(f"     - 트렌드 필터: {trend_excluded}개")
         logger.info("=" * 60)
         
         if current_stocks:
@@ -299,7 +329,8 @@ class MorningScreener:
             gap_excluded=gap_excluded,
             supply_excluded=supply_excluded,
             volume_excluded=volume_excluded,
-            strength_excluded=strength_excluded
+            strength_excluded=strength_excluded,
+            trend_excluded=trend_excluded
         )
     
     async def run_observation(

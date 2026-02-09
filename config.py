@@ -367,6 +367,28 @@ class Settings(BaseSettings):
         description="최소 체결 강도 (%, 50=중립, 45=약간 매도우위도 허용)"
     )
     
+    # ===== 실시간 관찰 설정 (Observation Loop) =====
+    OBSERVATION_INTERVAL_SECONDS: int = Field(
+        default=180,
+        description="관찰 주기 (초, 3분)"
+    )
+    OBSERVATION_MAX_CYCLES: int = Field(
+        default=6,
+        description="최대 관찰 횟수"
+    )
+    TREND_PRICE_DROP_THRESHOLD: float = Field(
+        default=-3.0,
+        description="시가 대비 하락 임계값 (%)"
+    )
+    TREND_PRICE_DOWNTREND_COUNT: int = Field(
+        default=3,
+        description="연속 하락 횟수 임계값"
+    )
+    TREND_SUPPLY_REVERSAL_ENABLED: bool = Field(
+        default=True,
+        description="수급 반전 감지 활성화"
+    )
+
     # ===== 스케줄 시간 =====
     SCHEDULE_THEME_ANALYSIS: str = Field(
         default="08:30",

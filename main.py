@@ -66,6 +66,7 @@ from modules.reporter import (
     TelegramNotifier
 )
 from modules.morning_filter import MorningScreener, run_morning_observation
+from modules.morning_filter.candidate_observer import CandidateObserver
 
 
 class TradingSystem:
@@ -120,7 +121,9 @@ class TradingSystem:
         self.current_themes: list[dict] = []     # 현재 테마 리스트
         self.today_ai_analysis: list[dict] = []  # AI 분석 결과 (선정 이유 포함)
         self.today_trades: list[dict] = []       # 오늘 거래 내역
-        
+        self.observation_result = None              # 실시간 관찰 결과
+        self._observer_task = None                  # 관찰 비동기 태스크
+
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -441,6 +444,14 @@ class TradingSystem:
                     f"⏰ 09:25 필터링 후 매수 예정"
                 )
 
+            # 실시간 관찰 시작 (09:05 ~ 09:23)
+            if settings.ENABLE_MORNING_FILTER and self.today_candidates:
+                observer = CandidateObserver(self.today_candidates, self.notifier)
+                self._observer_task = asyncio.create_task(
+                    self._run_observation(observer)
+                )
+                logger.info("👁️ 실시간 관찰 루프 시작 (09:23까지)")
+
             return {
                 "success": True,
                 "candidates": len(candidates),
@@ -454,8 +465,16 @@ class TradingSystem:
             self.notifier.send_error_alert("종목 스크리닝", str(e))
             return {"success": False, "error": str(e)}
     
+    async def _run_observation(self, observer: CandidateObserver):
+        """관찰 루프 실행 헬퍼"""
+        try:
+            self.observation_result = await observer.start_observation()
+        except Exception as e:
+            logger.error(f"관찰 실패: {e}")
+            self.observation_result = None
+
     # ===== 매수 실행 =====
-    
+
     async def execute_buy_orders(self) -> dict:
         """
         자동 매수 실행 (09:25)
@@ -478,15 +497,24 @@ class TradingSystem:
             logger.warning("매수할 후보 종목이 없습니다")
             return {"success": False, "reason": "후보 없음"}
         
+        # === 관찰 완료 대기 ===
+        if self._observer_task and not self._observer_task.done():
+            logger.info("⏳ 관찰 완료 대기 중...")
+            try:
+                await asyncio.wait_for(self._observer_task, timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning("관찰 타임아웃 - 가용 데이터로 진행")
+
         # === 장 초반 필터링 실행 ===
         logger.info(f"\n📊 장 초반 필터링 시작 (후보 {len(self.today_candidates)}개)")
-        
+
         if settings.ENABLE_MORNING_FILTER:
-            # 필터링 실행
+            # 필터링 실행 (관찰 결과 전달)
             filter_result = await asyncio.to_thread(
                 self.morning_screener.filter_candidates,
                 self.today_candidates,
-                settings.MORNING_OBSERVATION_MINUTES
+                settings.MORNING_OBSERVATION_MINUTES,
+                self.observation_result
             )
             
             if not filter_result.passed_stocks:
@@ -496,7 +524,8 @@ class TradingSystem:
                     f"- 필터링 통과 종목 없음\n"
                     f"- 갭 제외: {filter_result.gap_excluded}개\n"
                     f"- 수급 제외: {filter_result.supply_excluded}개\n"
-                    f"- 거래량 제외: {filter_result.volume_excluded}개"
+                    f"- 거래량 제외: {filter_result.volume_excluded}개\n"
+                    f"- 트렌드 제외: {filter_result.trend_excluded}개"
                 )
                 return {"success": False, "reason": "필터링 통과 없음"}
             
