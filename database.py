@@ -418,6 +418,41 @@ class Database:
                 WHERE stock_code = ? AND status = 'holding'
             """, (current_price, profit_rate, profit_amount, stock_code))
     
+    def save_holding_position(self, position: dict) -> None:
+        """
+        매수 체결 후 holding 포지션 저장
+
+        Args:
+            position: 포지션 정보 딕셔너리
+        """
+        with self.get_cursor() as cursor:
+            # 같은 종목의 기존 pending/holding 엔트리 정리
+            cursor.execute("""
+                UPDATE portfolio SET status = 'replaced'
+                WHERE stock_code = ? AND status IN ('pending', 'holding')
+            """, (position['stock_code'],))
+
+            cursor.execute("""
+                INSERT INTO portfolio (
+                    date, stock_code, stock_name, theme, weight,
+                    shares, buy_price, current_price,
+                    stop_loss, take_profit, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'holding')
+            """, (
+                position.get('date'),
+                position['stock_code'],
+                position['stock_name'],
+                position.get('theme'),
+                position.get('weight'),
+                position.get('shares'),
+                position.get('buy_price'),
+                position.get('buy_price'),  # current_price = buy_price 초기값
+                position.get('stop_loss'),
+                position.get('take_profit'),
+            ))
+
+        logger.info(f"포지션 저장: {position['stock_name']} (holding)")
+
     def close_position(self, stock_code: str, reason: str) -> None:
         """
         포지션 청산 (상태 변경)

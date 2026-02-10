@@ -425,8 +425,31 @@ class PortfolioMonitorV2:
         
         return result
     
+    # ===== DB 반영 =====
+
+    def _close_position_in_db(self, pos: Position, reason: str, sell_price: float) -> None:
+        """DB에서 포지션 청산 + 매도 기록 저장"""
+        try:
+            db = Database()
+            db.connect()
+            db.close_position(pos.stock_code, reason)
+            db.save_trade({
+                "stock_code": pos.stock_code,
+                "stock_name": pos.stock_name,
+                "action": "sell",
+                "shares": pos.remaining_shares,
+                "price": sell_price,
+                "amount": pos.remaining_shares * sell_price,
+                "reason": reason,
+                "profit_rate": pos.profit_rate,
+                "profit_amount": pos.profit,
+            })
+            db.close()
+        except Exception as e:
+            logger.error(f"포지션 청산 DB 업데이트 실패: {e}")
+
     # ===== 손절 =====
-    
+
     def _check_stop_loss(self, pos: Position) -> bool:
         """
         손절 조건 체크
@@ -457,8 +480,9 @@ class PortfolioMonitorV2:
         )
         
         if result.get("success"):
+            self._close_position_in_db(pos, SellReason.STOP_LOSS.value, pos.current_price)
             self.remove_position(pos.stock_code)
-        
+
         # 콜백
         if self.on_stop_loss:
             self.on_stop_loss(pos, pos.current_price)
@@ -549,7 +573,12 @@ class PortfolioMonitorV2:
             # 남은 수량 업데이트
             pos.remaining_shares -= sell_shares
             logger.info(f"   남은 수량: {pos.remaining_shares}주")
-        
+
+            # 전량 매도 시 DB 포지션 청산
+            if pos.remaining_shares <= 0:
+                reason = f"{stage}차 익절"
+                self._close_position_in_db(pos, reason, pos.current_price)
+
         # 콜백
         if self.on_partial_profit:
             self.on_partial_profit(pos, pos.current_price, stage)
@@ -682,11 +711,21 @@ class PortfolioMonitorV2:
         )
 
         if result.get("success"):
+            # 트레일링 레벨에 따른 매도 사유
+            if pos.trailing_level >= 3:
+                reason = SellReason.TRAILING_L3.value
+            elif pos.trailing_level == 2:
+                reason = SellReason.TRAILING_L2.value
+            elif pos.trailing_level == 1:
+                reason = SellReason.TRAILING_L1.value
+            else:
+                reason = SellReason.TRAILING_STOP.value
+            self._close_position_in_db(pos, reason, pos.current_price)
             self.remove_position(pos.stock_code)
 
         if self.on_trailing_stop:
             self.on_trailing_stop(pos, pos.current_price)
-    
+
     # ===== 보유 기간 관리 =====
     
     def _check_max_hold_days(self, pos: Position) -> bool:
@@ -725,8 +764,9 @@ class PortfolioMonitorV2:
         )
         
         if result.get("success"):
+            self._close_position_in_db(pos, SellReason.MAX_HOLD_DAYS.value, pos.current_price)
             self.remove_position(pos.stock_code)
-    
+
     # ===== 상태 조회 =====
     
     def get_portfolio_status(self) -> dict:

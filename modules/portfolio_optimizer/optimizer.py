@@ -436,36 +436,17 @@ def save_portfolio_to_db(
         today = date.today()
         
         for pos in portfolio.get("positions", []):
-            # 포트폴리오 테이블에 저장
-            cursor = db.conn.cursor()
-            
-            cursor.execute("""
-                INSERT INTO portfolio (
-                    date, stock_code, stock_name, theme,
-                    shares, buy_price, target_amount,
-                    stop_loss, take_profit, trailing_stop,
-                    status, final_score, ai_sentiment, weight,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                str(today),
-                pos["code"],
-                pos["name"],
-                pos.get("theme"),
-                pos["shares"],
-                pos["price"],
-                pos["amount"],
-                pos["stop_loss_price"],
-                pos["take_profit_price"],
-                None,  # trailing_stop은 나중에 설정
-                "pending",  # 매수 대기
-                pos.get("final_score", 0),
-                pos.get("ai_sentiment", 0),
-                pos.get("weight", 0),
-                now_kst().isoformat()
-            ))
-        
-        db.conn.commit()
+            db.save_portfolio([{
+                "stock_code": pos["code"],
+                "stock_name": pos["name"],
+                "theme": pos.get("theme"),
+                "weight": pos.get("weight", 0),
+                "shares": pos["shares"],
+                "buy_price": pos["price"],
+                "stop_loss": pos["stop_loss_price"],
+                "take_profit": pos["take_profit_price"],
+                "status": "pending",
+            }], today)
         logger.info(f"포트폴리오 저장 완료: {len(portfolio.get('positions', []))}개 종목")
         
         return True

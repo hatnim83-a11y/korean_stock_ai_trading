@@ -155,6 +155,7 @@ class TradingEngine:
         # 4. DB 저장
         if save_to_db:
             self._save_trades(executed_orders)
+            self._save_positions(executed_orders)
         
         result = {
             "success": failed_count == 0,
@@ -456,6 +457,34 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"매매 기록 저장 실패: {e}")
     
+    def _save_positions(self, orders: list[dict]) -> None:
+        """체결된 주문을 portfolio 테이블에 holding 상태로 저장"""
+        try:
+            db = Database()
+            db.connect()
+            today = date.today()
+
+            for order in orders:
+                if not order.get("success"):
+                    continue
+
+                filled_price = order.get("filled_price") or order.get("price", 0)
+                db.save_holding_position({
+                    "date": str(today),
+                    "stock_code": order.get("stock_code"),
+                    "stock_name": order.get("stock_name"),
+                    "theme": order.get("theme"),
+                    "shares": order.get("quantity", 0),
+                    "buy_price": filled_price,
+                    "stop_loss": order.get("stop_loss"),
+                    "take_profit": order.get("take_profit"),
+                    "weight": order.get("weight"),
+                })
+
+            db.close()
+        except Exception as e:
+            logger.error(f"포지션 저장 실패: {e}")
+
     # ===== 유틸리티 =====
     
     def cancel_all_pending(self) -> int:

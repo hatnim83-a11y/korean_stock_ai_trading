@@ -113,8 +113,8 @@ class Settings(BaseSettings):
         description="총 투자 자본금 (원)"
     )
     MAX_POSITIONS: int = Field(
-        default=10,
-        description="최대 보유 종목 수 (5-10개)"
+        default=5,
+        description="최대 보유 종목 수"
     )
     MIN_POSITIONS: int = Field(
         default=5,
