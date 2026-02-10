@@ -3,21 +3,18 @@ scorer.py - 테마 점수 계산 모듈
 
 이 파일은 수집된 테마 데이터를 바탕으로 투자 매력도 점수를 계산합니다.
 
-점수 계산 로직 (0-100점):
-- 모멘텀 점수 (30점): 테마 내 평균 5일 수익률
-- 수급 점수 (25점): 외국인+기관 순매수 종목 비율
-- 뉴스 화제성 (20점): 최근 3일 뉴스 언급 빈도
-- AI 감성 분석 (25점): Claude가 평가한 테마 전망 (0-10점 × 2.5)
+점수 계산 로직 (0-100점) — 결정적 모멘텀 중심:
+- 모멘텀 점수 (60점): 테마 내 평균 5일 수익률 (KIS API 우선, 크롤링 폴백)
+- 종목수 보너스 (10점): 테마 규모 반영
+- 기본 점수 (30점): 고정
 
 사용법:
     from modules.theme_analyzer.scorer import (
         calculate_momentum_score,
-        calculate_news_score,
         calculate_theme_total_score
     )
-    
+
     momentum = calculate_momentum_score(avg_return=5.2)
-    news = calculate_news_score(news_count=127)
 """
 
 from typing import Optional
@@ -30,10 +27,14 @@ from logger import logger
 
 
 # ===== 점수 배점 상수 =====
-MAX_MOMENTUM_SCORE = 30.0    # 모멘텀 최대 30점
-MAX_SUPPLY_SCORE = 25.0      # 수급 최대 25점
-MAX_NEWS_SCORE = 20.0        # 뉴스 화제성 최대 20점
-MAX_AI_SCORE = 25.0          # AI 감성 최대 25점
+MAX_MOMENTUM_SCORE = 60.0    # 모멘텀 최대 60점
+MAX_SIZE_BONUS = 10.0        # 종목수 보너스 최대 10점
+BASE_SCORE = 30.0            # 기본 점수 30점 (뉴스/AI 대체)
+
+# 하위 호환용 (기존 함수 참조)
+MAX_SUPPLY_SCORE = 25.0
+MAX_NEWS_SCORE = 20.0
+MAX_AI_SCORE = 25.0
 
 TOTAL_MAX_SCORE = 100.0
 
@@ -47,56 +48,46 @@ def calculate_momentum_score(
     weight_20d: float = 0.3
 ) -> float:
     """
-    모멘텀 점수 계산 (최대 30점)
-    
+    모멘텀 점수 계산 (최대 60점)
+
     테마의 평균 수익률을 바탕으로 모멘텀 점수를 계산합니다.
-    
+    백테스트와 동일한 선형 매핑 공식 사용.
+
     계산 로직:
-    - 5일 수익률 10% 이상: 30점 (만점)
-    - 5일 수익률 0%: 15점 (중간)
-    - 5일 수익률 -10% 이하: 0점 (최저)
-    
+    - 5일 수익률 +15% 이상: 60점 (만점)
+    - 5일 수익률 0%: 30점 (중간)
+    - 5일 수익률 -15% 이하: 0점 (최저)
+
     Args:
         avg_return_5d: 5일 평균 수익률 (%, 예: 5.2)
         avg_return_20d: 20일 평균 수익률 (%, 선택)
         weight_5d: 5일 수익률 가중치 (기본 70%)
         weight_20d: 20일 수익률 가중치 (기본 30%)
-    
+
     Returns:
-        모멘텀 점수 (0 ~ 30)
-        
-    Example:
-        >>> calculate_momentum_score(5.2)
-        22.8  # (5.2 + 10) / 20 * 30 = 22.8
-        
-        >>> calculate_momentum_score(-3.0)
-        10.5  # (-3.0 + 10) / 20 * 30 = 10.5
+        모멘텀 점수 (0 ~ 60)
     """
-    # 5일 수익률 점수 (-10% ~ +10% 범위를 0 ~ 30점으로 매핑)
-    # 선형 변환: score = (return + 10) / 20 * 30
-    # -10% → 0점, 0% → 15점, +10% → 30점
-    
     # 범위 제한 (-15% ~ +15%)
     clamped_5d = max(-15.0, min(15.0, avg_return_5d))
-    
+
     # 점수 계산 (선형 매핑)
-    # -15 → 0, 0 → 15, +15 → 30
+    # -15 → 0, 0 → 30, +15 → 60
     score_5d = ((clamped_5d + 15) / 30) * MAX_MOMENTUM_SCORE
-    
+
     # 20일 수익률이 있으면 가중 평균
     if avg_return_20d is not None:
         clamped_20d = max(-15.0, min(15.0, avg_return_20d))
         score_20d = ((clamped_20d + 15) / 30) * MAX_MOMENTUM_SCORE
-        
+
         final_score = (score_5d * weight_5d) + (score_20d * weight_20d)
     else:
         final_score = score_5d
-    
+
     # 범위 보정
     final_score = max(0.0, min(MAX_MOMENTUM_SCORE, final_score))
-    
-    logger.debug(f"모멘텀 점수: {final_score:.1f}/30 (5일 수익률: {avg_return_5d:+.2f}%)")
-    
+
+    logger.debug(f"모멘텀 점수: {final_score:.1f}/60 (5일 수익률: {avg_return_5d:+.2f}%)")
+
     return round(final_score, 2)
 
 
@@ -387,123 +378,107 @@ def calculate_theme_total_score(
     return result
 
 
+def _get_kis_api():
+    """KIS API 인스턴스 반환 (실패 시 None)"""
+    try:
+        from modules.stock_screener.kis_api import KISApi
+        return KISApi()
+    except Exception:
+        return None
+
+
+def _calculate_theme_momentum(theme: dict, kis) -> float:
+    """
+    KIS API로 테마 종목 5일 수익률 계산, 실패 시 크롤링 데이터 폴백
+
+    Args:
+        theme: 테마 정보 (stocks 리스트 포함)
+        kis: KISApi 인스턴스 또는 None
+
+    Returns:
+        평균 5일 수익률 (%)
+    """
+    # 1차: KIS API (장중에만 가능)
+    if kis and theme.get("stocks"):
+        returns = []
+        for code in theme["stocks"][:5]:  # 최대 5종목
+            try:
+                daily = kis.get_daily_price(code, count=10)
+                if daily and len(daily) >= 6:
+                    close_today = daily[0]["close"]
+                    close_5d_ago = daily[5]["close"]
+                    if close_5d_ago > 0:
+                        ret_5d = (close_today - close_5d_ago) / close_5d_ago * 100
+                        returns.append(ret_5d)
+            except Exception as e:
+                logger.debug(f"KIS API 종목 {code} 조회 실패: {e}")
+                continue
+        if returns:
+            avg = sum(returns) / len(returns)
+            logger.debug(f"KIS API 모멘텀: {avg:+.2f}% ({len(returns)}종목)")
+            return avg
+
+    # 2차: 크롤링 데이터 폴백
+    return theme.get("avg_return_5d") or theme.get("avg_change_rate", 0)
+
+
 def score_themes(themes: list[dict]) -> list[dict]:
     """
-    여러 테마에 대해 점수 일괄 계산
-    
+    여러 테마에 대해 점수 일괄 계산 (결정적 모멘텀 중심)
+
+    배점: 모멘텀(60) + 종목수 보너스(10) + 기본점수(30) = 100
+    KIS API 5일 수익률 우선, 크롤링 avg_change_rate 폴백.
+
     Args:
         themes: 테마 정보 리스트
-            [
-                {
-                    'name': '2차전지',
-                    'avg_change_rate': 5.2,  # 또는 'avg_return_5d'
-                    'foreign_buy_ratio': 70.0,
-                    'institution_buy_ratio': 50.0,
-                    'news_count': 127,
-                    'ai_sentiment': 8.5
-                },
-                ...
-            ]
-    
+
     Returns:
         점수가 추가된 테마 리스트 (점수 내림차순 정렬)
-        
-    Example:
-        >>> scored = score_themes(themes)
-        >>> print(scored[0]['total_score'])
-        87.5
     """
     scored_themes = []
-    
-    # 테마 규모 기반 보너스 (종목수/거래대금 반영)
-    # 고정 보너스 대신 데이터 기반으로 계산
-    # 종목수 10개 이상 = 대형 테마, 20개 이상 = 메이저 테마
+
+    # KIS API 인스턴스 (테마 종목 가격 조회용)
+    kis = _get_kis_api()
 
     for theme in themes:
         theme_name = theme.get("name", theme.get("theme", ""))
 
-        # 필드명 호환성 처리
-        avg_return = theme.get("avg_return_5d") or theme.get("avg_change_rate", 0)
+        # 1. 모멘텀: KIS API 5일 수익률 (우선) → 크롤링 폴백
+        avg_return = _calculate_theme_momentum(theme, kis)
 
-        # 1. 모멘텀 점수 (30점)
-        m_score = calculate_momentum_score(avg_return) if avg_return else 0
+        # 모멘텀 점수: ((avg_return + 15) / 30) * 60 (백테스트 공식)
+        clamped = max(-15.0, min(15.0, avg_return))
+        momentum_score = ((clamped + 15) / 30) * MAX_MOMENTUM_SCORE
 
-        # 2. 수급 점수 (25점) - 실제 데이터 사용
-        foreign_ratio = theme.get("foreign_buy_ratio", 0)
-        inst_ratio = theme.get("institution_buy_ratio", 0)
-        foreign_amt = theme.get("foreign_net_buy", 0)
-        inst_amt = theme.get("institution_net_buy", 0)
-
-        if foreign_ratio or inst_ratio:
-            s_score = calculate_supply_score(foreign_ratio, inst_ratio)
-        elif foreign_amt or inst_amt:
-            s_score = calculate_supply_score_from_amount(foreign_amt, inst_amt)
-        else:
-            # 수급 데이터 없으면 종목수 기반 기본 점수 (대형 테마 우대)
-            stock_count = theme.get("stock_count", len(theme.get("stocks", [])))
-            s_score = min(15, stock_count * 0.8) if stock_count >= 10 else 5
-
-        # 3. 뉴스 점수 (20점)
-        news_count = theme.get("news_count", 0)
-        n_score = calculate_news_score(news_count) if news_count else 5  # 기본 5점
-
-        # 4. AI 감성 점수 (25점)
-        ai_sentiment = theme.get("ai_sentiment", 0)
-        a_score = calculate_ai_sentiment_score(ai_sentiment) if ai_sentiment else 10  # 기본 10점
-
-        # 5. 테마 규모 보너스 (데이터 기반, 고정 보너스 아님)
-        # - 종목수 기반: 대형 테마는 자연스럽게 종목이 많음
-        # - 거래대금 기반: 시장의 관심이 높으면 거래대금이 높음
+        # 2. 종목수 보너스 (최대 10점, 백테스트: min(10, valid_stocks * 2))
         stock_count = theme.get("stock_count", len(theme.get("stocks", [])))
-        avg_trading_value = theme.get("avg_trading_value", 0)  # 억원 단위
+        size_bonus = min(MAX_SIZE_BONUS, stock_count * 2)
 
-        bonus = 0
-        bonus_reason = ""
+        # 3. 기본점수 30점 (뉴스/AI 대신 고정)
+        total = momentum_score + size_bonus + BASE_SCORE
 
-        # 종목수 기반 보너스 (10개당 +2점, 최대 +6점)
-        if stock_count >= 20:
-            bonus += 6
-            bonus_reason = f"메이저테마({stock_count}종목)"
-        elif stock_count >= 15:
-            bonus += 4
-            bonus_reason = f"대형테마({stock_count}종목)"
-        elif stock_count >= 10:
-            bonus += 2
-            bonus_reason = f"중형테마({stock_count}종목)"
-
-        # 거래대금 기반 추가 보너스 (테마 평균 일 거래대금)
-        # 100억 이상 = +2점, 500억 이상 = +4점
-        if avg_trading_value >= 500:
-            bonus += 4
-            bonus_reason += ", 고거래대금" if bonus_reason else "고거래대금"
-        elif avg_trading_value >= 100:
-            bonus += 2
-            bonus_reason += ", 활발한거래" if bonus_reason else "활발한거래"
-
-        total = m_score + s_score + n_score + a_score + bonus
-
-        # 등급 산정 (보너스 포함 기준 상향)
-        if total >= 50:
+        # 등급 산정
+        if total >= 80:
+            grade = "S"
+        elif total >= 65:
             grade = "A"
-        elif total >= 40:
+        elif total >= 50:
             grade = "B"
-        elif total >= 30:
+        elif total >= 40:
             grade = "C"
         else:
             grade = "D"
 
         # 선정 이유 생성
         reasons = []
-        if m_score >= 20:
+        if momentum_score >= 40:
             reasons.append(f"강한모멘텀({avg_return:+.1f}%)")
-        elif m_score >= 15:
+        elif momentum_score >= 30:
             reasons.append(f"양호한모멘텀({avg_return:+.1f}%)")
-        if s_score >= 15:
-            reasons.append("외국인/기관순매수")
-        if n_score >= 15:
-            reasons.append(f"높은화제성({news_count}건)")
-        if bonus_reason:
-            reasons.append(bonus_reason)
+        elif avg_return != 0:
+            reasons.append(f"모멘텀({avg_return:+.1f}%)")
+        if stock_count >= 5:
+            reasons.append(f"{stock_count}종목")
 
         selection_reason = ", ".join(reasons) if reasons else "기본조건충족"
 
@@ -513,22 +488,22 @@ def score_themes(themes: list[dict]) -> list[dict]:
             "theme": theme_name,
             "total_score": round(total, 2),
             "score": round(total, 2),
-            "momentum": round(m_score, 2),
-            "momentum_score": round(m_score, 2),
-            "supply_score": round(s_score, 2),
-            "news_score": round(n_score, 2),
-            "ai_score": round(a_score, 2),
-            "bonus_score": bonus,
+            "momentum": round(momentum_score, 2),
+            "momentum_score": round(momentum_score, 2),
+            "supply_score": 0,
+            "news_score": 0,
+            "ai_score": 0,
+            "bonus_score": round(size_bonus, 2),
             "grade": grade,
             "selection_reason": selection_reason
         }
         scored_themes.append(scored_theme)
-    
+
     # 총점 기준 내림차순 정렬
     scored_themes.sort(key=lambda x: x["total_score"], reverse=True)
-    
-    logger.info(f"📊 {len(scored_themes)}개 테마 점수 계산 완료")
-    
+
+    logger.info(f"📊 {len(scored_themes)}개 테마 점수 계산 완료 (모멘텀 중심)")
+
     return scored_themes
 
 

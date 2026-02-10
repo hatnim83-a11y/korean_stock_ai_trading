@@ -408,7 +408,11 @@ class TradingEngine:
     def get_balance(self) -> dict:
         """현재 잔고 조회"""
         return self.order_api.get_balance()
-    
+
+    def get_orderable_cash(self) -> int:
+        """주문가능현금 조회"""
+        return self.order_api.get_orderable_cash()
+
     def get_positions(self) -> list[dict]:
         """보유 종목 조회"""
         balance = self.get_balance()

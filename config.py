@@ -244,8 +244,8 @@ class Settings(BaseSettings):
         description="최소 거래대금 (50억원)"
     )
     RSI_UPPER_LIMIT: float = Field(
-        default=75.0,
-        description="RSI 상한선 (과열 방지)"
+        default=70.0,
+        description="RSI 상한선 (과열 방지, 백테스트 정합)"
     )
     RSI_LOWER_LIMIT: float = Field(
         default=30.0,
@@ -272,7 +272,7 @@ class Settings(BaseSettings):
     
     # ===== 테마 선정 =====
     TOP_THEME_COUNT: int = Field(
-        default=5,
+        default=4,
         description="선정할 상위 테마 수"
     )
     MIN_THEME_STOCK_COUNT: int = Field(

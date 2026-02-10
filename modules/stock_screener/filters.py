@@ -37,10 +37,10 @@ MIN_INSTITUTION_NET_BUY = 0  # 기관 순매수 최소 (원)
 REQUIRE_BOTH_BUYING = False  # True면 외국인+기관 모두 매수여야 함
 
 # 기술적 필터 기준
-RSI_UPPER_LIMIT = 80.0  # RSI 상한 (과열 방지)
+RSI_UPPER_LIMIT = 70.0  # RSI 상한 (과열 방지, 백테스트 정합)
 RSI_LOWER_LIMIT = 30.0  # RSI 하한 (과매도)
-VOLUME_RATIO_MIN = 1.0  # 거래량 비율 하한 (20일 평균 대비)
-REQUIRE_MA_BULLISH = True  # 정배열 필수 여부
+VOLUME_RATIO_MIN = 0.7  # 거래량 비율 하한 (20일 평균 대비)
+REQUIRE_MA_BULLISH = False  # 정배열 가점만 (탈락 아님, 백테스트 정합)
 
 # 재무 필터 기준
 MAX_DEBT_RATIO = 200.0  # 최대 부채비율 (%)
@@ -396,7 +396,7 @@ def apply_all_filters(
     # 기술적 필터 옵션
     rsi_upper: float = RSI_UPPER_LIMIT,
     volume_ratio_min: float = VOLUME_RATIO_MIN,
-    require_bullish: bool = True,
+    require_bullish: bool = REQUIRE_MA_BULLISH,
     # 재무 필터 옵션
     max_debt_ratio: float = MAX_DEBT_RATIO,
     min_operating_margin: float = MIN_OPERATING_MARGIN,
@@ -447,11 +447,9 @@ def apply_all_filters(
     # 4. 유동성 필터
     result = apply_liquidity_filter(result, min_trade_value=min_trade_value)
     
-    # 전체 통과 여부
+    # 전체 통과 여부 (기술+유동성만, 수급/재무는 정보 기록용)
     all_passed = (
-        result.get("supply_passed", False) and
         result.get("technical_passed", False) and
-        result.get("fundamental_passed", False) and
         result.get("liquidity_passed", False)
     )
     result["all_passed"] = all_passed

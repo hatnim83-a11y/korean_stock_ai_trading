@@ -620,7 +620,59 @@ class KISOrderApi:
         except Exception as e:
             logger.error(f"주문 상태 조회 중 오류: {e}")
             return []
-    
+
+    def get_orderable_cash(self) -> int:
+        """
+        주문가능현금 조회 (매수가능조회 API)
+
+        예수금과 달리 실제 주문에 사용할 수 있는 금액을 반환합니다.
+        (D+2 미결제, 수수료 등 반영)
+
+        Returns:
+            주문가능현금 (원), 실패 시 0
+        """
+        tr_id = "VTTC8908R" if self.is_mock else "TTTC8908R"
+
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
+
+        if "-" in self.account_no:
+            cano, acnt_prdt_cd = self.account_no.split("-")
+        else:
+            cano = self.account_no[:8]
+            acnt_prdt_cd = self.account_no[8:] if len(self.account_no) > 8 else "01"
+
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "PDNO": "005930",  # 조회용 더미 종목 (삼성전자)
+            "ORD_UNPR": "0",   # 시장가
+            "ORD_DVSN": "01",  # 시장가
+            "CMA_EVLU_AMT_ICLD_YN": "N",
+            "OVRS_ICLD_YN": "N",
+        }
+
+        headers = self._get_headers(tr_id)
+
+        try:
+            self._rate_limit()
+            response = httpx.get(url, headers=headers, params=params, timeout=10)
+            data = response.json()
+
+            if data.get("rt_cd") == "0":
+                output = data.get("output", {})
+                orderable = _safe_int(output.get("ord_psbl_cash"))
+                nrcvb = _safe_int(output.get("nrcvb_buy_amt"))
+                # 미수 없는 매수금액이 더 보수적 → 이 값 사용
+                result = nrcvb if nrcvb > 0 else orderable
+                logger.info(f"주문가능현금 조회: {result:,}원 (예수금 기준 주문가능: {orderable:,}원)")
+                return result
+            else:
+                logger.warning(f"주문가능현금 조회 실패: {data.get('msg1', '')}")
+                return 0
+        except Exception as e:
+            logger.error(f"주문가능현금 조회 중 오류: {e}")
+            return 0
+
     def get_balance(self) -> dict:
         """
         잔고 조회

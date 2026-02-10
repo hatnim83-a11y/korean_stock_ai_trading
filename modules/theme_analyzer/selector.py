@@ -203,28 +203,18 @@ def format_theme_report(themes: list[dict]) -> str:
         
         # 점수 상세
         momentum = theme.get("momentum_score", 0)
-        supply = theme.get("supply_score", 0)
-        news = theme.get("news_score", 0)
-        ai = theme.get("ai_score", 0)
-        
-        # AI 분석 정보
-        outlook = theme.get("outlook", theme.get("ai_outlook", ""))
-        reason = theme.get("reason", theme.get("ai_reason", ""))
-        
+        bonus = theme.get("bonus_score", 0)
+        selection_reason = theme.get("selection_reason", "")
+
         lines.append("")
         lines.append(f"🎯 {i}. {name} (점수: {score:.1f}/100, 등급: {grade})")
         lines.append("─" * 55)
         lines.append(
-            f"   모멘텀: {momentum:.1f}/30 | 수급: {supply:.1f}/25 | "
-            f"뉴스: {news:.1f}/20 | AI: {ai:.1f}/25"
+            f"   모멘텀: {momentum:.1f}/60 | 보너스: {bonus:.1f}/10 | 기본: 30"
         )
-        
-        if outlook:
-            lines.append(f"   전망: {outlook}")
-        if reason:
-            # 긴 이유는 줄여서
-            reason_short = reason[:80] + "..." if len(reason) > 80 else reason
-            lines.append(f"   근거: {reason_short}")
+
+        if selection_reason:
+            lines.append(f"   사유: {selection_reason}")
     
     lines.append("")
     lines.append("━" * 55)
@@ -235,145 +225,92 @@ def format_theme_report(themes: list[dict]) -> str:
 # ===== 일일 테마 분석 파이프라인 =====
 
 async def run_daily_theme_analysis(
-    top_count: int = 5,
-    include_ai_analysis: bool = True,
+    top_count: int = 4,
+    include_ai_analysis: bool = False,
     save_to_db: bool = True
 ) -> list[dict]:
     """
-    일일 테마 분석 파이프라인 실행
-    
+    일일 테마 분석 파이프라인 실행 (모멘텀 중심, 뉴스/AI 제거)
+
     전체 테마 분석 프로세스를 실행합니다:
     1. 테마 데이터 크롤링 (네이버, 한경)
-    2. 뉴스 언급 횟수 수집
-    3. AI 감성 분석 (선택)
-    4. 점수 계산 및 순위화
-    5. 상위 테마 선정
-    6. DB 저장 (선택)
-    
+    2. 점수 계산 (모멘텀 중심, 결정적)
+    3. 상위 테마 선정
+    4. DB 저장 (선택)
+
     Args:
         top_count: 선정할 상위 테마 수
-        include_ai_analysis: AI 분석 포함 여부
+        include_ai_analysis: AI 분석 포함 여부 (기본 False)
         save_to_db: DB 저장 여부
-    
+
     Returns:
         선정된 테마 리스트
-        
-    Example:
-        >>> themes = await run_daily_theme_analysis(top_count=5)
-        >>> print(themes[0]['name'])
-        '2차전지'
     """
     logger.info("=" * 60)
-    logger.info("🚀 일일 테마 분석 시작")
+    logger.info("🚀 일일 테마 분석 시작 (모멘텀 중심)")
     logger.info("=" * 60)
-    
+
     start_time = datetime.now()
-    
+
     try:
-        # 1. 테마 데이터 크롤링
+        # Step 1: 테마 데이터 크롤링
         logger.info("📊 Step 1: 테마 데이터 수집")
-        from .crawlers import crawl_all_themes, crawl_multiple_theme_news
-        
+        from .crawlers import crawl_all_themes
+
         all_themes = crawl_all_themes()
         logger.info(f"   수집된 테마: {len(all_themes)}개")
-        
+
         if not all_themes:
             logger.error("테마 데이터 수집 실패")
             return []
-        
-        # 2. 뉴스 언급 횟수 수집
-        logger.info("📰 Step 2: 뉴스 데이터 수집")
-        theme_names = [t["name"] for t in all_themes[:30]]  # 상위 30개만
-        news_counts = crawl_multiple_theme_news(theme_names, days=3)
-        
-        # 테마에 뉴스 카운트 추가
-        for theme in all_themes:
-            theme["news_count"] = news_counts.get(theme["name"], 0)
-        
-        # 3. AI 감성 분석 (선택)
-        if include_ai_analysis:
-            logger.info("🤖 Step 3: AI 감성 분석")
-            from .ai_analyzer import analyze_themes_batch
-            from .crawlers import crawl_theme_news_count
-            
-            # 상위 20개 테마에 대해서만 AI 분석 (비용 절감)
-            # 간단한 뉴스 텍스트 생성 (실제로는 뉴스 본문 크롤링 필요)
-            themes_for_ai = []
-            for theme in all_themes[:20]:
-                themes_for_ai.append({
-                    "name": theme["name"],
-                    "news": f"{theme['name']} 관련 최근 뉴스입니다. (뉴스 수: {theme.get('news_count', 0)}건)"
-                })
-            
-            try:
-                ai_results = await analyze_themes_batch(themes_for_ai, concurrent_limit=5)
-                
-                # AI 결과를 테마에 병합
-                ai_dict = {r["theme_name"]: r for r in ai_results if "theme_name" in r}
-                for theme in all_themes:
-                    if theme["name"] in ai_dict:
-                        ai_data = ai_dict[theme["name"]]
-                        theme["ai_sentiment"] = ai_data.get("score", 5.0)
-                        theme["ai_outlook"] = ai_data.get("outlook", "중립")
-                        theme["ai_reason"] = ai_data.get("reason", "")
-                        
-            except Exception as e:
-                logger.warning(f"AI 분석 실패, 기본값 사용: {e}")
-                for theme in all_themes:
-                    theme["ai_sentiment"] = 5.0
-        else:
-            logger.info("⏭️  Step 3: AI 분석 스킵")
-            for theme in all_themes:
-                theme["ai_sentiment"] = 5.0
-        
-        # 4. 점수 계산
-        logger.info("🔢 Step 4: 점수 계산")
+
+        # Step 2: 점수 계산 (모멘텀 중심, 뉴스/AI 없이)
+        logger.info("🔢 Step 2: 점수 계산 (모멘텀 중심)")
         from .scorer import score_themes
-        
+
         scored_themes = score_themes(all_themes)
-        
-        # 5. 상위 테마 선정
-        logger.info(f"🎯 Step 5: 상위 {top_count}개 테마 선정")
+
+        # Step 3: 상위 테마 선정
+        logger.info(f"🎯 Step 3: 상위 {top_count}개 테마 선정")
         top_themes = select_top_themes(scored_themes, count=top_count)
-        
-        # 6. DB 저장
+
+        # Step 4: DB 저장
         if save_to_db and top_themes:
-            logger.info("💾 Step 6: DB 저장")
+            logger.info("💾 Step 4: DB 저장")
             try:
                 from database import get_database
                 db = get_database()
-                
-                # 테마 점수 저장
+
                 themes_to_save = [
                     {
                         "theme": t["name"],
                         "score": t.get("total_score", 0),
                         "momentum": t.get("momentum_score", 0),
-                        "supply_ratio": t.get("supply_score", 0),
-                        "news_count": t.get("news_count", 0),
-                        "ai_sentiment": t.get("ai_sentiment", 0)
+                        "supply_ratio": 0,
+                        "news_count": 0,
+                        "ai_sentiment": 0
                     }
                     for t in top_themes
                 ]
-                
+
                 db.save_theme_scores(themes_to_save, date.today())
                 db.close()
-                
+
             except Exception as e:
                 logger.error(f"DB 저장 실패: {e}")
-        
+
         # 완료 로그
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info("=" * 60)
         logger.info(f"✅ 일일 테마 분석 완료 ({elapsed:.1f}초)")
         logger.info("=" * 60)
-        
+
         # 결과 리포트 출력
         report = format_theme_report(top_themes)
         print(report)
-        
+
         return top_themes
-        
+
     except Exception as e:
         logger.error(f"일일 테마 분석 실패: {e}")
         import traceback
@@ -382,20 +319,18 @@ async def run_daily_theme_analysis(
 
 
 def run_daily_theme_analysis_sync(
-    top_count: int = 5,
-    include_ai_analysis: bool = True,
+    top_count: int = 4,
+    include_ai_analysis: bool = False,
     save_to_db: bool = True
 ) -> list[dict]:
     """
     일일 테마 분석 파이프라인 (동기 래퍼)
-    
-    asyncio를 직접 다루지 않고 동기 함수처럼 호출할 수 있습니다.
-    
+
     Args:
         top_count: 선정할 상위 테마 수
-        include_ai_analysis: AI 분석 포함 여부
+        include_ai_analysis: AI 분석 포함 여부 (기본 False)
         save_to_db: DB 저장 여부
-    
+
     Returns:
         선정된 테마 리스트
     """

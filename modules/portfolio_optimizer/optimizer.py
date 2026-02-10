@@ -48,7 +48,7 @@ from modules.portfolio_optimizer.calculators import (
 MAX_POSITIONS = settings.MAX_POSITIONS  # 최대 보유 종목 수
 MIN_POSITION_WEIGHT = settings.MIN_POSITION_WEIGHT  # 최소 비중
 MAX_POSITION_WEIGHT = settings.MAX_POSITION_WEIGHT  # 최대 비중
-CASH_BUFFER = 0.05  # 현금 버퍼 5% (고정)
+CASH_BUFFER = 0.10  # 현금 버퍼 10% (수수료/미결제 마진 포함)
 
 
 # ===== 가중치 계산 =====

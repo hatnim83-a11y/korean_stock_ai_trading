@@ -123,6 +123,7 @@ class TradingSystem:
         self.today_trades: list[dict] = []       # 오늘 거래 내역
         self.observation_result = None              # 실시간 관찰 결과
         self._observer_task = None                  # 관찰 비동기 태스크
+        self._last_theme_rotation_date: Optional[date] = None  # 7일 고정 로테이션
 
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -229,6 +230,7 @@ class TradingSystem:
         """
         테마 분석 실행 (08:30)
 
+        7일간 동일 테마 유지, 7일째 또는 긴급 트리거 시만 재선정.
         장 시작 전에 테마를 크롤링하고 점수화하여 상위 테마를 선정합니다.
         종목 스크리닝은 09:05에 별도로 실행됩니다.
 
@@ -238,6 +240,19 @@ class TradingSystem:
         logger.info("=" * 70)
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
+
+        # 기존 테마가 있고, 7일 미경과면 재사용
+        if self.today_themes and self._last_theme_rotation_date:
+            days_since = (date.today() - self._last_theme_rotation_date).days
+            if days_since < settings.THEME_REVIEW_DAYS:
+                logger.info(
+                    f"🔄 기존 테마 유지 ({days_since}일차/{settings.THEME_REVIEW_DAYS}일)"
+                )
+                for t in self.today_themes:
+                    t_name = t.get("theme", t.get("name", ""))
+                    t_score = t.get("score", 0)
+                    logger.info(f"   - {t_name} ({t_score:.1f}점)")
+                return {"success": True, "themes": len(self.today_themes), "reused": True}
 
         start_time = now_kst()
 
@@ -253,7 +268,7 @@ class TradingSystem:
             raw_themes = crawl_all_themes()
             logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
 
-            # 2. 테마 점수화
+            # 2. 테마 점수화 (모멘텀 중심)
             scored_themes = score_themes(raw_themes[:20])
             logger.info(f"   점수화 완료: {len(scored_themes)}개")
 
@@ -281,9 +296,10 @@ class TradingSystem:
                         scored_themes[0]['score']
                     )
 
-            # 4. 상위 테마 선정
-            themes = select_top_themes(scored_themes, count=5)
+            # 4. 상위 테마 선정 (config에서 읽기)
+            themes = select_top_themes(scored_themes, count=settings.TOP_THEME_COUNT)
             self.today_themes = themes  # 09:05 스크리닝에서 사용
+            self._last_theme_rotation_date = date.today()  # 로테이션 날짜 기록
             logger.info(f"   선정 테마: {len(themes)}개")
 
             if not themes:
@@ -391,8 +407,15 @@ class TradingSystem:
             logger.info("\n📋 Step 3: 매수 후보 선정")
 
             candidate_pool_size = settings.CANDIDATE_POOL_SIZE
-            balance = self.trading_engine.get_balance()
-            available_cash = balance.get("cash", settings.TOTAL_CAPITAL)
+            # 실제 주문가능금액 조회 (예수금이 아닌 KIS API 매수가능조회)
+            orderable_cash = self.trading_engine.get_orderable_cash()
+            if orderable_cash > 0:
+                available_cash = orderable_cash
+                logger.info(f"   주문가능현금: {available_cash:,}원")
+            else:
+                balance = self.trading_engine.get_balance()
+                available_cash = balance.get("cash", settings.TOTAL_CAPITAL)
+                logger.info(f"   예수금 기준: {available_cash:,}원 (주문가능금액 조회 실패)")
 
             optimization_result = await asyncio.to_thread(
                 run_daily_optimization,
@@ -653,17 +676,17 @@ class TradingSystem:
     async def check_theme_rotation(self) -> dict:
         """
         테마 로테이션 체크 (08:00)
-        
-        2주 단위로 메인 테마를 재평가합니다.
-        점수 -20% 하락 시 즉시 변경됩니다.
-        
+
+        7일 단위로 메인 테마를 재평가합니다.
+        점수 -20% 하락 또는 +15% 급등 시 즉시 변경됩니다.
+
         Returns:
             체크 결과
         """
         logger.info("=" * 70)
         logger.info("🔄 테마 로테이션 체크 (08:00)")
         logger.info("=" * 70)
-        
+
         try:
             # 현재 테마 정보 출력
             theme_info = self.theme_rotator.get_main_theme_info()
@@ -671,11 +694,19 @@ class TradingSystem:
                 logger.info(f"   현재 테마: {theme_info['theme_name']}")
                 logger.info(f"   보유 일수: {theme_info['days_held']}일 / {settings.THEME_REVIEW_DAYS}일")
                 logger.info(f"   점수 변화: {theme_info['score_change_rate']:+.1%}")
+
+                # 긴급 트리거: -20% 하락 또는 +15% 급등 시 강제 재선정
+                score_change = theme_info.get('score_change_rate', 0)
+                if score_change <= settings.THEME_CHANGE_THRESHOLD or score_change >= settings.THEME_SURGE_THRESHOLD:
+                    logger.warning(
+                        f"⚠️ 긴급 트리거 발동! 점수 변화: {score_change:+.1%} → 다음 08:30 강제 재선정"
+                    )
+                    self._last_theme_rotation_date = None  # 리셋 → 다음 08:30 강제 재선정
             else:
                 logger.info("   메인 테마 미설정")
-            
+
             return {"success": True, "theme_info": theme_info}
-            
+
         except Exception as e:
             logger.error(f"테마 로테이션 체크 실패: {e}")
             return {"success": False, "error": str(e)}
@@ -731,14 +762,64 @@ class TradingSystem:
             logger.error(f"리포트 발송 실패: {e}")
     
     # ===== 수동 실행 =====
-    
+
     async def run_manual_analysis(self) -> dict:
-        """수동 분석 실행 (테마 분석 + 종목 스크리닝 순차 실행)"""
-        logger.info("🔧 수동 분석 모드")
+        """
+        수동 전체 파이프라인 (테마 → 스크리닝 → 매수 → 모니터링)
+
+        스케줄러 없이 즉시 전체 프로세스를 실행합니다.
+        매수 성공 시 장 마감까지 실시간 모니터링을 유지합니다.
+        """
+        logger.info("=" * 70)
+        logger.info("🔧 수동 전체 파이프라인 실행")
+        logger.info(f"   모드: {'모의투자' if self.use_mock else '🔴 실전투자'}")
+        logger.info(f"   테스트: {'ON (주문 미실행)' if self.test_mode else 'OFF (실제 주문)'}")
+        logger.info("=" * 70)
+
+        # DB 초기화
+        self._init_database()
+        self.is_running = True
+
+        # 시스템 시작 알림
+        self.notifier.send_message(
+            f"🔧 수동 파이프라인 시작\n"
+            f"모드: {'모의' if self.use_mock else '실전'}\n"
+            f"테스트: {'ON' if self.test_mode else 'OFF'}"
+        )
+
+        # 1. 테마 분석
         theme_result = await self.run_theme_analysis()
         if not theme_result.get("success"):
             return theme_result
-        return await self.run_stock_screening()
+
+        # 2. 종목 스크리닝 + AI 검증 + 포트폴리오 최적화
+        screening_result = await self.run_stock_screening()
+        if not screening_result.get("success"):
+            return screening_result
+
+        # 3. 매수 실행
+        buy_result = await self.execute_buy_orders()
+        if not buy_result.get("success"):
+            logger.warning(f"매수 실행 결과: {buy_result}")
+            return buy_result
+
+        logger.info("\n" + "=" * 70)
+        logger.info("✅ 매수 완료 — 실시간 모니터링 시작")
+        logger.info("   종료: Ctrl+C")
+        logger.info("=" * 70)
+
+        # 4. 실시간 모니터링 (장 마감까지)
+        await self.start_monitoring()
+
+        try:
+            while self.is_running:
+                await asyncio.sleep(10)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            logger.info("\n수동 모니터링 종료 요청")
+        finally:
+            await self.stop()
+
+        return buy_result
 
 
 # ===== CLI 인터페이스 =====
