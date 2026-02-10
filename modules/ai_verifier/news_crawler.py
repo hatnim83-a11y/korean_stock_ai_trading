@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import now_kst
+from config import now_kst, KST
 
 
 # ===== 상수 정의 =====
@@ -135,7 +135,7 @@ def fetch_stock_news(
                 if date_elem:
                     date_str = date_elem.get_text(strip=True)
                     try:
-                        news_date = datetime.strptime(date_str, "%Y.%m.%d %H:%M")
+                        news_date = datetime.strptime(date_str, "%Y.%m.%d %H:%M").replace(tzinfo=KST)
                     except ValueError:
                         news_date = now_kst()
                 else:

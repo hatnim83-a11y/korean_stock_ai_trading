@@ -57,22 +57,26 @@ def _safe_float(value, default: float = 0.0) -> float:
 class KISApi:
     """
     한국투자증권 KIS Developers API 클라이언트
-    
+
     주식 시세, 수급 데이터, 재무 정보 등을 조회합니다.
-    
+
     Attributes:
         app_key: API 앱 키
         app_secret: API 앱 시크릿
         account_no: 계좌번호
         is_mock: 모의투자 여부
-        
+
     Example:
         >>> kis = KISApi()
         >>> price = kis.get_current_price("005930")
         >>> print(price['price'])
         75000
     """
-    
+
+    # 클래스 레벨 토큰 캐시 (동일 appkey에 대해 모든 인스턴스가 토큰 공유)
+    _shared_token: Optional[str] = None
+    _shared_token_expired_at: float = 0
+
     def __init__(
         self,
         app_key: Optional[str] = None,
@@ -138,32 +142,43 @@ class KISApi:
         Raises:
             Exception: 토큰 발급 실패 시
         """
-        # 토큰이 유효하면 재사용 (만료 1시간 전 갱신)
+        # 1) 인스턴스 토큰이 유효하면 재사용 (만료 1시간 전 갱신)
         if self.access_token and self.token_expired_at > time.time() + 3600:
             return self.access_token
-        
+
+        # 2) 클래스 레벨 공유 토큰이 유효하면 재사용
+        if KISApi._shared_token and KISApi._shared_token_expired_at > time.time() + 3600:
+            self.access_token = KISApi._shared_token
+            self.token_expired_at = KISApi._shared_token_expired_at
+            logger.info("🔑 KIS API 공유 토큰 재사용")
+            return self.access_token
+
         url = f"{self.base_url}/oauth2/tokenP"
-        
+
         headers = {"content-type": "application/json"}
         body = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
             "appsecret": self.app_secret
         }
-        
+
         try:
             response = self.client.post(url, headers=headers, json=body)
             response.raise_for_status()
-            
+
             data = response.json()
-            
+
             if "access_token" not in data:
                 raise Exception(f"토큰 발급 실패: {data}")
-            
+
             self.access_token = data["access_token"]
             # 토큰 유효기간: 24시간
             self.token_expired_at = time.time() + (24 * 60 * 60)
-            
+
+            # 클래스 레벨에도 저장 (다른 인스턴스가 재사용)
+            KISApi._shared_token = self.access_token
+            KISApi._shared_token_expired_at = self.token_expired_at
+
             logger.info("🔑 KIS API 토큰 발급 성공")
             return self.access_token
             
