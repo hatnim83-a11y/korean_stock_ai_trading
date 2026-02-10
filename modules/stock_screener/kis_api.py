@@ -308,11 +308,15 @@ class KISApi:
             if not stock_name:
                 stock_name = self.get_stock_name(stock_code)
 
+            current_price = _safe_int(output.get("stck_prpr"))
+            change = _safe_int(output.get("prdy_vrss"))
+
             result = {
                 "code": stock_code,
                 "name": stock_name,
-                "price": _safe_int(output.get("stck_prpr")),  # 현재가
-                "change": _safe_int(output.get("prdy_vrss")),  # 전일대비
+                "price": current_price,  # 현재가
+                "change": change,  # 전일대비
+                "prev_close": current_price - change if change else 0,  # 전일종가
                 "change_rate": _safe_float(output.get("prdy_ctrt")),  # 등락률
                 "volume": _safe_int(output.get("acml_vol")),  # 누적거래량
                 "trade_value": _safe_int(output.get("acml_tr_pbmn")),  # 누적거래대금

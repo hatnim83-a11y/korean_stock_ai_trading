@@ -155,10 +155,10 @@ class GapFilter:
         
         for stock in stocks:
             result = self.check(
-                stock_code=stock.get("code", ""),
+                stock_code=stock.get("code", stock.get("stock_code", "")),
                 prev_close=stock.get("prev_close", 0),
                 open_price=stock.get("open_price", stock.get("current_price", 0)),
-                stock_name=stock.get("name", "")
+                stock_name=stock.get("name", stock.get("stock_name", ""))
             )
             
             # 결과 정보 추가

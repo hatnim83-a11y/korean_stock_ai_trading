@@ -150,16 +150,16 @@ class MorningScreener:
         logger.info(f"📡 {len(stocks)}개 종목 실시간 데이터 수집 중...")
         
         for i, stock in enumerate(stocks):
-            stock_code = stock.get("code", "")
-            stock_name = stock.get("name", "")
+            stock_code = stock.get("code", stock.get("stock_code", ""))
+            stock_name = stock.get("name", stock.get("stock_name", ""))
             
             try:
                 # 현재가 조회
                 price_data = self.kis_api.get_current_price(stock_code)
                 if price_data:
                     stock["current_price"] = price_data.get("price", 0)
-                    stock["open_price"] = price_data.get("open_price", stock["current_price"])
-                    stock["prev_close"] = price_data.get("prev_close", stock.get("prev_close", 0))
+                    stock["open_price"] = price_data.get("open", stock["current_price"])
+                    stock["prev_close"] = price_data.get("prev_close", 0)
                     stock["current_volume"] = price_data.get("volume", 0)
                     stock["change_rate"] = price_data.get("change_rate", 0)
                 
@@ -216,7 +216,10 @@ class MorningScreener:
         all_excluded = []
         
         current_stocks = candidates.copy()
-        
+
+        # 0. 실시간 가격 데이터 수집 (갭 필터용 prev_close, open_price)
+        current_stocks = self._fetch_realtime_data(current_stocks)
+
         # 1. 시초가 갭 필터 (동적 갭 적용)
         if self.enable_gap_filter and current_stocks:
             logger.info("\n📊 Step 1: 시초가 갭 필터")
