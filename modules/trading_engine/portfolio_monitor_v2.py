@@ -338,15 +338,25 @@ class PortfolioMonitorV2:
     
     async def _monitor_loop(self) -> None:
         """모니터링 루프"""
+        status_interval = 30 * 60  # 30분마다 상태 로그
+        last_status_log = 0
+
         while self._running:
             await asyncio.sleep(CHECK_INTERVAL)
-            
+
             # 장 시간 체크 (09:00 ~ 15:30)
             if not self._is_market_hours():
                 continue
-            
+
             # 손익 체크
             await self._check_all_positions()
+
+            # 주기적 상태 로그 (30분마다)
+            import time as _time
+            now_ts = _time.time()
+            if now_ts - last_status_log >= status_interval:
+                last_status_log = now_ts
+                self._log_status()
     
     def _is_market_hours(self) -> bool:
         """장 시간 여부 (KST 기준)"""
@@ -356,7 +366,27 @@ class PortfolioMonitorV2:
         market_close = dt_time(15, 30)
 
         return market_open <= now <= market_close
-    
+
+    def _log_status(self) -> None:
+        """주기적 모니터링 상태 로그 (30분 간격)"""
+        if not self.positions:
+            logger.info("📊 모니터링 중: 포지션 없음")
+            return
+
+        lines = [f"📊 모니터링 중: {len(self.positions)}종목"]
+        for pos in self.positions.values():
+            trail_info = ""
+            if pos.trailing_active:
+                trail_info = f" T.L{pos.trailing_level}({pos.trailing_stop:,.0f})"
+            lines.append(
+                f"   {pos.stock_name} {pos.current_price:,}원 "
+                f"({pos.profit_rate:+.1%}) "
+                f"보유{pos.hold_days}일 "
+                f"최고{pos.highest_price:,}원"
+                f"{trail_info}"
+            )
+        logger.info("\n".join(lines))
+
     def _on_price_update(self, price_data: PriceData) -> None:
         """
         가격 업데이트 콜백
