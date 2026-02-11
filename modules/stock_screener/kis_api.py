@@ -247,6 +247,49 @@ class KISApi:
 
         return ""
 
+    # ===== 지수 조회 =====
+
+    def get_index_price(self, index_code: str) -> Optional[dict]:
+        """
+        업종(지수) 현재가 조회
+
+        Args:
+            index_code: 지수코드 ("0001"=KOSPI, "1001"=KOSDAQ)
+
+        Returns:
+            {'price': float, 'change': float, 'change_rate': float} or None
+        """
+        self._rate_limit()
+
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-index-price"
+        tr_id = "FHPUP02100000"
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "U",
+            "FID_INPUT_ISCD": index_code
+        }
+
+        try:
+            response = self.client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+            data = response.json()
+            if data.get("rt_cd") != "0":
+                logger.warning(f"[{index_code}] 지수 조회 실패: {data.get('msg1')}")
+                return None
+
+            output = data.get("output", {})
+            return {
+                "price": _safe_float(output.get("bstp_nmix_prpr")),
+                "change": _safe_float(output.get("bstp_nmix_prdy_vrss")),
+                "change_rate": _safe_float(output.get("bstp_nmix_prdy_ctrt")),
+            }
+
+        except Exception as e:
+            logger.error(f"[{index_code}] 지수 조회 중 오류: {e}")
+            return None
+
     # ===== 현재가/시세 조회 =====
 
     def get_current_price(self, stock_code: str) -> Optional[dict]:
