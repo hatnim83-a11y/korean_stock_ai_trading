@@ -495,18 +495,16 @@ class TradingSystem:
 
     async def execute_buy_orders(self) -> dict:
         """
-        리밸런싱 + 매수 실행 (09:25)
+        빈 슬롯 매수 실행 (09:25)
 
-        기존 보유 종목을 AI 추천과 비교하여:
-        - KEEP: 보유 중 + AI 추천에도 있음 → 유지
-        - SELL: 보유 중 + AI 추천에 없음 → 매도
-        - BUY:  미보유 + AI 추천에 있음 → 매수
+        보유 종목은 손절/트레일링으로만 매도 (모니터링 담당).
+        여기서는 빈 슬롯에만 AI 추천 종목을 신규 매수한다.
 
         Returns:
             실행 결과
         """
         logger.info("=" * 70)
-        logger.info("💰 리밸런싱 + 매수 실행 (09:25)")
+        logger.info("💰 빈 슬롯 매수 실행 (09:25)")
         logger.info("=" * 70)
 
         # Phase 0: 관찰 완료 대기
@@ -517,9 +515,9 @@ class TradingSystem:
             except asyncio.TimeoutError:
                 logger.warning("관찰 타임아웃 - 가용 데이터로 진행")
 
-        # Phase 1: 안전 체크 — AI 분석 없으면 리밸런싱 스킵 (전량 매도 방지)
+        # Phase 1: 안전 체크
         if not self.today_ai_analysis:
-            logger.warning("AI 분석 결과 없음 - 리밸런싱 스킵")
+            logger.warning("AI 분석 결과 없음 - 매수 스킵")
             return {"success": False, "reason": "AI 분석 없음"}
 
         # Phase 2: 현재 보유 종목 로드
@@ -528,80 +526,24 @@ class TradingSystem:
         current_holdings = db.get_portfolio(status='holding')
         db.close()
         held_codes = {h['stock_code'] for h in current_holdings}
-        logger.info(f"   현재 보유: {len(current_holdings)}종목 {list(held_codes)}")
+        held_count = len(current_holdings)
+        logger.info(f"   현재 보유: {held_count}종목 {[h['stock_name'] for h in current_holdings]}")
 
-        # Phase 3: AI 추천과 비교 (code vs stock_code 매핑)
-        recommended_codes = {s['code'] for s in self.today_ai_analysis}
-        keep_holdings = [h for h in current_holdings if h['stock_code'] in recommended_codes]
-        sell_holdings = [h for h in current_holdings if h['stock_code'] not in recommended_codes]
-
-        logger.info(f"   AI 추천: {len(recommended_codes)}종목 {list(recommended_codes)}")
-        logger.info(f"   KEEP: {len(keep_holdings)}종목 {[h['stock_name'] for h in keep_holdings]}")
-        logger.info(f"   SELL: {len(sell_holdings)}종목 {[h['stock_name'] for h in sell_holdings]}")
-
-        # Phase 4: 매도 실행 (리밸런싱)
-        sold_count = 0
-        if sell_holdings:
-            sell_orders = [
-                {
-                    "stock_code": h['stock_code'],
-                    "stock_name": h['stock_name'],
-                    "quantity": h['shares'],
-                    "buy_price": h.get('buy_price', 0),
-                    "reason": "리밸런싱"
-                }
-                for h in sell_holdings
-            ]
-
-            if self.test_mode:
-                logger.info(f"   [테스트 모드] 매도 스킵: {len(sell_orders)}건")
-                sold_count = len(sell_orders)
-            else:
-                sell_result = await asyncio.to_thread(
-                    self.trading_engine.execute_sell_orders,
-                    sell_orders
-                )
-                # DB close_position
-                db = Database()
-                db.connect()
-                for order in sell_result.get("orders", []):
-                    if order.get("success"):
-                        sold_count += 1
-                        db.close_position(order['stock_code'], "리밸런싱")
-                        self.today_trades.append({
-                            "action": "sell",
-                            "stock_code": order.get("stock_code", ""),
-                            "stock_name": order.get("stock_name", ""),
-                            "shares": order.get("quantity", 0),
-                            "price": order.get("filled_price") or order.get("price", 0),
-                            "profit_rate": order.get("profit_rate"),
-                            "profit_amount": order.get("profit_amount"),
-                            "reason": "리밸런싱"
-                        })
-                db.close()
-                logger.info(f"   매도 완료: {sold_count}/{len(sell_orders)}건")
-
-                # 체결 대기 (KIS API 현금 반영 시간)
-                if sold_count > 0:
-                    logger.info("   ⏳ 매도 체결 대기 (3초)...")
-                    await asyncio.sleep(3)
-
-        # Phase 5: 가용 슬롯/현금 계산
-        kept_count = len(keep_holdings)
-        available_slots = settings.MAX_POSITIONS - kept_count
-        logger.info(f"   가용 슬롯: {available_slots} (MAX={settings.MAX_POSITIONS}, KEEP={kept_count})")
+        # Phase 3: 가용 슬롯 계산
+        available_slots = settings.MAX_POSITIONS - held_count
+        logger.info(f"   가용 슬롯: {available_slots} (MAX={settings.MAX_POSITIONS}, 보유={held_count})")
 
         if available_slots <= 0:
-            logger.info("   슬롯 없음 - 신규 매수 스킵 (풀 포지션 유지)")
-            self._send_rebalance_summary(keep_holdings, sell_holdings, sold_count, [], 0)
-            return {"success": True, "kept": kept_count, "sold": sold_count, "bought": 0}
+            logger.info("   슬롯 없음 - 풀 포지션 유지")
+            self._send_buy_summary(current_holdings, [], 0)
+            return {"success": True, "held": held_count, "bought": 0}
 
         if not self.today_candidates:
             logger.warning("   매수 후보 없음 - 신규 매수 스킵")
-            self._send_rebalance_summary(keep_holdings, sell_holdings, sold_count, [], 0)
-            return {"success": True, "kept": kept_count, "sold": sold_count, "bought": 0}
+            self._send_buy_summary(current_holdings, [], 0)
+            return {"success": True, "held": held_count, "bought": 0}
 
-        # 현금 조회
+        # Phase 4: 현금 조회
         if self.test_mode:
             available_cash = settings.TOTAL_CAPITAL
         else:
@@ -613,15 +555,14 @@ class TradingSystem:
 
         if available_cash < 100_000:
             logger.warning("   현금 부족 (<10만원) - 신규 매수 스킵")
-            self._send_rebalance_summary(keep_holdings, sell_holdings, sold_count, [], 0)
-            return {"success": True, "kept": kept_count, "sold": sold_count, "bought": 0}
+            self._send_buy_summary(current_holdings, [], 0)
+            return {"success": True, "held": held_count, "bought": 0}
 
-        # Phase 6: 신규 후보 필터링 (보유 종목 제외)
-        keep_codes = {h['stock_code'] for h in keep_holdings}
-        new_candidates = [c for c in self.today_candidates if c['stock_code'] not in keep_codes]
+        # Phase 5: 신규 후보 필터링 (보유 종목 제외)
+        new_candidates = [c for c in self.today_candidates if c['stock_code'] not in held_codes]
         logger.info(f"   신규 후보 (보유 제외): {len(new_candidates)}개")
 
-        # 모닝 필터 적용 (신규 매수 대상만)
+        # 모닝 필터 적용
         if settings.ENABLE_MORNING_FILTER and new_candidates:
             filter_result = await asyncio.to_thread(
                 self.morning_screener.filter_candidates,
@@ -636,12 +577,10 @@ class TradingSystem:
 
         if not filtered_new:
             logger.warning("   필터 통과 종목 없음 - 신규 매수 스킵")
-            self._send_rebalance_summary(keep_holdings, sell_holdings, sold_count, [], 0)
-            return {"success": True, "kept": kept_count, "sold": sold_count, "bought": 0}
+            self._send_buy_summary(current_holdings, [], 0)
+            return {"success": True, "held": held_count, "bought": 0}
 
-        # Phase 7: 포트폴리오 최적화 (슬롯 비례 자본 배분)
-        # 종목당 목표 금액 = TOTAL_CAPITAL / MAX_POSITIONS
-        # 예: 1000만/5슬롯 = 200만/종목, 2종목이면 400만만 투자 (나머지 현금 보유)
+        # Phase 6: 포트폴리오 최적화 (슬롯 비례 자본 배분)
         filtered_codes = {c['stock_code'] for c in filtered_new}
         new_ai_stocks = [
             s for s in self.today_ai_analysis
@@ -669,7 +608,7 @@ class TradingSystem:
 
         logger.info(f"   최적화 후 매수 대상: {len(new_buy_orders)}개")
 
-        # Phase 8: 매수 실행
+        # Phase 7: 매수 실행
         bought_count = 0
         if new_buy_orders:
             if self.test_mode:
@@ -701,59 +640,43 @@ class TradingSystem:
                             "price": order.get("price", 0)
                         })
 
-        # Phase 9: 텔레그램 리밸런싱 요약 발송
-        self._send_rebalance_summary(keep_holdings, sell_holdings, sold_count, new_buy_orders, bought_count)
+        # Phase 8: 텔레그램 요약 발송
+        self._send_buy_summary(current_holdings, new_buy_orders, bought_count)
 
-        logger.info(f"\n✅ 리밸런싱 완료: KEEP={kept_count} SELL={sold_count} BUY={bought_count}")
+        logger.info(f"\n✅ 매수 완료: 보유={held_count} 신규={bought_count}")
         return {
             "success": True,
-            "kept": kept_count,
-            "sold": sold_count,
+            "held": held_count,
             "bought": bought_count,
             "available_slots": available_slots
         }
 
-    def _send_rebalance_summary(
+    def _send_buy_summary(
         self,
-        keep_holdings: list[dict],
-        sell_holdings: list[dict],
-        sold_count: int,
+        current_holdings: list[dict],
         new_buy_orders: list[dict],
         bought_count: int
     ) -> None:
-        """리밸런싱 결과 텔레그램 요약 발송"""
-        lines = ["🔄 09:25 리밸런싱 결과\n"]
+        """09:25 매수 결과 텔레그램 요약 발송"""
+        lines = ["💰 09:25 매수 결과\n"]
 
-        # 유지 종목
-        if keep_holdings:
-            lines.append(f"✅ 유지: {len(keep_holdings)}종목")
-            for h in keep_holdings:
+        # 기존 보유 종목
+        if current_holdings:
+            lines.append(f"📦 보유 유지: {len(current_holdings)}종목")
+            for h in current_holdings:
                 lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
 
-        # 매도 종목 (today_trades에서 손익 확인)
-        if sell_holdings:
-            lines.append(f"\n📤 매도: {sold_count}/{len(sell_holdings)}종목")
-            sell_trades = {t['stock_code']: t for t in self.today_trades if t.get('action') == 'sell'}
-            for h in sell_holdings:
-                trade = sell_trades.get(h['stock_code'], {})
-                pnl = trade.get('profit_rate')
-                price = trade.get('price', 0)
-                if pnl is not None:
-                    lines.append(f"  - {h['stock_name']} @ {price:,}원 ({pnl:+.2%})")
-                else:
-                    lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
-
-        # 매수 종목
+        # 신규 매수 종목
         if new_buy_orders:
-            lines.append(f"\n📥 매수: {bought_count}/{len(new_buy_orders)}종목")
+            lines.append(f"\n📥 신규 매수: {bought_count}/{len(new_buy_orders)}종목")
             for o in new_buy_orders:
                 name = o.get('stock_name', o.get('stock_code', '?'))
                 code = o.get('stock_code', '')
                 amount = o.get('amount', 0)
                 lines.append(f"  - {name} ({code}) {amount:,}원")
 
-        if not keep_holdings and not sell_holdings and not new_buy_orders:
-            lines.append("변동 없음 (보유 0개, 매수 후보 없음)")
+        if not current_holdings and not new_buy_orders:
+            lines.append("보유 0개, 매수 후보 없음")
 
         self.notifier.send_message("\n".join(lines))
     
