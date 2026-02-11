@@ -282,11 +282,11 @@ class TradingEngine:
     ) -> dict:
         """
         매도 주문 실행
-        
+
         Args:
-            orders: 매도 주문 리스트
+            orders: 매도 주문 리스트 (buy_price 포함 시 손익 계산)
             save_to_db: DB 저장 여부
-        
+
         Returns:
             실행 결과
         """
@@ -294,35 +294,56 @@ class TradingEngine:
         logger.info("📉 매도 주문 실행")
         logger.info(f"   주문 수: {len(orders)}건")
         logger.info("=" * 60)
-        
+
         results = []
-        
+
         for i, order in enumerate(orders, 1):
             stock_code = order.get("stock_code", "")
             stock_name = order.get("stock_name", stock_code)
             quantity = order.get("quantity", 0)
             reason = order.get("reason", "")
-            
+            buy_price = order.get("buy_price", 0)
+
             logger.info(f"\n[{i}/{len(orders)}] 매도: {stock_name}")
             logger.info(f"   사유: {reason}")
-            
+
             result = self.order_api.sell_market_order(stock_code, quantity)
             result["stock_name"] = stock_name
             result["reason"] = reason
+            result["buy_price"] = buy_price
             results.append(result)
-            
+
             if i < len(orders):
                 time.sleep(0.5)
-        
+
+        # 체결 대기 (체결가 확인)
+        if not self.use_mock_api:
+            self._wait_for_fills(results)
+
+        # 손익 계산 + 금액 업데이트
+        for result in results:
+            if not result.get("success"):
+                continue
+            filled_price = result.get("filled_price", 0)
+            buy_price = result.get("buy_price", 0)
+            quantity = result.get("quantity", 0)
+            if filled_price and quantity:
+                result["price"] = filled_price
+                result["amount"] = filled_price * quantity
+            if filled_price and buy_price:
+                result["profit_rate"] = (filled_price - buy_price) / buy_price
+                result["profit_amount"] = (filled_price - buy_price) * quantity
+                logger.info(f"   📊 {result.get('stock_name')}: {buy_price:,}→{filled_price:,}원 ({result['profit_rate']:+.2%})")
+
         # 결과 집계
         success_count = sum(1 for r in results if r.get("success"))
-        
+
         # DB 저장
         if save_to_db:
             self._save_trades(results, is_sell=True)
-        
+
         logger.info(f"\n✅ 매도 완료: {success_count}/{len(orders)}건")
-        
+
         return {
             "success": success_count == len(orders),
             "total_orders": len(orders),

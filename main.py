@@ -547,6 +547,7 @@ class TradingSystem:
                     "stock_code": h['stock_code'],
                     "stock_name": h['stock_name'],
                     "quantity": h['shares'],
+                    "buy_price": h.get('buy_price', 0),
                     "reason": "리밸런싱"
                 }
                 for h in sell_holdings
@@ -572,7 +573,9 @@ class TradingSystem:
                             "stock_code": order.get("stock_code", ""),
                             "stock_name": order.get("stock_name", ""),
                             "shares": order.get("quantity", 0),
-                            "price": order.get("price", 0),
+                            "price": order.get("filled_price") or order.get("price", 0),
+                            "profit_rate": order.get("profit_rate"),
+                            "profit_amount": order.get("profit_amount"),
                             "reason": "리밸런싱"
                         })
                 db.close()
@@ -727,11 +730,18 @@ class TradingSystem:
             for h in keep_holdings:
                 lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
 
-        # 매도 종목
+        # 매도 종목 (today_trades에서 손익 확인)
         if sell_holdings:
             lines.append(f"\n📤 매도: {sold_count}/{len(sell_holdings)}종목")
+            sell_trades = {t['stock_code']: t for t in self.today_trades if t.get('action') == 'sell'}
             for h in sell_holdings:
-                lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
+                trade = sell_trades.get(h['stock_code'], {})
+                pnl = trade.get('profit_rate')
+                price = trade.get('price', 0)
+                if pnl is not None:
+                    lines.append(f"  - {h['stock_name']} @ {price:,}원 ({pnl:+.2%})")
+                else:
+                    lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
 
         # 매수 종목
         if new_buy_orders:
