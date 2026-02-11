@@ -375,13 +375,13 @@ class TelegramNotifier:
         Returns:
             전송 성공 여부
         """
-        # 포트폴리오 통계
+        # 포트폴리오 통계 (KIS API: quantity/current_amount/buy_amount)
         total_value = sum(
-            p.get("shares", 0) * p.get("current_price", p.get("buy_price", 0))
+            p.get("current_amount", 0) or p.get("quantity", p.get("shares", 0)) * p.get("current_price", 0)
             for p in portfolio
         )
         total_cost = sum(
-            p.get("shares", 0) * p.get("buy_price", 0)
+            p.get("buy_amount", 0) or p.get("quantity", p.get("shares", 0)) * p.get("buy_price", 0)
             for p in portfolio
         )
         total_profit = total_value - total_cost
