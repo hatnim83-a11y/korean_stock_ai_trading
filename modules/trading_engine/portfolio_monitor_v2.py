@@ -338,8 +338,11 @@ class PortfolioMonitorV2:
     
     async def _monitor_loop(self) -> None:
         """모니터링 루프"""
+        import time as _time
         status_interval = 30 * 60  # 30분마다 상태 로그
+        db_update_interval = 5 * 60  # 5분마다 DB 가격 갱신
         last_status_log = 0
+        last_db_update = 0
 
         while self._running:
             await asyncio.sleep(CHECK_INTERVAL)
@@ -351,9 +354,14 @@ class PortfolioMonitorV2:
             # 손익 체크
             await self._check_all_positions()
 
-            # 주기적 상태 로그 (30분마다)
-            import time as _time
             now_ts = _time.time()
+
+            # 주기적 DB 가격 갱신 (5분마다)
+            if now_ts - last_db_update >= db_update_interval:
+                last_db_update = now_ts
+                self._update_db_prices()
+
+            # 주기적 상태 로그 (30분마다)
             if now_ts - last_status_log >= status_interval:
                 last_status_log = now_ts
                 self._log_status()
@@ -366,6 +374,27 @@ class PortfolioMonitorV2:
         market_close = dt_time(15, 30)
 
         return market_open <= now <= market_close
+
+    def _update_db_prices(self) -> None:
+        """보유 종목 현재가를 DB에 주기적으로 갱신"""
+        if not self.positions:
+            return
+
+        try:
+            db = Database()
+            db.connect()
+            for pos in self.positions.values():
+                if pos.current_price > 0:
+                    db.update_portfolio_price(
+                        stock_code=pos.stock_code,
+                        current_price=pos.current_price,
+                        profit_rate=pos.profit_rate,
+                        profit_amount=pos.profit
+                    )
+            db.close()
+            logger.debug(f"DB 가격 갱신: {len(self.positions)}종목")
+        except Exception as e:
+            logger.error(f"DB 가격 갱신 실패: {e}")
 
     def _log_status(self) -> None:
         """주기적 모니터링 상태 로그 (30분 간격)"""

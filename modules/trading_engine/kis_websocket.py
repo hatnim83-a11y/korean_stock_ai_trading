@@ -388,16 +388,17 @@ class KISWebSocket:
     async def _handle_pipe_message(self, message: str) -> None:
         """
         파이프 구분 메시지 처리 (실시간 시세)
-        
-        형식: TR코드|종목코드|현재가|...
+
+        KIS WebSocket 메시지 형식:
+        암호화구분(0/1) | TR_ID | 건수 | 데이터(^구분)
         """
         parts = message.split('|')
-        
-        if len(parts) < 3:
+
+        if len(parts) < 4:
             return
-        
-        tr_id = parts[0]
-        
+
+        tr_id = parts[1]  # parts[0]은 암호화구분, parts[1]이 TR_ID
+
         if tr_id == TR_PRICE or "STCNT" in tr_id:
             await self._parse_price_data(parts)
         elif tr_id == TR_ORDERBOOK or "STASP" in tr_id:
@@ -406,93 +407,102 @@ class KISWebSocket:
     async def _parse_price_data(self, parts: list[str]) -> None:
         """
         체결가 데이터 파싱
-        
-        KIS 실시간 체결 데이터 형식:
-        [0] TR코드
-        [1] 종목코드
-        [2] 체결시간
-        [3] 현재가
-        [4] 전일대비구분
-        [5] 전일대비
-        [6] 전일대비율
-        [7] 가중평균가
-        [8] 시가
-        [9] 고가
-        [10] 저가
-        [11] 매도호가
-        [12] 매수호가
-        [13] 체결량
-        [14] 누적거래량
-        ...
+
+        KIS WebSocket 메시지 형식: 암호화구분|TR_ID|건수|데이터
+        데이터는 ^(caret)으로 구분된 필드:
+        [0] 종목코드  [1] 체결시간  [2] 현재가  [3] 전일대비부호
+        [4] 전일대비  [5] 전일대비율  [6] 가중평균가  [7] 시가
+        [8] 고가  [9] 저가  [10] 매도호가1  [11] 매수호가1
+        [12] 체결거래량  [13] 누적거래량  ...
         """
         try:
-            if len(parts) < 15:
+            if len(parts) < 4 or not parts[3]:
                 return
-            
-            stock_code = parts[1]
-            
+
+            # parts[3]에 ^로 구분된 실제 데이터 필드가 있음
+            data_fields = parts[3].split('^')
+
+            if len(data_fields) < 14:
+                return
+
+            stock_code = data_fields[0]
+
             price_data = PriceData(
                 stock_code=stock_code,
-                trade_time=parts[2] if len(parts) > 2 else "",
-                current_price=int(parts[3]) if len(parts) > 3 and parts[3] else 0,
-                change=int(parts[5]) if len(parts) > 5 and parts[5] else 0,
-                change_rate=float(parts[6]) if len(parts) > 6 and parts[6] else 0.0,
-                open_price=int(parts[8]) if len(parts) > 8 and parts[8] else 0,
-                high_price=int(parts[9]) if len(parts) > 9 and parts[9] else 0,
-                low_price=int(parts[10]) if len(parts) > 10 and parts[10] else 0,
-                volume=int(parts[14]) if len(parts) > 14 and parts[14] else 0
+                trade_time=data_fields[1] if len(data_fields) > 1 else "",
+                current_price=int(data_fields[2]) if len(data_fields) > 2 and data_fields[2] else 0,
+                change=int(data_fields[4]) if len(data_fields) > 4 and data_fields[4] else 0,
+                change_rate=float(data_fields[5]) if len(data_fields) > 5 and data_fields[5] else 0.0,
+                open_price=int(data_fields[7]) if len(data_fields) > 7 and data_fields[7] else 0,
+                high_price=int(data_fields[8]) if len(data_fields) > 8 and data_fields[8] else 0,
+                low_price=int(data_fields[9]) if len(data_fields) > 9 and data_fields[9] else 0,
+                volume=int(data_fields[13]) if len(data_fields) > 13 and data_fields[13] else 0
             )
-            
+
             # 캐시 업데이트
             self.price_cache[stock_code] = price_data
-            
+
             # 콜백 호출
             if self.on_price_update:
                 self.on_price_update(price_data)
-                
+
         except Exception as e:
-            logger.error(f"체결가 파싱 오류: {e}")
+            logger.error(f"체결가 파싱 오류: {e} | raw={parts[3][:100] if len(parts) > 3 else 'N/A'}")
     
     async def _parse_orderbook_data(self, parts: list[str]) -> None:
-        """호가 데이터 파싱"""
+        """
+        호가 데이터 파싱
+
+        KIS H0STASP0 데이터 형식 (^구분):
+        [0] 종목코드  [1] 영업시간
+        [2] 매도호가1  [3] 매도호가2  ...  [11] 매도호가10
+        [12] 매수호가1  [13] 매수호가2  ...  [21] 매수호가10
+        [22] 매도호가잔량1  ...  [31] 매도호가잔량10
+        [32] 매수호가잔량1  ...  [41] 매수호가잔량10
+        """
         try:
-            if len(parts) < 30:
+            if len(parts) < 4 or not parts[3]:
                 return
-            
-            stock_code = parts[1]
-            
+
+            data_fields = parts[3].split('^')
+
+            if len(data_fields) < 42:
+                return
+
+            stock_code = data_fields[0]
+
             # 매도호가 (상위 5개)
             asks = []
             for i in range(5):
-                price_idx = 3 + i * 4
-                volume_idx = 4 + i * 4
-                if len(parts) > volume_idx:
+                price_idx = 2 + i      # 매도호가1~5: index 2~6
+                volume_idx = 22 + i    # 매도호가잔량1~5: index 22~26
+                if len(data_fields) > volume_idx:
                     asks.append({
-                        "price": int(parts[price_idx]) if parts[price_idx] else 0,
-                        "volume": int(parts[volume_idx]) if parts[volume_idx] else 0
+                        "price": int(data_fields[price_idx]) if data_fields[price_idx] else 0,
+                        "volume": int(data_fields[volume_idx]) if data_fields[volume_idx] else 0
                     })
-            
+
             # 매수호가 (하위 5개)
             bids = []
             for i in range(5):
-                price_idx = 23 + i * 4
-                volume_idx = 24 + i * 4
-                if len(parts) > volume_idx:
+                price_idx = 12 + i     # 매수호가1~5: index 12~16
+                volume_idx = 32 + i    # 매수호가잔량1~5: index 32~36
+                if len(data_fields) > volume_idx:
                     bids.append({
-                        "price": int(parts[price_idx]) if parts[price_idx] else 0,
-                        "volume": int(parts[volume_idx]) if parts[volume_idx] else 0
+                        "price": int(data_fields[price_idx]) if data_fields[price_idx] else 0,
+                        "volume": int(data_fields[volume_idx]) if data_fields[volume_idx] else 0
                     })
-            
+
             orderbook = OrderbookData(
                 stock_code=stock_code,
                 asks=asks,
                 bids=bids,
                 timestamp=now_kst().strftime("%H:%M:%S")
             )
-            
+
             if self.on_orderbook_update:
                 self.on_orderbook_update(orderbook)
-                
+
         except Exception as e:
             logger.error(f"호가 파싱 오류: {e}")
     

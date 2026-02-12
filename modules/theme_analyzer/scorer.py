@@ -418,8 +418,9 @@ def _calculate_theme_momentum(theme: dict, kis) -> float:
             logger.debug(f"KIS API 모멘텀: {avg:+.2f}% ({len(returns)}종목)")
             return avg
 
-    # 2차: 크롤링 데이터 폴백
-    return theme.get("avg_return_5d") or theme.get("avg_change_rate", 0)
+    # 2차: 크롤링 데이터 폴백 (장 전에는 당일 변동률이 0%이므로 3일 등락률로 폴백)
+    avg_return = theme.get("avg_return_5d") or theme.get("avg_change_rate") or theme.get("three_day_rate", 0)
+    return avg_return
 
 
 def score_themes(themes: list[dict]) -> list[dict]:
