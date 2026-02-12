@@ -98,8 +98,8 @@ class GapFilter:
         
         # 갭상승 체크
         if gap_percent > self.max_gap_up:
-            logger.debug(
-                f"{name_str} 갭상승 초과 ({gap_percent:+.2f}% > +{self.max_gap_up}%) - 제외"
+            logger.info(
+                f"   ❌ {name_str} 갭상승 초과 ({gap_percent:+.2f}% > +{self.max_gap_up}%) - 제외"
             )
             return GapCheckResult(
                 passed=False,
@@ -112,8 +112,8 @@ class GapFilter:
         
         # 갭하락 체크
         if gap_percent < -self.max_gap_down:
-            logger.debug(
-                f"{name_str} 갭하락 초과 ({gap_percent:+.2f}% < -{self.max_gap_down}%) - 제외"
+            logger.info(
+                f"   ❌ {name_str} 갭하락 초과 ({gap_percent:+.2f}% < -{self.max_gap_down}%) - 제외"
             )
             return GapCheckResult(
                 passed=False,
@@ -125,7 +125,7 @@ class GapFilter:
             )
         
         # 통과
-        logger.debug(f"{name_str} 갭 범위 내 ({gap_percent:+.2f}%) - 통과")
+        logger.info(f"   ✅ {name_str} 갭 범위 내 ({gap_percent:+.2f}%) - 통과")
         return GapCheckResult(
             passed=True,
             stock_code=stock_code,

@@ -400,7 +400,7 @@ class StrengthFilter:
         name_str = f"[{stock_name}]" if stock_name else f"[{stock_code}]"
         
         if strength < self.min_strength:
-            logger.debug(f"{name_str} 체결 강도 부족 ({strength:.0f}% < {self.min_strength:.0f}%) - 제외")
+            logger.info(f"   ❌ {name_str} 체결 강도 부족 ({strength:.0f}% < {self.min_strength:.0f}%) - 제외")
             return StrengthCheckResult(
                 passed=False,
                 stock_code=stock_code,
@@ -408,7 +408,7 @@ class StrengthFilter:
                 reason=f"체결 강도 부족 ({strength:.0f}%)"
             )
         
-        logger.debug(f"{name_str} 체결 강도 양호 ({strength:.0f}%) - 통과")
+        logger.info(f"   ✅ {name_str} 체결 강도 양호 ({strength:.0f}%) - 통과")
         return StrengthCheckResult(
             passed=True,
             stock_code=stock_code,

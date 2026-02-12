@@ -626,18 +626,19 @@ class TradingSystem:
                 for order in buy_result.get("orders", []):
                     if order.get("success"):
                         bought_count += 1
+                        filled_price = order.get("filled_price") or order.get("price", 0)
                         self.notifier.send_buy_alert(
                             order.get("stock_name", ""),
                             order.get("stock_code", ""),
                             order.get("quantity", 0),
-                            order.get("price", 0)
+                            filled_price
                         )
                         self.today_trades.append({
                             "action": "buy",
                             "stock_code": order.get("stock_code", ""),
                             "stock_name": order.get("stock_name", ""),
                             "shares": order.get("quantity", 0),
-                            "price": order.get("price", 0)
+                            "price": filled_price
                         })
 
         # Phase 8: 텔레그램 요약 발송

@@ -118,8 +118,8 @@ class VolumeFilter:
         
         # 최소 거래량 체크
         if volume_ratio < self.min_volume_ratio:
-            logger.debug(
-                f"{name_str} 거래량 부족 ({volume_ratio:.1%} < {self.min_volume_ratio:.0%}) - 제외"
+            logger.info(
+                f"   ❌ {name_str} 거래량 부족 ({volume_ratio:.1%} < {self.min_volume_ratio:.0%}) - 제외"
             )
             return VolumeCheckResult(
                 passed=False,
@@ -139,7 +139,7 @@ class VolumeFilter:
             warning = True
         
         # 통과
-        logger.debug(f"{name_str} 거래량 정상 ({volume_ratio:.0%}) - 통과")
+        logger.info(f"   ✅ {name_str} 거래량 정상 ({volume_ratio:.0%}) - 통과")
         return VolumeCheckResult(
             passed=True,
             stock_code=stock_code,

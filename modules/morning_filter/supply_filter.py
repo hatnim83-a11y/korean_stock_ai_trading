@@ -118,7 +118,7 @@ class SupplyFilter:
         
         # 외국인 필수 체크
         if self.require_foreign and foreign_net_buy <= 0:
-            logger.debug(f"{name_str} 외국인 순매수 없음 - 제외")
+            logger.info(f"   ❌ {name_str} 외국인 순매수 없음 ({foreign_net_buy/1e8:.1f}억) - 제외")
             return SupplyCheckResult(
                 passed=False,
                 stock_code=stock_code,
@@ -130,7 +130,7 @@ class SupplyFilter:
         
         # 기관 필수 체크
         if self.require_institution and institution_net_buy <= 0:
-            logger.debug(f"{name_str} 기관 순매수 없음 - 제외")
+            logger.info(f"   ❌ {name_str} 기관 순매수 없음 ({institution_net_buy/1e8:.1f}억) - 제외")
             return SupplyCheckResult(
                 passed=False,
                 stock_code=stock_code,
@@ -142,7 +142,7 @@ class SupplyFilter:
         
         # 합산 순매수 체크
         if total_net_buy < self.min_net_buy:
-            logger.debug(f"{name_str} 합산 순매도 - 제외")
+            logger.info(f"   ❌ {name_str} 합산 순매도 ({total_net_buy/1e8:.1f}억) - 제외")
             return SupplyCheckResult(
                 passed=False,
                 stock_code=stock_code,
@@ -153,9 +153,9 @@ class SupplyFilter:
             )
         
         # 통과
-        logger.debug(
-            f"{name_str} 수급 양호 (외국인 {foreign_net_buy/100_000_000:.1f}억, "
-            f"기관 {institution_net_buy/100_000_000:.1f}억) - 통과"
+        logger.info(
+            f"   ✅ {name_str} 수급 양호 (외국인 {foreign_net_buy/1e8:.1f}억, "
+            f"기관 {institution_net_buy/1e8:.1f}억) - 통과"
         )
         return SupplyCheckResult(
             passed=True,
