@@ -169,7 +169,10 @@ class TradingSystem:
         logger.info("\n✅ 시스템 시작 완료")
         logger.info("📅 스케줄에 따라 자동 실행됩니다.")
         logger.info("   종료하려면 Ctrl+C를 누르세요.\n")
-        
+
+        # 장 중 재시작 시 모니터링 자동 재개
+        await self._resume_monitoring_if_needed()
+
         # 메인 루프
         try:
             while self.is_running:
@@ -179,6 +182,28 @@ class TradingSystem:
         finally:
             await self.stop()
     
+    async def _resume_monitoring_if_needed(self) -> None:
+        """장 중 재시작 시 보유 포지션이 있으면 모니터링 자동 재개"""
+        from datetime import time as dt_time
+        now = now_kst()
+        market_open = dt_time(9, 26)
+        market_close = dt_time(15, 30)
+
+        if not (market_open <= now.time() <= market_close):
+            return
+
+        # DB에서 보유 포지션 확인
+        db = Database()
+        db.connect()
+        holdings = db.get_portfolio(status='holding')
+        db.close()
+
+        if holdings:
+            logger.info(f"🔄 장 중 재시작 감지 — 모니터링 자동 재개 ({len(holdings)}종목 보유 중)")
+            await self.start_monitoring()
+        else:
+            logger.info("장 중 재시작이나 보유 포지션 없음 — 모니터링 스킵")
+
     async def stop(self) -> None:
         """시스템 종료"""
         if not self.is_running:
