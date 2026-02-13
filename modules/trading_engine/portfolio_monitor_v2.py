@@ -511,21 +511,26 @@ class PortfolioMonitorV2:
 
     def _check_stop_loss(self, pos: Position) -> bool:
         """
-        손절 조건 체크
-        
+        손절 조건 체크 (트레일링 활성 시 트레일링 스탑에서 처리)
+
         Args:
             pos: 포지션
-        
+
         Returns:
             손절 필요 여부
         """
+        # 트레일링이 활성화되어 stop_loss_price를 올린 경우,
+        # _check_trailing_stop에서 처리하도록 양보
+        if pos.trailing_active and pos.trailing_stop is not None:
+            return False
         return pos.current_price <= pos.stop_loss_price
     
     async def _execute_stop_loss(self, pos: Position) -> None:
         """손절 실행"""
         logger.warning(f"🔻 손절 발동: {pos.stock_name}")
         logger.warning(f"   현재가 {pos.current_price:,}원 <= 손절가 {pos.stop_loss_price:,}원")
-        logger.warning(f"   손실: {pos.profit_rate:.1%} (보유 {pos.hold_days}일)")
+        pnl_label = "수익" if pos.profit_rate >= 0 else "손실"
+        logger.warning(f"   {pnl_label}: {pos.profit_rate:.1%} (보유 {pos.hold_days}일)")
         
         # 매도 실행 (전량)
         result = self.trading_engine.execute_stop_loss(

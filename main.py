@@ -589,6 +589,22 @@ class TradingSystem:
 
         if new_ai_stocks:
             per_slot_capital = settings.TOTAL_CAPITAL / settings.MAX_POSITIONS
+
+            # 주가가 슬롯 배분 자본을 초과하는 종목 사전 필터링 (수수료 0.5% 여유)
+            affordable_stocks = []
+            for s in new_ai_stocks:
+                stock_price = s.get('price', 0)
+                if stock_price * 1.005 <= per_slot_capital:
+                    affordable_stocks.append(s)
+                else:
+                    logger.warning(
+                        f"   ⚠️ {s.get('name', s['code'])} 제외: "
+                        f"주가 {stock_price:,}원 > 슬롯 자본 {per_slot_capital:,.0f}원"
+                    )
+            new_ai_stocks = affordable_stocks
+
+        if new_ai_stocks:
+            per_slot_capital = settings.TOTAL_CAPITAL / settings.MAX_POSITIONS
             target_capital = per_slot_capital * len(new_ai_stocks)
             capital_for_new = min(target_capital, available_cash)
             logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 = {target_capital:,.0f}원")
@@ -732,13 +748,19 @@ class TradingSystem:
     
     def _on_trailing_stop(self, position, price) -> None:
         """트레일링 스탑 발동 콜백"""
+        profit_rate = position.profit_rate * 100
+        pnl_emoji = "🔺" if profit_rate >= 0 else "🔻"
+        pnl_label = "수익" if profit_rate >= 0 else "손실"
+        level_str = f"L{position.trailing_level}" if position.trailing_level > 0 else ""
+
         self.notifier.send_message(
-            f"📉 트레일링 스탑 발동!\n"
-            f"- 종목: {position.stock_name}\n"
-            f"- 현재가: {int(price):,}원\n"
-            f"- 최고가: {int(position.highest_price):,}원\n"
-            f"- 수익률: {position.profit_rate * 100:+.1f}%\n"
-            f"- 보유일: {position.hold_days}일"
+            f"📉 *트레일링 스탑 발동* {level_str}\n\n"
+            f"📊 {position.stock_name}\n"
+            f"💰 매수가: {int(position.buy_price):,}원 → 매도가: {int(price):,}원\n"
+            f"📈 최고가: {int(position.highest_price):,}원 (최대 {position.max_profit_rate * 100:+.1f}%)\n"
+            f"{pnl_emoji} {pnl_label}: {abs(profit_rate):.2f}%\n"
+            f"📅 보유일: {position.hold_days}일\n\n"
+            f"✅ 트레일링 스탑에 의해 자동 매도되었습니다."
         )
     
     # ===== 테마 로테이션 =====

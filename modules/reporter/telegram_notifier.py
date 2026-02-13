@@ -319,15 +319,22 @@ class TelegramNotifier:
         stock_name: str,
         buy_price: int,
         sell_price: int,
-        loss_rate: float
+        profit_rate: float
     ) -> bool:
         """손절 알림"""
+        if profit_rate >= 0:
+            pnl_emoji = "🔺"
+            pnl_label = "수익"
+        else:
+            pnl_emoji = "🔻"
+            pnl_label = "손실"
+
         text = f"""
 🔻 *손절 발동*
 
 📉 {stock_name}
 💰 매수가: {buy_price:,}원 → 매도가: {sell_price:,}원
-📊 손실: {loss_rate:.2f}%
+{pnl_emoji} {pnl_label}: {abs(profit_rate):.2f}%
 
 ⚠️ 손절가에 도달하여 자동 매도되었습니다.
 """
