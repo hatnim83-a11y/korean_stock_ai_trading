@@ -154,13 +154,28 @@ class KISOrderApi:
         """
         접근 토큰 발급 (24시간 유효, 최대 3회 재시도)
 
+        KISApi(시세조회)가 이미 발급한 공유 토큰이 있으면 재사용하여
+        1분당 1회 토큰 발급 제한 충돌을 방지합니다.
+
         Returns:
             접근 토큰 문자열
         """
-        # 토큰이 유효하면 재사용
+        # 1) 인스턴스 토큰이 유효하면 재사용
         if self.access_token and self.token_expired_at > time.time():
             return self.access_token
 
+        # 2) KISApi(시세조회) 공유 토큰이 있으면 재사용
+        try:
+            from modules.stock_screener.kis_api import KISApi
+            if KISApi._shared_token and KISApi._shared_token_expired_at > time.time() + 3600:
+                self.access_token = KISApi._shared_token
+                self.token_expired_at = KISApi._shared_token_expired_at
+                logger.info("🔑 KIS 주문 API: 시세조회 공유 토큰 재사용")
+                return self.access_token
+        except (ImportError, AttributeError):
+            pass
+
+        # 3) 새로 발급
         url = f"{self.base_url}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
         body = {
@@ -182,6 +197,14 @@ class KISOrderApi:
                 self.access_token = data["access_token"]
                 # 23시간 후 만료로 설정 (여유 확보)
                 self.token_expired_at = time.time() + (23 * 60 * 60)
+
+                # KISApi 공유 토큰에도 저장 (시세조회 모듈이 재사용)
+                try:
+                    from modules.stock_screener.kis_api import KISApi
+                    KISApi._shared_token = self.access_token
+                    KISApi._shared_token_expired_at = self.token_expired_at
+                except (ImportError, AttributeError):
+                    pass
 
                 logger.info("KIS API 토큰 발급 성공")
                 return self.access_token
