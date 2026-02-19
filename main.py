@@ -38,7 +38,7 @@ import argparse
 import os
 import signal
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from pathlib import Path
@@ -119,6 +119,7 @@ class TradingSystem:
         self.today_candidates: list[dict] = []   # 09:05 선정 후보 (10-15개)
         self.today_orders: list[dict] = []       # 09:25 최종 매수 (5-8개)
         self.current_themes: list[dict] = []     # 현재 테마 리스트
+        self._previous_themes: list[dict] = []  # 직전 선정 테마 (비교용)
         self.today_ai_analysis: list[dict] = []  # AI 분석 결과 (선정 이유 포함)
         self.today_trades: list[dict] = []       # 오늘 거래 내역
         self.observation_result = None              # 실시간 관찰 결과
@@ -277,6 +278,22 @@ class TradingSystem:
                     t_name = t.get("theme", t.get("name", ""))
                     t_score = t.get("score", 0)
                     logger.info(f"   - {t_name} ({t_score:.1f}점)")
+
+                # 텔레그램 유지 보고
+                days_remaining = settings.THEME_REVIEW_DAYS - days_since
+                next_review = self._last_theme_rotation_date + timedelta(days=settings.THEME_REVIEW_DAYS)
+                theme_lines = []
+                for i, t in enumerate(self.today_themes, 1):
+                    t_name = t.get("theme", t.get("name", ""))
+                    t_score = t.get("score", 0)
+                    theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점) 📌유지")
+                self.notifier.send_message(
+                    f"📊 08:30 테마 분석\n\n"
+                    f"🔄 기존 테마 유지 ({days_since}일차/{settings.THEME_REVIEW_DAYS}일)\n"
+                    + "\n".join(theme_lines)
+                    + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} ({days_remaining}일 후)"
+                )
+
                 return {"success": True, "themes": len(self.today_themes), "reused": True}
 
         start_time = now_kst()
@@ -306,14 +323,7 @@ class TradingSystem:
             logger.info(f"   로테이션 필요: {should_rotate} (이유: {reason})")
 
             if should_rotate:
-                new_theme = self.theme_rotator.select_new_main_theme(scored_themes)
-                if new_theme:
-                    self.notifier.send_message(
-                        f"🔄 테마 로테이션!\n"
-                        f"- 새 테마: {new_theme['theme']}\n"
-                        f"- 점수: {new_theme['score']:.1f}\n"
-                        f"- 이유: {reason}"
-                    )
+                self.theme_rotator.select_new_main_theme(scored_themes)
             else:
                 if self.theme_rotator.current_main_theme is None and scored_themes:
                     self.theme_rotator.set_main_theme(
@@ -341,20 +351,91 @@ class TradingSystem:
             logger.info(f"\n✅ 테마 분석 완료 ({elapsed:.1f}초)")
             logger.info("   └─ 09:05 장 시작 후 종목 스크리닝 예정")
 
-            # 알림
-            theme_list = []
-            for t in themes[:5]:
-                t_name = t.get("theme", "")
-                t_score = t.get("score", 0)
-                theme_list.append(f"  • {t_name}({t_score:.1f}점)")
-            theme_text = "\n".join(theme_list)
+            # 이전 테마와 비교하여 상세 보고
+            prev_names = {t.get("theme", t.get("name", "")) for t in self._previous_themes}
+            curr_names = {t.get("theme", t.get("name", "")) for t in themes}
+            had_previous = bool(self._previous_themes)
 
-            self.notifier.send_message(
-                f"📊 08:30 테마 분석 완료\n\n"
-                f"🎯 선정 테마: {len(themes)}개\n"
-                f"{theme_text}\n\n"
-                f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"
-            )
+            maintained = []
+            new_entries = []
+            dropped = []
+
+            for t in themes:
+                name = t.get("theme", t.get("name", ""))
+                if name in prev_names:
+                    prev_score = next(
+                        (p.get("score", 0) for p in self._previous_themes
+                         if p.get("theme", p.get("name", "")) == name), 0
+                    )
+                    maintained.append((t, prev_score))
+                else:
+                    new_entries.append(t)
+
+            for t in self._previous_themes:
+                name = t.get("theme", t.get("name", ""))
+                if name not in curr_names:
+                    dropped.append(t)
+
+            self._previous_themes = [t.copy() for t in themes]
+
+            # 메시지 구성
+            is_emergency = should_rotate and ("급락" in reason or "급등" in reason)
+            next_review = self._last_theme_rotation_date + timedelta(days=settings.THEME_REVIEW_DAYS)
+
+            msg = "📊 08:30 테마 분석\n\n"
+
+            if is_emergency:
+                msg += f"⚡ 긴급 테마 변경! (사유: {reason})\n\n"
+            elif had_previous:
+                msg += f"🔄 {settings.THEME_REVIEW_DAYS}일 경과 — 테마 재선정\n\n"
+            else:
+                msg += f"🎯 신규 테마 선정: {len(themes)}개\n\n"
+
+            if had_previous:
+                idx = 0
+                if maintained:
+                    msg += f"📌 유지: {len(maintained)}개\n"
+                    for t, prev_score in maintained:
+                        idx += 1
+                        name = t.get("theme", t.get("name", ""))
+                        score = t.get("score", 0)
+                        diff = score - prev_score
+                        msg += f"  {idx}. {name} ({score:.1f}점, {diff:+.1f})\n"
+
+                if new_entries:
+                    msg += f"\n🆕 신규: {len(new_entries)}개\n"
+                    for t in new_entries:
+                        idx += 1
+                        name = t.get("theme", t.get("name", ""))
+                        score = t.get("score", 0)
+                        momentum = t.get("avg_change_rate", 0)
+                        msg += f"  {idx}. {name} ({score:.1f}점) — 모멘텀 {momentum:+.1f}%\n"
+
+                if dropped:
+                    msg += f"\n❌ 탈락: {len(dropped)}개\n"
+                    for t in dropped:
+                        name = t.get("theme", t.get("name", ""))
+                        prev_score = t.get("score", 0)
+                        curr_info = next(
+                            (s for s in scored_themes
+                             if s.get("theme", s.get("name", "")) == name), None
+                        )
+                        if curr_info:
+                            curr_score = curr_info.get("score", 0)
+                            diff = curr_score - prev_score
+                            msg += f"  • {name} ({curr_score:.1f}점, {diff:+.1f}) — 점수 하락\n"
+                        else:
+                            msg += f"  • {name} ({prev_score:.1f}점) — 테마 목록 제외\n"
+            else:
+                for i, t in enumerate(themes[:5], 1):
+                    name = t.get("theme", t.get("name", ""))
+                    score = t.get("score", 0)
+                    msg += f"  {i}. {name} ({score:.1f}점)\n"
+
+            msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} ({settings.THEME_REVIEW_DAYS}일 후)\n"
+            msg += f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"
+
+            self.notifier.send_message(msg)
 
             return {
                 "success": True,
