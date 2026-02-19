@@ -9,7 +9,7 @@ main.py - 한국 주식 AI 스윙 트레이딩 시스템 메인 엔트리
 - 일일 트레이딩 파이프라인 실행
 - 장 초반 관찰 및 필터링
 - 실시간 모니터링 (분할 익절 + 트레일링 스탑)
-- 테마 로테이션 (2주 단위)
+- 테마 로테이션 (7일 단위)
 
 실행 방법:
     python main.py              # 전체 시스템 실행
@@ -27,7 +27,7 @@ main.py - 한국 주식 AI 스윙 트레이딩 시스템 메인 엔트리
     - 분할 익절: +10% → 30% 매도, +15% → 30% 매도, +20% → 전량 매도
     - 트레일링 스탑: 최고가 -5%
     - 보유 기간: 수익(+5%) 14일, 손실 7일
-    - 테마 로테이션: 2주 단위, 점수 -20% 시 즉시 변경
+    - 테마 로테이션: 7일 단위, 점수 -20% 시 즉시 변경
 
 작성자: AI Trading System
 버전: 2.0.0 (하이브리드 전략 + 테마 로테이션)
@@ -139,7 +139,12 @@ class TradingSystem:
     def _signal_handler(self, signum, frame):
         """시그널 핸들러 (Ctrl+C 등)"""
         logger.info("\n시스템 종료 신호 수신...")
-        asyncio.create_task(self.stop())
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.stop())
+        except RuntimeError:
+            # 이벤트 루프가 실행 중이 아닌 경우
+            pass
     
     # ===== 시스템 시작/종료 =====
     
@@ -157,7 +162,17 @@ class TradingSystem:
         
         # 데이터베이스 초기화
         self._init_database()
-        
+
+        # 7일 로테이션 날짜 복원 (서비스 재시작 시 DB에서 복원)
+        last_date = self.db.get_last_theme_analysis_date()
+        if last_date:
+            self._last_theme_rotation_date = last_date
+            # DB에서 최근 테마도 복원
+            themes_from_db = self.db.get_top_themes(last_date, count=settings.TOP_THEME_COUNT)
+            if themes_from_db:
+                self.today_themes = themes_from_db
+                logger.info(f"🔄 테마 로테이션 복원: {last_date} ({len(themes_from_db)}개 테마)")
+
         # 시스템 시작 알림
         self.notifier.send_system_start()
         
@@ -269,7 +284,7 @@ class TradingSystem:
 
         # 기존 테마가 있고, 7일 미경과면 재사용
         if self.today_themes and self._last_theme_rotation_date:
-            days_since = (date.today() - self._last_theme_rotation_date).days
+            days_since = (now_kst().date() - self._last_theme_rotation_date).days
             if days_since < settings.THEME_REVIEW_DAYS:
                 logger.info(
                     f"🔄 기존 테마 유지 ({days_since}일차/{settings.THEME_REVIEW_DAYS}일)"
@@ -334,7 +349,7 @@ class TradingSystem:
             # 4. 상위 테마 선정 (config에서 읽기)
             themes = select_top_themes(scored_themes, count=settings.TOP_THEME_COUNT)
             self.today_themes = themes  # 09:05 스크리닝에서 사용
-            self._last_theme_rotation_date = date.today()  # 로테이션 날짜 기록
+            self._last_theme_rotation_date = now_kst().date()  # 로테이션 날짜 기록
             logger.info(f"   선정 테마: {len(themes)}개")
 
             if not themes:

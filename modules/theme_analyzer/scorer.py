@@ -14,7 +14,7 @@ scorer.py - 테마 점수 계산 모듈
         calculate_theme_total_score
     )
 
-    momentum = calculate_momentum_score(avg_return=5.2)
+    momentum = calculate_momentum_score(avg_return_5d=5.2)
 """
 
 from typing import Optional
@@ -277,7 +277,7 @@ def calculate_theme_total_score(
     4가지 요소의 점수를 합산하여 총점 계산
     
     Args:
-        momentum_score: 이미 계산된 모멘텀 점수 (0~30)
+        momentum_score: 이미 계산된 모멘텀 점수 (0~60)
         supply_score: 이미 계산된 수급 점수 (0~25)
         news_score: 이미 계산된 뉴스 점수 (0~20)
         ai_score: 이미 계산된 AI 점수 (0~25)
@@ -348,12 +348,12 @@ def calculate_theme_total_score(
     # 총점 계산
     total = m_score + s_score + n_score + a_score
     
-    # 등급 산정
-    if total >= 85:
+    # 등급 산정 (score_themes와 동일 기준)
+    if total >= 80:
         grade = "S"  # 최상위
-    elif total >= 70:
+    elif total >= 65:
         grade = "A"
-    elif total >= 55:
+    elif total >= 50:
         grade = "B"
     elif total >= 40:
         grade = "C"
@@ -419,8 +419,13 @@ def _calculate_theme_momentum(theme: dict, kis) -> float:
             return avg
 
     # 2차: 크롤링 데이터 폴백 (장 전에는 당일 변동률이 0%이므로 3일 등락률로 폴백)
-    avg_return = theme.get("avg_return_5d") or theme.get("avg_change_rate") or theme.get("three_day_rate", 0)
-    return avg_return
+    avg_change = theme.get("avg_change_rate")
+    if avg_change is not None:
+        return avg_change
+    three_day = theme.get("three_day_rate")
+    if three_day is not None:
+        return three_day
+    return 0
 
 
 def score_themes(themes: list[dict]) -> list[dict]:

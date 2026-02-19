@@ -160,8 +160,8 @@ class KISOrderApi:
         Returns:
             접근 토큰 문자열
         """
-        # 1) 인스턴스 토큰이 유효하면 재사용
-        if self.access_token and self.token_expired_at > time.time():
+        # 1) 인스턴스 토큰이 유효하면 재사용 (1시간 버퍼)
+        if self.access_token and self.token_expired_at > time.time() + 3600:
             return self.access_token
 
         # 2) KISApi(시세조회) 공유 토큰이 있으면 재사용
@@ -195,8 +195,8 @@ class KISOrderApi:
                 data = response.json()
 
                 self.access_token = data["access_token"]
-                # 23시간 후 만료로 설정 (여유 확보)
-                self.token_expired_at = time.time() + (23 * 60 * 60)
+                # 24시간 후 만료로 설정 (KISApi와 동일)
+                self.token_expired_at = time.time() + (24 * 60 * 60)
 
                 # KISApi 공유 토큰에도 저장 (시세조회 모듈이 재사용)
                 try:
@@ -543,18 +543,19 @@ class KISOrderApi:
         try:
             self._rate_limit()
             response = httpx.post(url, headers=headers, json=body, timeout=10)
+            response.raise_for_status()
             data = response.json()
-            
+
             rt_cd = data.get("rt_cd", "1")
             msg = data.get("msg1", "")
-            
+
             if rt_cd == "0":
                 logger.info(f"✅ 주문 취소 성공: {order_id}")
                 return {"success": True, "order_id": order_id, "message": msg}
             else:
                 logger.error(f"❌ 주문 취소 실패: {order_id} - {msg}")
                 return {"success": False, "order_id": order_id, "message": msg}
-                
+
         except Exception as e:
             logger.error(f"주문 취소 중 오류: {e}")
             return {"success": False, "order_id": order_id, "message": str(e)}
@@ -581,7 +582,7 @@ class KISOrderApi:
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
         
         if order_date is None:
-            order_date = date.today().strftime("%Y%m%d")
+            order_date = now_kst().strftime("%Y%m%d")
         
         # 계좌번호에서 CANO와 ACNT_PRDT_CD 추출 (하이픈 처리)
         if "-" in self.account_no:
@@ -612,10 +613,11 @@ class KISOrderApi:
         try:
             self._rate_limit()
             response = httpx.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
             data = response.json()
-            
+
             rt_cd = data.get("rt_cd", "1")
-            
+
             if rt_cd == "0":
                 output = data.get("output1", [])
                 orders = []
@@ -631,7 +633,10 @@ class KISOrderApi:
                         "filled_price": _safe_int(_safe_float(item.get("avg_prvs"))),
                         "order_time": item.get("ord_tmd", ""),
                         "order_type": item.get("sll_buy_dvsn_cd_name", ""),
-                        "status": "체결" if item.get("ord_qty") == item.get("tot_ccld_qty") else "미체결"
+                        "status": "체결" if (
+                            _safe_int(item.get("ord_qty")) > 0 and
+                            _safe_int(item.get("ord_qty")) == _safe_int(item.get("tot_ccld_qty"))
+                        ) else "미체결"
                     })
                 
                 logger.info(f"주문 상태 조회: {len(orders)}건")
@@ -679,6 +684,7 @@ class KISOrderApi:
         try:
             self._rate_limit()
             response = httpx.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
             data = response.json()
 
             if data.get("rt_cd") == "0":
@@ -750,10 +756,11 @@ class KISOrderApi:
         try:
             self._rate_limit()
             response = httpx.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
             data = response.json()
-            
+
             rt_cd = data.get("rt_cd", "1")
-            
+
             if rt_cd == "0":
                 output1 = data.get("output1", [])  # 종목별
                 output2_list = data.get("output2") or [{}]

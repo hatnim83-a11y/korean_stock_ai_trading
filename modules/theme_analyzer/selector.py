@@ -15,8 +15,8 @@ selector.py - 테마 선정 모듈
         run_daily_theme_analysis
     )
     
-    # 상위 5개 테마 선정
-    top_themes = select_top_themes(scored_themes, count=5)
+    # 상위 4개 테마 선정
+    top_themes = select_top_themes(scored_themes, count=4)
     
     # 일일 테마 분석 실행
     results = await run_daily_theme_analysis()
@@ -65,7 +65,7 @@ def select_top_themes(
         scored_themes: 점수가 계산된 테마 리스트
             [{'name': '2차전지', 'total_score': 87.5, ...}, ...]
         count: 선정할 테마 수 (기본 5개)
-        min_score: 최소 점수 기준 (기본 40점)
+        min_score: 최소 점수 기준 (기본 15점)
         ensure_diversity: 카테고리 다양성 보장 여부
         blacklist: 추가 블랙리스트 테마명
     
@@ -226,7 +226,6 @@ def format_theme_report(themes: list[dict]) -> str:
 
 async def run_daily_theme_analysis(
     top_count: int = 4,
-    include_ai_analysis: bool = False,
     save_to_db: bool = True
 ) -> list[dict]:
     """
@@ -240,7 +239,6 @@ async def run_daily_theme_analysis(
 
     Args:
         top_count: 선정할 상위 테마 수
-        include_ai_analysis: AI 분석 포함 여부 (기본 False)
         save_to_db: DB 저장 여부
 
     Returns:
@@ -250,7 +248,7 @@ async def run_daily_theme_analysis(
     logger.info("🚀 일일 테마 분석 시작 (모멘텀 중심)")
     logger.info("=" * 60)
 
-    start_time = datetime.now()
+    start_time = now_kst()
 
     try:
         # Step 1: 테마 데이터 크롤링
@@ -293,14 +291,14 @@ async def run_daily_theme_analysis(
                     for t in top_themes
                 ]
 
-                db.save_theme_scores(themes_to_save, date.today())
+                db.save_theme_scores(themes_to_save, now_kst().date())
                 db.close()
 
             except Exception as e:
                 logger.error(f"DB 저장 실패: {e}")
 
         # 완료 로그
-        elapsed = (datetime.now() - start_time).total_seconds()
+        elapsed = (now_kst() - start_time).total_seconds()
         logger.info("=" * 60)
         logger.info(f"✅ 일일 테마 분석 완료 ({elapsed:.1f}초)")
         logger.info("=" * 60)
@@ -320,7 +318,6 @@ async def run_daily_theme_analysis(
 
 def run_daily_theme_analysis_sync(
     top_count: int = 4,
-    include_ai_analysis: bool = False,
     save_to_db: bool = True
 ) -> list[dict]:
     """
@@ -328,14 +325,13 @@ def run_daily_theme_analysis_sync(
 
     Args:
         top_count: 선정할 상위 테마 수
-        include_ai_analysis: AI 분석 포함 여부 (기본 False)
         save_to_db: DB 저장 여부
 
     Returns:
         선정된 테마 리스트
     """
     return asyncio.run(
-        run_daily_theme_analysis(top_count, include_ai_analysis, save_to_db)
+        run_daily_theme_analysis(top_count, save_to_db)
     )
 
 

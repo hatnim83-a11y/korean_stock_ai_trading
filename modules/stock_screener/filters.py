@@ -168,10 +168,10 @@ def apply_technical_filter(
     기술적 필터 적용
     
     조건:
-    - RSI < 80 (과열 아님)
-    - RSI > 30 (과매도 아님, 선택)
-    - 거래량 > 20일 평균 × 1.0
-    - 이동평균선 정배열 (MA5 > MA20 > MA60, 선택)
+    - RSI < 70 (과열 아님, 백테스트 정합)
+    - RSI > 30 (과매도 경고, 탈락 아님)
+    - 거래량 >= 20일 평균 × 0.7
+    - 이동평균선 정배열 = 가점만 (탈락 아님, 백테스트 정합)
     
     Args:
         stock: 종목 정보 (rsi, volume_ratio, ma_alignment 필요)
@@ -211,15 +211,16 @@ def apply_technical_filter(
     else:
         reasons.append(f"거래량 양호 ({volume_ratio:.2f}x)")
     
-    # 3. 이동평균선 정배열 체크
-    if require_bullish:
-        if ma_alignment == "bearish":
-            passed = False
-            reasons.append("MA 역배열")
-        elif ma_alignment == "bullish":
-            reasons.append("MA 정배열")
-        else:
-            reasons.append("MA 중립")
+    # 3. 이동평균선 상태 기록 (가점/감점, require_bullish와 무관하게 항상 로깅)
+    if require_bullish and ma_alignment == "bearish":
+        passed = False
+        reasons.append("MA 역배열 (탈락)")
+    elif ma_alignment == "bullish":
+        reasons.append("MA 정배열 (+)")
+    elif ma_alignment == "bearish":
+        reasons.append("MA 역배열 (가점 없음)")
+    else:
+        reasons.append("MA 중립")
     
     result["technical_passed"] = passed
     result["technical_reason"] = ", ".join(reasons)

@@ -307,6 +307,24 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
+    def get_last_theme_analysis_date(self) -> Optional[date]:
+        """
+        마지막 테마 분석 날짜 조회 (서비스 재시작 시 7일 로테이션 복원용)
+
+        Returns:
+            마지막 분석 날짜 또는 None
+        """
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute("SELECT MAX(date) as last_date FROM themes")
+                row = cursor.fetchone()
+                if row and row["last_date"]:
+                    from datetime import datetime as dt
+                    return dt.strptime(row["last_date"], "%Y-%m-%d").date()
+        except Exception as e:
+            logger.debug(f"마지막 테마 분석 날짜 조회 실패: {e}")
+        return None
+
     # ===== 종목 관련 메서드 =====
     
     def save_screened_stocks(self, stocks: list[dict], target_date: date) -> None:
