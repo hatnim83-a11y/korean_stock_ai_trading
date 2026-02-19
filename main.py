@@ -822,6 +822,9 @@ class TradingSystem:
         self.monitor.on_stop_loss = self._on_stop_loss
         self.monitor.on_partial_profit = self._on_partial_profit
         self.monitor.on_trailing_stop = self._on_trailing_stop
+        self.monitor.on_trailing_level_change = self._on_trailing_level_change
+        self.monitor.on_max_hold_sell = self._on_max_hold_sell
+        self.monitor.on_sell_failed = self._on_sell_failed
         
         # 모니터링 시작 (백그라운드)
         asyncio.create_task(self.monitor.start_monitoring())
@@ -834,39 +837,160 @@ class TradingSystem:
     
     def _on_stop_loss(self, position, price) -> None:
         """손절 발동 콜백"""
-        self.notifier.send_stop_loss_alert(
-            position.stock_name,
-            int(position.buy_price),
-            int(price),
-            position.profit_rate * 100
-        )
-    
-    def _on_partial_profit(self, position, price, stage: int) -> None:
+        try:
+            profit_rate = position.profit_rate * 100
+            pnl_amount = int((price - position.buy_price) * position.remaining_shares)
+            self.notifier.send_message(
+                f"🔻 손절 발동\n\n"
+                f"📉 {position.stock_name} ({position.stock_code})\n"
+                f"💰 매수가: {int(position.buy_price):,}원 → 매도가: {int(price):,}원\n"
+                f"📊 수량: {position.remaining_shares}주\n"
+                f"🔻 손실: {profit_rate:.2f}% ({pnl_amount:+,}원)\n"
+                f"📅 보유일: {position.hold_days}일\n\n"
+                f"⚠️ 손절가에 도달하여 자동 매도되었습니다."
+            )
+            self.today_trades.append({
+                "action": "sell", "stock_code": position.stock_code,
+                "stock_name": position.stock_name, "shares": position.remaining_shares,
+                "price": int(price), "reason": "손절"
+            })
+        except Exception as e:
+            logger.error(f"_on_stop_loss 콜백 오류: {e}")
+
+    def _on_partial_profit(self, position, price, stage: int, sell_shares: int) -> None:
         """분할 익절 발동 콜백"""
-        self.notifier.send_message(
-            f"🔺 {stage}차 익절 발동!\n"
-            f"- 종목: {position.stock_name}\n"
-            f"- 현재가: {int(price):,}원\n"
-            f"- 수익률: {position.profit_rate * 100:+.1f}%\n"
-            f"- 남은 수량: {position.remaining_shares}/{position.shares}주"
-        )
-    
+        try:
+            profit_rate = position.profit_rate * 100
+            pnl_amount = int((price - position.buy_price) * sell_shares)
+            threshold = {1: settings.TAKE_PROFIT_1, 2: settings.TAKE_PROFIT_2, 3: settings.TAKE_PROFIT_3}
+
+            self.notifier.send_message(
+                f"🔺 {stage}차 익절 발동!\n\n"
+                f"📈 {position.stock_name} ({position.stock_code})\n"
+                f"💰 매수가: {int(position.buy_price):,}원 → 현재가: {int(price):,}원\n"
+                f"📊 매도: {sell_shares}주 (수익금: {pnl_amount:+,}원)\n"
+                f"   남은 수량: {position.remaining_shares}/{position.shares}주\n"
+                f"🔺 수익률: {profit_rate:+.2f}%\n"
+                f"📈 최고가: {int(position.highest_price):,}원 (최대 {position.max_profit_rate * 100:+.1f}%)\n"
+                f"📅 보유일: {position.hold_days}일\n\n"
+                f"✅ +{threshold[stage]:.0%} 도달 → {stage}차 분할 익절 실행"
+            )
+            self.today_trades.append({
+                "action": "sell", "stock_code": position.stock_code,
+                "stock_name": position.stock_name, "shares": sell_shares,
+                "price": int(price), "reason": f"{stage}차 익절"
+            })
+        except Exception as e:
+            logger.error(f"_on_partial_profit 콜백 오류: {e}")
+
     def _on_trailing_stop(self, position, price) -> None:
         """트레일링 스탑 발동 콜백"""
-        profit_rate = position.profit_rate * 100
-        pnl_emoji = "🔺" if profit_rate >= 0 else "🔻"
-        pnl_label = "수익" if profit_rate >= 0 else "손실"
-        level_str = f"L{position.trailing_level}" if position.trailing_level > 0 else ""
+        try:
+            profit_rate = position.profit_rate * 100
+            pnl_emoji = "🔺" if profit_rate >= 0 else "🔻"
+            pnl_label = "수익" if profit_rate >= 0 else "손실"
+            pnl_amount = int((price - position.buy_price) * position.remaining_shares)
+            level = position.trailing_level
+            level_pct = {
+                1: f"{settings.TRAIL_LEVEL1_PCT:.0%}",
+                2: f"{settings.TRAIL_LEVEL2_PCT:.0%}",
+                3: f"{settings.TRAIL_LEVEL3_PCT:.0%}",
+            }.get(level, "?%")
 
-        self.notifier.send_message(
-            f"📉 *트레일링 스탑 발동* {level_str}\n\n"
-            f"📊 {position.stock_name}\n"
-            f"💰 매수가: {int(position.buy_price):,}원 → 매도가: {int(price):,}원\n"
-            f"📈 최고가: {int(position.highest_price):,}원 (최대 {position.max_profit_rate * 100:+.1f}%)\n"
-            f"{pnl_emoji} {pnl_label}: {abs(profit_rate):.2f}%\n"
-            f"📅 보유일: {position.hold_days}일\n\n"
-            f"✅ 트레일링 스탑에 의해 자동 매도되었습니다."
-        )
+            self.notifier.send_message(
+                f"📉 트레일링 스탑 발동 L{level}\n\n"
+                f"📊 {position.stock_name} ({position.stock_code})\n"
+                f"💰 매수가: {int(position.buy_price):,}원 → 매도가: {int(price):,}원\n"
+                f"📈 최고가: {int(position.highest_price):,}원 (최대 {position.max_profit_rate * 100:+.1f}%)\n"
+                f"📊 수량: {position.remaining_shares}주\n"
+                f"{pnl_emoji} {pnl_label}: {abs(profit_rate):.2f}% ({pnl_amount:+,}원)\n"
+                f"📅 보유일: {position.hold_days}일\n\n"
+                f"✅ 고점 대비 -{level_pct} 하락 → L{level} 트레일링 매도"
+            )
+            self.today_trades.append({
+                "action": "sell", "stock_code": position.stock_code,
+                "stock_name": position.stock_name, "shares": position.remaining_shares,
+                "price": int(price), "reason": f"트레일링L{level}"
+            })
+        except Exception as e:
+            logger.error(f"_on_trailing_stop 콜백 오류: {e}")
+
+    def _on_trailing_level_change(self, position, old_level: int, new_level: int) -> None:
+        """트레일링 레벨 변경 콜백 (L0→L1, L1→L2, L2→L3)"""
+        try:
+            profit_rate = position.profit_rate * 100
+            level_info = {
+                1: ("L1 활성화",
+                    f"+{settings.TRAIL_ACTIVATION_PCT:.0%}",
+                    f"고점 -{settings.TRAIL_LEVEL1_PCT:.0%}",
+                    "본전 손절 설정"),
+                2: ("L2 격상",
+                    f"+{settings.TRAIL_LEVEL2_THRESHOLD:.0%}",
+                    f"고점 -{settings.TRAIL_LEVEL2_PCT:.0%}",
+                    "트레일링 강화"),
+                3: ("L3 격상",
+                    f"+{settings.TRAIL_LEVEL3_THRESHOLD:.0%}",
+                    f"고점 -{settings.TRAIL_LEVEL3_PCT:.0%}",
+                    "최대 수익 보호"),
+            }
+            title, threshold, trail, desc = level_info.get(new_level, ("레벨 변경", "?", "?", ""))
+
+            self.notifier.send_message(
+                f"📊 트레일링 {title}\n\n"
+                f"📈 {position.stock_name} ({position.stock_code})\n"
+                f"💰 매수가: {int(position.buy_price):,}원 → 현재가: {int(position.current_price):,}원\n"
+                f"🔺 수익: +{profit_rate:.1f}% (기준: {threshold})\n"
+                f"📈 최고가: {int(position.highest_price):,}원\n"
+                f"🛡️ 트레일링: {trail} (스탑: {int(position.trailing_stop or 0):,}원)\n"
+                f"📅 보유일: {position.hold_days}일\n\n"
+                f"ℹ️ L{old_level} → L{new_level}: {desc}",
+                disable_notification=True
+            )
+        except Exception as e:
+            logger.error(f"_on_trailing_level_change 콜백 오류: {e}")
+
+    def _on_max_hold_sell(self, position, price) -> None:
+        """보유기간 초과 매도 콜백"""
+        try:
+            profit_rate = position.profit_rate * 100
+            pnl_emoji = "🔺" if profit_rate >= 0 else "🔻"
+            pnl_amount = int((price - position.buy_price) * position.remaining_shares)
+            threshold_pct = settings.MIN_PROFIT_FOR_LONG_HOLD * 100
+            max_days = settings.MAX_HOLD_DAYS_PROFIT if profit_rate >= threshold_pct else settings.MAX_HOLD_DAYS_LOSS
+
+            self.notifier.send_message(
+                f"⏰ 보유기간 초과 매도\n\n"
+                f"📊 {position.stock_name} ({position.stock_code})\n"
+                f"💰 매수가: {int(position.buy_price):,}원 → 매도가: {int(price):,}원\n"
+                f"📊 수량: {position.remaining_shares}주\n"
+                f"{pnl_emoji} 수익: {profit_rate:+.2f}% ({pnl_amount:+,}원)\n"
+                f"📅 보유: {position.hold_days}일 / 최대 {max_days}일\n\n"
+                f"⚠️ 최대 보유기간 초과로 자동 매도되었습니다."
+            )
+            self.today_trades.append({
+                "action": "sell", "stock_code": position.stock_code,
+                "stock_name": position.stock_name, "shares": position.remaining_shares,
+                "price": int(price), "reason": "보유기간 초과"
+            })
+        except Exception as e:
+            logger.error(f"_on_max_hold_sell 콜백 오류: {e}")
+
+    def _on_sell_failed(self, position, sell_type: str, reason: str) -> None:
+        """매도 실패 콜백 (분할 익절 수량 부족, 주문 실패 등)"""
+        try:
+            profit_rate = position.profit_rate * 100
+            self.notifier.send_message(
+                f"🚨 매도 실패 알림\n\n"
+                f"📊 {position.stock_name} ({position.stock_code})\n"
+                f"❌ 유형: {sell_type}\n"
+                f"📝 원인: {reason}\n"
+                f"💰 현재가: {int(position.current_price):,}원 ({profit_rate:+.1f}%)\n"
+                f"📊 보유: {position.remaining_shares}/{position.shares}주\n"
+                f"📅 보유일: {position.hold_days}일\n\n"
+                f"⚠️ 수동 확인이 필요합니다."
+            )
+        except Exception as e:
+            logger.error(f"_on_sell_failed 콜백 오류: {e}")
     
     # ===== 테마 로테이션 =====
     

@@ -155,9 +155,12 @@ class PortfolioMonitorV2:
         
         # 콜백
         self.on_stop_loss: Optional[Callable[[Position, float], None]] = None
-        self.on_partial_profit: Optional[Callable[[Position, float, int], None]] = None
+        self.on_partial_profit: Optional[Callable[[Position, float, int, int], None]] = None  # pos, price, stage, sell_shares
         self.on_trailing_stop: Optional[Callable[[Position, float], None]] = None
         self.on_price_update: Optional[Callable[[str, float], None]] = None
+        self.on_trailing_level_change: Optional[Callable[[Position, int, int], None]] = None
+        self.on_max_hold_sell: Optional[Callable[[Position, float], None]] = None
+        self.on_sell_failed: Optional[Callable[[Position, str, str], None]] = None
         
         # 상태
         self._running = False
@@ -546,6 +549,10 @@ class PortfolioMonitorV2:
         if result.get("success"):
             self._close_position_in_db(pos, SellReason.STOP_LOSS.value, pos.current_price)
             self.remove_position(pos.stock_code)
+        else:
+            err = result.get("message") or result.get("error", "알 수 없는 오류")
+            if self.on_sell_failed:
+                self.on_sell_failed(pos, "손절", f"매도 주문 실패: {err}")
 
         # 콜백
         if self.on_stop_loss:
@@ -565,32 +572,52 @@ class PortfolioMonitorV2:
         
         # 3차 익절 (+20%)
         if not pos.partial_3_executed and profit_rate >= self.take_profit_3:
-            # 나머지 전량 매도
             sell_shares = pos.remaining_shares
-            await self._execute_partial_sell(pos, sell_shares, 3, profit_rate)
-            pos.partial_3_executed = True
-            executed = True
-            
-            # 전량 매도 시 포지션 제거
-            if pos.remaining_shares <= 0:
-                self.remove_position(pos.stock_code)
-        
+            success = await self._execute_partial_sell(pos, sell_shares, 3, profit_rate)
+            if success:
+                pos.partial_3_executed = True
+                executed = True
+                if pos.remaining_shares <= 0:
+                    self.remove_position(pos.stock_code)
+
         # 2차 익절 (+15%)
         elif not pos.partial_2_executed and profit_rate >= self.take_profit_2:
-            # 30% 매도
             sell_shares = int(pos.shares * self.partial_sell_ratio_2)
-            await self._execute_partial_sell(pos, sell_shares, 2, profit_rate)
-            pos.partial_2_executed = True
-            executed = True
-        
+            if sell_shares <= 0:
+                pos.partial_2_executed = True  # 수량 부족은 재시도 무의미
+                raw = pos.shares * self.partial_sell_ratio_2
+                reason = (
+                    f"보유 {pos.shares}주 × {self.partial_sell_ratio_2:.0%} = "
+                    f"{raw:.1f}주 → 절사 0주 (최소 매도 단위 미달)"
+                )
+                logger.warning(f"⚠️ 2차 익절 실패: {pos.stock_name} - {reason}")
+                if self.on_sell_failed:
+                    self.on_sell_failed(pos, "2차 익절", reason)
+            else:
+                success = await self._execute_partial_sell(pos, sell_shares, 2, profit_rate)
+                if success:
+                    pos.partial_2_executed = True
+                    executed = True
+
         # 1차 익절 (+10%)
         elif not pos.partial_1_executed and profit_rate >= self.take_profit_1:
-            # 30% 매도
             sell_shares = int(pos.shares * self.partial_sell_ratio_1)
-            await self._execute_partial_sell(pos, sell_shares, 1, profit_rate)
-            pos.partial_1_executed = True
-            executed = True
-        
+            if sell_shares <= 0:
+                pos.partial_1_executed = True  # 수량 부족은 재시도 무의미
+                raw = pos.shares * self.partial_sell_ratio_1
+                reason = (
+                    f"보유 {pos.shares}주 × {self.partial_sell_ratio_1:.0%} = "
+                    f"{raw:.1f}주 → 절사 0주 (최소 매도 단위 미달)"
+                )
+                logger.warning(f"⚠️ 1차 익절 실패: {pos.stock_name} - {reason}")
+                if self.on_sell_failed:
+                    self.on_sell_failed(pos, "1차 익절", reason)
+            else:
+                success = await self._execute_partial_sell(pos, sell_shares, 1, profit_rate)
+                if success:
+                    pos.partial_1_executed = True
+                    executed = True
+
         return executed
     
     async def _execute_partial_sell(
@@ -599,29 +626,33 @@ class PortfolioMonitorV2:
         sell_shares: int,
         stage: int,
         profit_rate: float
-    ) -> None:
+    ) -> bool:
         """
         분할 매도 실행
-        
+
         Args:
             pos: 포지션
             sell_shares: 매도 수량
             stage: 익절 단계 (1, 2, 3)
             profit_rate: 수익률
+
+        Returns:
+            매도 성공 여부
         """
         if sell_shares <= 0:
-            return
-        
+            return False
+
         # 남은 수량보다 많으면 조정
         if sell_shares > pos.remaining_shares:
             sell_shares = pos.remaining_shares
-        
+
         logger.info(f"🔺 {stage}차 익절 발동: {pos.stock_name}")
         logger.info(f"   현재가: {pos.current_price:,}원")
         logger.info(f"   수익률: {profit_rate:.1%}")
         logger.info(f"   매도 수량: {sell_shares}주 / {pos.remaining_shares}주")
-        logger.info(f"   비율: {sell_shares/pos.shares:.0%}")
-        
+        if pos.shares > 0:
+            logger.info(f"   비율: {sell_shares/pos.shares:.0%}")
+
         # 매도 실행
         result = self.trading_engine.execute_take_profit(
             position={
@@ -632,7 +663,7 @@ class PortfolioMonitorV2:
             },
             current_price=pos.current_price
         )
-        
+
         if result.get("success"):
             # 남은 수량 업데이트
             pos.remaining_shares -= sell_shares
@@ -643,9 +674,17 @@ class PortfolioMonitorV2:
                 reason = f"{stage}차 익절"
                 self._close_position_in_db(pos, reason, pos.current_price)
 
-        # 콜백
-        if self.on_partial_profit:
-            self.on_partial_profit(pos, pos.current_price, stage)
+            # 콜백 (sell_shares 전달)
+            if self.on_partial_profit:
+                self.on_partial_profit(pos, pos.current_price, stage, sell_shares)
+            return True
+        else:
+            err = result.get("message") or result.get("error", "알 수 없는 오류")
+            reason = f"매도 주문 실패: {err}"
+            logger.error(f"⚠️ {stage}차 익절 매도 실패: {pos.stock_name} - {reason}")
+            if self.on_sell_failed:
+                self.on_sell_failed(pos, f"{stage}차 익절", reason)
+            return False
     
     # ===== 트레일링 스탑 =====
 
@@ -686,6 +725,13 @@ class PortfolioMonitorV2:
                     pos.trailing_active = True
                     pos.stop_loss_price = pos.buy_price  # 본전 손절로 이동
                     logger.info(f"📊 {pos.stock_name} 트레일링L1 활성화 (고점 -5%), 본전 손절")
+
+            # 레벨 변경 콜백 (예외가 trailing 계산을 중단하지 않도록 보호)
+            if old_level != pos.trailing_level and self.on_trailing_level_change:
+                try:
+                    self.on_trailing_level_change(pos, old_level, pos.trailing_level)
+                except Exception as e:
+                    logger.error(f"트레일링 레벨 변경 콜백 오류: {e}")
 
             # 트레일링 스탑 가격 계산 (레벨별)
             if pos.trailing_active:
@@ -786,6 +832,11 @@ class PortfolioMonitorV2:
                 reason = SellReason.TRAILING_STOP.value
             self._close_position_in_db(pos, reason, pos.current_price)
             self.remove_position(pos.stock_code)
+        else:
+            err = result.get("message") or result.get("error", "알 수 없는 오류")
+            level_label = f"트레일링L{pos.trailing_level}" if pos.trailing_level > 0 else "트레일링"
+            if self.on_sell_failed:
+                self.on_sell_failed(pos, level_label, f"매도 주문 실패: {err}")
 
         if self.on_trailing_stop:
             self.on_trailing_stop(pos, pos.current_price)
@@ -829,7 +880,17 @@ class PortfolioMonitorV2:
         
         if result.get("success"):
             self._close_position_in_db(pos, SellReason.MAX_HOLD_DAYS.value, pos.current_price)
+            # 콜백 (예외가 remove_position을 차단하지 않도록 보호)
+            try:
+                if self.on_max_hold_sell:
+                    self.on_max_hold_sell(pos, pos.current_price)
+            except Exception as e:
+                logger.error(f"보유기간 매도 콜백 오류: {e}")
             self.remove_position(pos.stock_code)
+        else:
+            err = result.get("message") or result.get("error", "알 수 없는 오류")
+            if self.on_sell_failed:
+                self.on_sell_failed(pos, "보유기간 초과", f"매도 주문 실패: {err}")
 
     # ===== 상태 조회 =====
     

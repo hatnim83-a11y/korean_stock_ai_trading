@@ -22,3 +22,9 @@
 ## 코드 규칙
 - KIS API 응답 파싱 시 `_safe_int()`/`_safe_float()` 사용 (빈 문자열 방어)
 - pandas 값 → float 변환 전 `pd.isna()` 체크 필수
+
+## 코드 변경 후 필수 프로세스
+- **코드를 작성하거나 수정한 뒤 반드시 code-tester 에이전트로 검증**
+- 에이전트 정의: `.claude/agents/code-tester.md`
+- 수정된 파일을 대상으로 code-tester 에이전트 실행 → 심각/주의 이슈 발견 시 즉시 수정
+- py_compile + 기존 테스트 통과 확인 후 서비스 재시작
