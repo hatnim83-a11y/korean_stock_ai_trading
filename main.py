@@ -614,22 +614,6 @@ class TradingSystem:
 
         if new_ai_stocks:
             per_slot_capital = settings.TOTAL_CAPITAL / settings.MAX_POSITIONS
-
-            # 주가가 슬롯 배분 자본을 초과하는 종목 사전 필터링 (수수료 0.5% 여유)
-            affordable_stocks = []
-            for s in new_ai_stocks:
-                stock_price = s.get('price', 0)
-                if stock_price * 1.005 <= per_slot_capital:
-                    affordable_stocks.append(s)
-                else:
-                    logger.warning(
-                        f"   ⚠️ {s.get('name', s['code'])} 제외: "
-                        f"주가 {stock_price:,}원 > 슬롯 자본 {per_slot_capital:,.0f}원"
-                    )
-            new_ai_stocks = affordable_stocks
-
-        if new_ai_stocks:
-            per_slot_capital = settings.TOTAL_CAPITAL / settings.MAX_POSITIONS
             target_capital = per_slot_capital * len(new_ai_stocks)
             capital_for_new = min(target_capital, available_cash)
             logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 = {target_capital:,.0f}원")
