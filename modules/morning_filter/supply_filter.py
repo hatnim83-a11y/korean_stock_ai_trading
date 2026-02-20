@@ -103,8 +103,8 @@ class SupplyFilter:
             try:
                 supply_data = self.kis_api.get_investor_trading(stock_code)
                 if supply_data:
-                    foreign_net_buy = supply_data.get("foreign_net_buy", 0)
-                    institution_net_buy = supply_data.get("institution_net_buy", 0)
+                    foreign_net_buy = supply_data.get("foreign_net", 0)
+                    institution_net_buy = supply_data.get("institution_net", 0)
                 else:
                     foreign_net_buy = 0
                     institution_net_buy = 0
