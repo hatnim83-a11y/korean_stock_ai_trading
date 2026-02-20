@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     
     # ===== 트레이딩 설정 =====
     TOTAL_CAPITAL: int = Field(
-        default=10_000_000,
+        default=3_000_000,
         description="총 투자 자본금 (원)"
     )
     MAX_POSITIONS: int = Field(
