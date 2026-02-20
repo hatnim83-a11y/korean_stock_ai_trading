@@ -186,8 +186,8 @@ class SupplyFilter:
         
         for stock in stocks:
             result = self.check(
-                stock_code=stock.get("code", ""),
-                stock_name=stock.get("name", ""),
+                stock_code=stock.get("code", stock.get("stock_code", "")),
+                stock_name=stock.get("name", stock.get("stock_name", "")),
                 foreign_net_buy=stock.get("foreign_net_buy"),
                 institution_net_buy=stock.get("institution_net_buy")
             )

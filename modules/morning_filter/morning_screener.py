@@ -150,8 +150,12 @@ class MorningScreener:
         logger.info(f"📡 {len(stocks)}개 종목 실시간 데이터 수집 중...")
         
         for i, stock in enumerate(stocks):
-            stock_code = stock.get("code", stock.get("stock_code", ""))
-            stock_name = stock.get("name", stock.get("stock_name", ""))
+            # 키 정규화 (stock_code/stock_name → code/name)
+            stock.setdefault("code", stock.get("stock_code", ""))
+            stock.setdefault("name", stock.get("stock_name", ""))
+
+            stock_code = stock.get("code", "")
+            stock_name = stock.get("name", "")
             
             try:
                 # 현재가 조회
