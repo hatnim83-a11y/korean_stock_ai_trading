@@ -38,7 +38,7 @@ DEFAULT_ATR_PERIOD = 14
 DEFAULT_ATR_MULTIPLIER = 2.0
 
 # 손절/익절 제한
-MIN_STOP_LOSS_PCT = -0.12  # 최소 손절 -12%
+MIN_STOP_LOSS_PCT = -0.08  # 최소 손절 -8%
 MAX_STOP_LOSS_PCT = -0.05  # 최대 손절 -5% (너무 타이트하지 않게)
 MIN_TAKE_PROFIT_PCT = 0.08  # 최소 익절 +8%
 MAX_TAKE_PROFIT_PCT = 0.25  # 최대 익절 +25%
@@ -207,7 +207,7 @@ def calculate_stop_loss(
         price: 현재가
         atr: ATR 값 (없으면 가격의 5% 사용)
         multiplier: ATR 배수 (기본 2배)
-        min_pct: 최소 손절률 (기본 -12%)
+        min_pct: 최소 손절률 (기본 -8%)
         max_pct: 최대 손절률 (기본 -5%)
     
     Returns:
@@ -234,7 +234,7 @@ def calculate_stop_loss(
     stop_pct = -stop_distance / price
     
     # 범위 제한 (min_pct ~ max_pct)
-    # min_pct = -0.12 (더 큰 손실 허용)
+    # min_pct = -0.08 (더 큰 손실 허용)
     # max_pct = -0.05 (최소 손절 거리)
     stop_pct = max(min_pct, min(max_pct, stop_pct))
     

@@ -22,27 +22,35 @@
 - Token sharing: `KISApi._shared_token` class variable, reused by `KISOrderApi`
 - 1-minute cooldown on token issuance per app key
 
-## Known Issues (as of 2026-02-20)
+## DB Schema (updated 2026-02-22)
+- portfolio: id, date, stock_code, stock_name, theme, weight, shares, buy_price, current_price, stop_loss, take_profit, profit_rate, profit_amount, status (holding/closed), created_at, updated_at
+- trades: id, date, time, stock_code, stock_name, action (buy/sell), shares, price, amount, reason, profit_rate, profit_amount, order_id, created_at
+- NOTE: NO `timestamp` column in trades; use `created_at` for ordering
+- NOTE: NO `buy_date` column in portfolio; use `date` field
+
+## Stop Loss Calculation
+- Uses ATR-based dynamic stop loss, NOT just DEFAULT_STOP_LOSS
+- Clamped to range: MIN=-12%, MAX=-5% (see `calculators.py` lines 41-42)
+- This is why different stocks have different stop loss percentages
+- DEFAULT_STOP_LOSS in .env is -0.08 but actual SL varies per stock via ATR
+
+## Known Issues (as of 2026-02-22)
 - **PID file conflict with systemd**: When nohup process is running, PID file blocks systemd starts.
 - **KIS API 403 errors**: Caused by multiple token requests within 1-minute cooldown.
 - **Log file date uses UTC**: loguru `{time:YYYY-MM-DD}` uses server UTC. 08:00-08:59 KST logs go to PREVIOUS day's file.
-- **nrcvb_buy_amt vs ord_psbl_cash**: get_orderable_cash returns nrcvb amount. ~15K less than deposit on 3M.
-- ~~**Service is disabled**~~: 2026-02-20 `systemctl enable` 완료. 자동 시작됨.
-- ~~**Morning filter stock name None**~~: 2026-02-20 수정 (07cc814). `_fetch_realtime_data`에서 키 정규화 추가.
-- ~~**Supply filter all zeros**~~: 2026-02-20 수정 (8e55179). API 반환 키 `foreign_net`/`institution_net`과 코드의 `foreign_net_buy`/`institution_net_buy` 불일치 → 수정 완료.
+- **2/19 positions closed without sell trades**: 다우기술/대한항공 marked `closed` in DB but no sell trade records. Rebalancing logic marks old positions as closed when new day starts.
+- **THEME_REVIEW_DAYS not in .env**: Uses config.py default (7 days). Not a problem but differs from documentation.
 
-## 내일 (2026-02-21) 필수 확인 사항
-- [ ] **수급 필터 데이터 검증**: 09:25 모닝 필터 로그에서 외국인/기관 수급이 **0.0억이 아닌 실제 값**으로 나오는지 확인
-  - 정상 예시: `✅ [티씨케이] 수급 양호 (외국인 15.2억, 기관 8.3억) - 통과`
-  - 여전히 0이면: `kis_api.get_investor_trading()` 반환값 직접 확인 필요
-  - 관련 커밋: 8e55179 (키 불일치 수정)
-- [ ] **종목명 표시 검증**: 모닝 필터 결과 로그에서 종목명이 `None`이 아닌 실제 이름으로 나오는지 확인
-  - 정상 예시: `1. 티씨케이 (갭 +0.46%, 강도 50%, 수급 12.5억)`
-  - 관련 커밋: 07cc814 (키 정규화)
-- [ ] **테마 상세 보고 검증**: 08:30 텔레그램 메시지가 새 포맷(유지/신규/탈락 분류)으로 나오는지 확인
-  - 오늘이 2일차이므로 "기존 테마 유지 (2일차/7일)" 형태 예상
-  - 관련 커밋: 8f41c6d (테마 보고 개선)
-- [ ] **수급 기반 탈락 여부**: 수급 필터가 실제로 종목을 걸러내는지 (이전에는 전원 통과였음)
+## Resolved Issues
+- ~~**Service is disabled**~~: 2026-02-20 `systemctl enable` done. Auto-starts on reboot.
+- ~~**Morning filter stock name None**~~: 2026-02-20 fix (07cc814). Key normalization in `_fetch_realtime_data`.
+- ~~**Supply filter all zeros**~~: 2026-02-20 fix (8e55179). API key name mismatch fixed.
+
+## Monday 2026-02-23 Verification Items
+- [ ] **Supply filter data**: Check 09:25 morning filter logs for real foreign/institution values (not 0.0)
+- [ ] **Stock name display**: Check morning filter results for actual names (not None)
+- [ ] **Theme rotation**: 08:00 should trigger rotation (18 days since 02-04 selection)
+- [ ] **Supply-based filtering**: Check if supply filter actually rejects stocks
 
 ## Scheduler (KST, all CronTrigger with timezone=Asia/Seoul)
 - 08:00 Theme rotation check
@@ -54,24 +62,23 @@
 - 15:35 Market close cleanup
 - 16:00 Daily report
 
-## Trading Parameters (.env, updated 2026-02-19)
+## Trading Parameters (.env, updated 2026-02-22)
 - TOTAL_CAPITAL: 3,000,000 KRW
 - MAX_POSITIONS: 5
 - per_slot_capital: 600,000 KRW
-- DEFAULT_STOP_LOSS: -8%
+- DEFAULT_STOP_LOSS: -8% (actual SL: ATR-based, range -5%~-12%)
 - Trailing: L1(+8%, -5%), L2(+15%, -3%), L3(+25%, -2%)
+- Theme rotation: 7 days (config default, not in .env)
 
 ## Health Check Patterns
 - Process: Read PID from trading_system.pid, then `ps -p PID -o pid,%cpu,%mem,etime,args`
+- Process start time: `ps -p PID -o lstart`
 - Bot restarts: grep "system start complete" in system log
 - Market hours (KST): 09:00-15:30; Server UTC; KST = UTC+9
-- Screening: ~90sec for 4 themes (~70 stocks). AI verification: ~15-30sec.
-- Telegram: send_message logs at DEBUG level (not visible in journalctl). Success = no ERROR after send.
-- VM Power key reboot: GCP can trigger "Power key pressed" -> clean shutdown. Service must be `enabled` to survive.
-
-## DB Schema (key tables)
-- portfolio: shares (NOT quantity), buy_price, status (holding/closed)
-- trades: shares, action (buy/sell), price, reason
+- Weekend: No logs generated (all jobs are mon-fri CronTrigger) -- this is NORMAL
+- API connectivity: KIS=200, Claude=405 (no POST), Telegram=302 (redirect) all = NORMAL
+- Telegram bot check: `/getMe` endpoint
 
 ## Recent Health Checks
-- **2026-02-20**: New account first full day. All jobs ran correctly (08:00~16:00). 3 stocks bought (TCK, Hansem, PSK). Day return -0.95%. VM rebooted at 20:04 KST via Power key; service not auto-restarted (disabled). 2 minor KIS API disconnects (non-impacting).
+- **2026-02-22**: Sunday evening check. Service running 1d22h (PID 28996, 0.0% CPU, 1.1% MEM = 39.8M). 3 holdings (TCK -1.4%, Hansem +0.2%, PSK -1.8%). All APIs reachable. Bug fixes (07cc814, 8e55179) confirmed loaded in running process. Theme is 18 days old (selected 02-04), rotation due Monday 08:00. Disk 45%, Mem 1.1G/3.9G used.
+- **2026-02-20**: New account first full day. All jobs ran correctly (08:00~16:00). 3 stocks bought (TCK, Hansem, PSK). Day return -0.95%. VM rebooted at 20:04 KST via Power key; service auto-restarted (enabled).
