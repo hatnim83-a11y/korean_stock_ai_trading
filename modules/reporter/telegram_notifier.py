@@ -700,6 +700,13 @@ class TelegramNotifier:
             unrealized_rate = (unrealized_pnl / total_invest * 100) if total_invest > 0 else 0
             unrealized_sign = "+" if unrealized_pnl >= 0 else ""
 
+            # 투입 자본 대비 총 수익률
+            total_capital = settings.TOTAL_CAPITAL
+            cash_remaining = max(0, total_capital - total_invest)
+            current_total = cash_remaining + total_eval + realized_pnl
+            total_return = ((current_total - total_capital) / total_capital * 100) if total_capital > 0 else 0
+            total_return_sign = "+" if total_return >= 0 else ""
+
             now_str = now_kst().strftime("%Y-%m-%d %H:%M KST")
             text = (
                 f"📊 포트폴리오 현황\n"
@@ -708,7 +715,9 @@ class TelegramNotifier:
                 + f"\n\n💰 총 투자: {total_invest:,}원\n"
                 f"💰 총 평가: {total_eval:,}원\n"
                 f"📈 평가 손익: {unrealized_sign}{unrealized_pnl:,}원 ({unrealized_sign}{unrealized_rate:.2f}%)\n"
-                f"💵 실현 손익: {realized_sign}{realized_pnl:,}원 ({len(sell_trades)}건)"
+                f"💵 실현 손익: {realized_sign}{realized_pnl:,}원 ({len(sell_trades)}건)\n\n"
+                f"🏦 투입 자본: {total_capital:,}원\n"
+                f"🏦 현재 자산: {current_total:,}원 ({total_return_sign}{total_return:.2f}%)"
             )
 
             self._send_to_chat(chat_id, text)
