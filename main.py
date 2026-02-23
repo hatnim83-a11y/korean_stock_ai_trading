@@ -124,6 +124,7 @@ class TradingSystem:
         self.today_trades: list[dict] = []       # 오늘 거래 내역
         self.observation_result = None              # 실시간 관찰 결과
         self._observer_task = None                  # 관찰 비동기 태스크
+        self._listener_task = None                  # 텔레그램 명령어 리스너 태스크
         self._last_theme_rotation_date: Optional[date] = None  # 7일 고정 로테이션
 
         # 시그널 핸들러
@@ -181,7 +182,10 @@ class TradingSystem:
         
         # 스케줄러 시작
         self.scheduler.start()
-        
+
+        # 텔레그램 명령어 리스너 시작
+        self._listener_task = asyncio.create_task(self.notifier.start_command_listener())
+
         logger.info("\n✅ 시스템 시작 완료")
         logger.info("📅 스케줄에 따라 자동 실행됩니다.")
         logger.info("   종료하려면 Ctrl+C를 누르세요.\n")
@@ -229,10 +233,19 @@ class TradingSystem:
         
         self.is_running = False
         
+        # 텔레그램 명령어 리스너 종료
+        self.notifier.stop_command_listener()
+        if self._listener_task and not self._listener_task.done():
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+
         # 모니터링 종료
         if self.monitor:
             await self.monitor.stop_monitoring()
-        
+
         # 스케줄러 종료
         self.scheduler.stop()
         
@@ -1068,13 +1081,23 @@ class TradingSystem:
                 "total_return": 0
             }
 
-            # 리포트 전송 (테마 선정 이유 + AI 분석 이유 포함)
+            # 전체 매도 기록 조회 (실현 손익)
+            db = Database()
+            db.connect()
+            try:
+                realized_trades = db.get_all_sell_trades()
+            finally:
+                db.close()
+
+            # 리포트 전송
             self.notifier.send_daily_report(
                 portfolio=positions,
                 metrics=metrics,
-                themes=self.current_themes,         # 테마 선정 이유
-                ai_analysis=self.today_ai_analysis, # AI 종목 선정 이유
-                today_trades=self.today_trades      # 오늘 거래 내역
+                themes=self.current_themes,
+                ai_analysis=self.today_ai_analysis,
+                today_trades=self.today_trades,
+                realized_trades=realized_trades,
+                total_capital=settings.TOTAL_CAPITAL
             )
 
             logger.info("✅ 일일 리포트 발송 완료")

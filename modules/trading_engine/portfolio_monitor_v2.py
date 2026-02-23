@@ -510,6 +510,32 @@ class PortfolioMonitorV2:
         except Exception as e:
             logger.error(f"포지션 청산 DB 업데이트 실패: {e}")
 
+    def _save_partial_sell_to_db(
+        self, pos: Position, sell_shares: int, stage: int, sell_price: float
+    ) -> None:
+        """부분 매도 시 DB에 매도 기록 저장 + 보유 수량 업데이트"""
+        try:
+            db = Database()
+            db.connect()
+            # 매도 기록 저장
+            partial_profit = (sell_price - pos.buy_price) * sell_shares
+            db.save_trade({
+                "stock_code": pos.stock_code,
+                "stock_name": pos.stock_name,
+                "action": "sell",
+                "shares": sell_shares,
+                "price": sell_price,
+                "amount": sell_shares * sell_price,
+                "reason": f"{stage}차 분할익절",
+                "profit_rate": pos.profit_rate,
+                "profit_amount": partial_profit,
+            })
+            # 포트폴리오 보유 수량 업데이트
+            db.update_portfolio_shares(pos.stock_code, pos.remaining_shares)
+            db.close()
+        except Exception as e:
+            logger.error(f"분할 매도 DB 업데이트 실패: {e}")
+
     # ===== 손절 =====
 
     def _check_stop_loss(self, pos: Position) -> bool:
@@ -673,6 +699,11 @@ class PortfolioMonitorV2:
             if pos.remaining_shares <= 0:
                 reason = f"{stage}차 익절"
                 self._close_position_in_db(pos, reason, pos.current_price)
+            else:
+                # 부분 매도: DB에 매도 기록 저장 + 보유 수량 업데이트
+                self._save_partial_sell_to_db(
+                    pos, sell_shares, stage, pos.current_price
+                )
 
             # 콜백 (sell_shares 전달)
             if self.on_partial_profit:

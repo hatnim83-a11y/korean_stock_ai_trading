@@ -18,6 +18,7 @@ telegram_notifier.py - 텔레그램 알림 모듈
     notifier.send_daily_report(portfolio, metrics)
 """
 
+import asyncio
 from datetime import datetime, date
 from typing import Optional
 import json
@@ -65,7 +66,8 @@ class TelegramNotifier:
         
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self._enabled = bool(self.bot_token and self.chat_id)
-        
+        self._listening = False
+
         if self._enabled:
             logger.info("텔레그램 알림 초기화 완료")
         else:
@@ -367,7 +369,9 @@ class TelegramNotifier:
         metrics: dict,
         themes: list[dict] = None,
         ai_analysis: list[dict] = None,
-        today_trades: list[dict] = None
+        today_trades: list[dict] = None,
+        realized_trades: list[dict] = None,
+        total_capital: int = 0
     ) -> bool:
         """
         일일 성과 리포트 전송
@@ -378,6 +382,8 @@ class TelegramNotifier:
             themes: 오늘 선정된 테마 (선정 이유 포함)
             ai_analysis: AI 분석 결과 (선정 이유 포함)
             today_trades: 오늘 거래 내역
+            realized_trades: 전체 매도 기록 (실현 손익 계산용)
+            total_capital: 투입 자본금
 
         Returns:
             전송 성공 여부
@@ -391,8 +397,18 @@ class TelegramNotifier:
             p.get("buy_amount", 0) or p.get("quantity", p.get("shares", 0)) * p.get("buy_price", 0)
             for p in portfolio
         )
-        total_profit = total_value - total_cost
-        profit_rate = (total_profit / total_cost * 100) if total_cost > 0 else 0
+        unrealized_pnl = total_value - total_cost
+        unrealized_rate = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0
+
+        # 실현 손익 계산
+        realized_pnl = int(sum(t.get("profit_amount") or 0 for t in (realized_trades or [])))
+        realized_wins = [t for t in (realized_trades or []) if (t.get("profit_amount") or 0) > 0]
+        realized_losses = [t for t in (realized_trades or []) if (t.get("profit_amount") or 0) < 0]
+
+        # 총 자본 대비 수익률
+        cash_remaining = total_capital - total_cost if total_capital > 0 else 0
+        current_total = cash_remaining + total_value + realized_pnl
+        total_return = ((current_total - total_capital) / total_capital * 100) if total_capital > 0 else 0
 
         # 상위/하위 종목
         sorted_positions = sorted(
@@ -405,14 +421,31 @@ class TelegramNotifier:
         worst_3 = [p for p in reversed(sorted_positions[-3:]) if p.get("profit_rate", 0) < 0]
 
         text = f"""📊 *일일 성과 리포트*
-📅 {date.today()}
+📅 {now_kst().strftime('%Y-%m-%d')}
 
-💰 *포트폴리오*
+💰 *포트폴리오 (보유 {len(portfolio)}종목)*
 ```
 총 평가액: {total_value:>12,}원
 총 투자액: {total_cost:>12,}원
-오늘 수익: {total_profit:>+12,}원
-수익률:    {profit_rate:>+11.2f}%
+평가 손익: {unrealized_pnl:>+12,}원 ({unrealized_rate:+.2f}%)
+```
+"""
+        # 실현 손익
+        text += f"""
+💵 *실현 손익*
+```
+실현 수익: {realized_pnl:>+12,}원
+  승: {len(realized_wins)}건  패: {len(realized_losses)}건
+```
+"""
+        # 총 자본 대비 수익률
+        if total_capital > 0:
+            text += f"""
+🏦 *투입 자본 대비*
+```
+투입 자본: {total_capital:>12,}원
+현재 자산: {current_total:>12,}원
+총 수익률: {total_return:>+11.2f}%
 ```
 """
 
@@ -436,7 +469,6 @@ class TelegramNotifier:
                 text += "\n🟢 *오늘 매수*\n"
                 for t in buys[:4]:
                     stock_name = t.get('stock_name', '')
-                    # AI 분석 이유 찾기
                     ai_reason = ""
                     if ai_analysis:
                         for a in ai_analysis:
@@ -450,7 +482,9 @@ class TelegramNotifier:
             if sells:
                 text += "\n🔴 *오늘 매도*\n"
                 for t in sells[:3]:
-                    text += f"  • {t.get('stock_name')}: {t.get('reason', '')[:25]}\n"
+                    pnl = t.get('profit_amount') or t.get('pnl_amount') or 0
+                    pnl_str = f" ({pnl:+,}원)" if pnl else ""
+                    text += f"  • {t.get('stock_name')}: {t.get('reason', '')[:25]}{pnl_str}\n"
 
         text += "\n🔥 *Best 3*\n"
         for i, p in enumerate(best_3, 1):
@@ -468,8 +502,6 @@ class TelegramNotifier:
   • 샤프 비율: {metrics.get('sharpe_ratio', 0):.2f}
   • MDD: {metrics.get('mdd', 0):.2%}
   • 승률: {metrics.get('win_rate', 0):.1%}
-
-📊 현재 {len(portfolio)}개 종목 보유 중
 """
         return self.send_message(text)
     
@@ -529,6 +561,182 @@ class TelegramNotifier:
 ✅ 텔레그램 연결 정상!
 """
         return self.send_message(text)
+
+    # ===== 명령어 리스너 =====
+
+    async def start_command_listener(self) -> None:
+        """
+        텔레그램 명령어 리스너 시작 (getUpdates long polling)
+
+        /portfolio 명령어를 수신하면 현재 포트폴리오 현황을 응답합니다.
+        """
+        if not self._enabled:
+            logger.info("텔레그램 비활성 — 명령어 리스너 스킵")
+            return
+
+        self._listening = True
+        offset = 0
+        logger.info("📱 텔레그램 명령어 리스너 시작")
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            while self._listening:
+                try:
+                    url = f"{self.base_url}/getUpdates"
+                    resp = await client.post(url, json={
+                        "offset": offset, "timeout": 30, "allowed_updates": ["message"]
+                    })
+                    data = resp.json()
+
+                    if not data.get("ok"):
+                        logger.warning(f"getUpdates 실패: {data.get('description', '')}")
+                        await asyncio.sleep(5)
+                        continue
+
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        message = update.get("message", {})
+                        text = message.get("text", "")
+                        chat_id = message.get("chat", {}).get("id")
+
+                        cmd = text.strip().lower()
+                        if not chat_id:
+                            continue
+
+                        if cmd == "/portfolio":
+                            logger.info(f"📱 /portfolio 명령어 수신 (chat_id={chat_id})")
+                            await self._handle_portfolio_command(chat_id)
+                        elif cmd in ("/help", "/start"):
+                            self._send_to_chat(chat_id,
+                                "📋 사용 가능한 명령어\n\n"
+                                "/portfolio - 보유 종목 실시간 수익률\n"
+                                "/help - 명령어 목록"
+                            )
+
+                except httpx.ReadTimeout:
+                    # long polling timeout — 정상
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"명령어 리스너 오류: {e}")
+                    await asyncio.sleep(5)
+
+        logger.info("📱 텔레그램 명령어 리스너 종료")
+
+    async def _handle_portfolio_command(self, chat_id: int) -> None:
+        """
+        /portfolio 명령어 처리 — 보유 종목 실시간 수익률 응답
+
+        Args:
+            chat_id: 응답할 채팅 ID
+        """
+        try:
+            from database import Database
+            from modules.stock_screener.kis_api import KISApi
+
+            db = Database()
+            db.connect()
+            try:
+                holdings = db.get_portfolio(status='holding')
+                sell_trades = db.get_all_sell_trades()
+            finally:
+                db.close()
+
+            # 실현 손익
+            realized_pnl = int(sum(t.get("profit_amount") or 0 for t in sell_trades))
+            realized_sign = "+" if realized_pnl >= 0 else ""
+
+            if not holdings:
+                text = (
+                    f"📊 포트폴리오 현황\n"
+                    f"📅 {now_kst().strftime('%Y-%m-%d %H:%M KST')}\n\n"
+                    f"보유 종목이 없습니다.\n\n"
+                    f"💵 실현 손익: {realized_sign}{realized_pnl:,}원 ({len(sell_trades)}건)"
+                )
+                self._send_to_chat(chat_id, text)
+                return
+
+            kis = KISApi()
+            lines = []
+            total_invest = 0
+            total_eval = 0
+
+            for i, h in enumerate(holdings):
+                stock_code = h['stock_code']
+                stock_name = h['stock_name']
+                shares = h.get('shares') or 0
+                buy_price = int(h.get('buy_price') or 0)
+
+                # 실시간 가격 조회 (이벤트 루프 블로킹 방지)
+                price_info = await asyncio.to_thread(kis.get_current_price, stock_code)
+                current_price = price_info.get('price', buy_price) if price_info else buy_price
+
+                invest = shares * buy_price
+                eval_amount = shares * current_price
+                profit = eval_amount - invest
+                profit_rate = (profit / invest * 100) if invest > 0 else 0
+
+                total_invest += invest
+                total_eval += eval_amount
+
+                # 첫 번째/마지막/중간 종목에 따라 구분선
+                if i == 0:
+                    prefix = "┌"
+                elif i == len(holdings) - 1:
+                    prefix = "└"
+                else:
+                    prefix = "├"
+
+                pnl_sign = "+" if profit >= 0 else ""
+                lines.append(
+                    f"{prefix} {stock_name} ({stock_code})\n"
+                    f"{'│' if i < len(holdings) - 1 else ' '} "
+                    f"{shares}주 x {buy_price:,}원 -> {current_price:,}원\n"
+                    f"{'│' if i < len(holdings) - 1 else ' '} "
+                    f"수익: {pnl_sign}{profit:,}원 ({pnl_sign}{profit_rate:.1f}%)"
+                )
+
+            unrealized_pnl = total_eval - total_invest
+            unrealized_rate = (unrealized_pnl / total_invest * 100) if total_invest > 0 else 0
+            unrealized_sign = "+" if unrealized_pnl >= 0 else ""
+
+            now_str = now_kst().strftime("%Y-%m-%d %H:%M KST")
+            text = (
+                f"📊 포트폴리오 현황\n"
+                f"📅 {now_str}\n\n"
+                + "\n".join(lines)
+                + f"\n\n💰 총 투자: {total_invest:,}원\n"
+                f"💰 총 평가: {total_eval:,}원\n"
+                f"📈 평가 손익: {unrealized_sign}{unrealized_pnl:,}원 ({unrealized_sign}{unrealized_rate:.2f}%)\n"
+                f"💵 실현 손익: {realized_sign}{realized_pnl:,}원 ({len(sell_trades)}건)"
+            )
+
+            self._send_to_chat(chat_id, text)
+
+        except Exception as e:
+            logger.error(f"/portfolio 처리 오류: {e}")
+            self._send_to_chat(chat_id, f"⚠️ 포트폴리오 조회 실패: {e}")
+
+    def _send_to_chat(self, chat_id: int, text: str) -> bool:
+        """특정 chat_id로 메시지 전송 (명령어 응답용)"""
+        url = f"{self.base_url}/sendMessage"
+        data = {"chat_id": chat_id, "text": text}
+
+        try:
+            response = httpx.post(url, json=data, timeout=10)
+            result = response.json()
+            if not result.get("ok"):
+                logger.warning(f"chat_id={chat_id} 응답 실패: {result.get('description', '')}")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"chat_id={chat_id} 응답 오류: {e}")
+            return False
+
+    def stop_command_listener(self) -> None:
+        """명령어 리스너 중지"""
+        self._listening = False
+        logger.info("📱 텔레그램 명령어 리스너 중지 요청")
 
 
 # ===== 편의 함수 =====

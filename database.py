@@ -471,6 +471,25 @@ class Database:
 
         logger.info(f"포지션 저장: {position['stock_name']} (holding)")
 
+    def update_portfolio_shares(self, stock_code: str, new_shares: int) -> None:
+        """
+        포트폴리오 보유 수량 업데이트 (분할 매도 시)
+
+        Args:
+            stock_code: 종목코드
+            new_shares: 업데이트할 수량
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE portfolio
+                SET shares = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE stock_code = ? AND status = 'holding'
+            """, (new_shares, stock_code))
+            if cursor.rowcount == 0:
+                logger.warning(f"포지션 수량 업데이트 실패: {stock_code} - holding 상태 row 없음")
+            else:
+                logger.info(f"📊 포지션 수량 업데이트: {stock_code} → {new_shares}주")
+
     def close_position(self, stock_code: str, reason: str) -> None:
         """
         포지션 청산 (상태 변경)
@@ -541,8 +560,19 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
+    def get_all_sell_trades(self) -> list[dict]:
+        """전체 매도 기록 조회 (실현 손익 계산용)"""
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM trades
+                WHERE action = 'sell'
+                ORDER BY date DESC, time DESC
+            """)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
     # ===== 성과 지표 관련 메서드 =====
-    
+
     def save_performance(self, performance: dict, target_date: date) -> None:
         """
         일일 성과 지표 저장
