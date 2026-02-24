@@ -247,6 +247,44 @@ class KISApi:
 
         return ""
 
+    def get_company_overview(self, stock_code: str) -> str:
+        """
+        종목코드로 기업개요 조회 (네이버 금융)
+
+        Args:
+            stock_code: 종목코드 (6자리)
+
+        Returns:
+            기업개요 텍스트 (2-3문장, 실패 시 빈 문자열)
+        """
+        try:
+            url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+            }
+            response = httpx.get(url, headers=headers, timeout=5.0, follow_redirects=True)
+
+            if response.status_code == 200:
+                import re
+                # 기업개요 섹션 추출
+                match = re.search(
+                    r'<div class="summary_info"[^>]*>(.*?)</div>',
+                    response.text,
+                    re.DOTALL
+                )
+                if match:
+                    text = re.sub(r'<[^>]+>', '', match.group(1)).strip()
+                    # 첫 2-3문장만 추출 (마침표 기준)
+                    sentences = [s.strip() for s in text.split('.') if s.strip()]
+                    if sentences:
+                        overview = '. '.join(sentences[:3]) + '.'
+                        return overview[:200]  # 최대 200자
+
+        except Exception as e:
+            logger.debug(f"[{stock_code}] 기업개요 조회 실패: {e}")
+
+        return ""
+
     # ===== 지수 조회 =====
 
     def get_index_price(self, index_code: str) -> Optional[dict]:

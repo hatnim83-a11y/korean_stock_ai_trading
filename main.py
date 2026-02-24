@@ -171,8 +171,13 @@ class TradingSystem:
             # DB에서 최근 테마도 복원
             themes_from_db = self.db.get_top_themes(last_date, count=settings.TOP_THEME_COUNT)
             if themes_from_db:
-                self.today_themes = themes_from_db
-                logger.info(f"🔄 테마 로테이션 복원: {last_date} ({len(themes_from_db)}개 테마)")
+                # DB 행(theme_name 키)을 코드 내부 형식(theme 키)으로 정규화
+                normalized = [
+                    {"theme": t["theme_name"], "score": t["score"]} for t in themes_from_db
+                ]
+                self.today_themes = normalized
+                self._previous_themes = [t.copy() for t in normalized]
+                logger.info(f"🔄 테마 로테이션 복원: {last_date} ({len(normalized)}개 테마)")
 
         # 시스템 시작 알림
         self.notifier.send_system_start()
@@ -558,6 +563,16 @@ class TradingSystem:
             self.today_candidates = optimization_result["orders"]
             self.today_portfolio = optimization_result["portfolio"]
 
+            # 보유 종목 제외 (이미 가지고 있는 종목은 후보에서 빼기)
+            current_holdings = self.db.get_portfolio(status='holding')
+            held_codes = {h['stock_code'] for h in current_holdings}
+            if held_codes:
+                before_count = len(self.today_candidates)
+                self.today_candidates = [c for c in self.today_candidates if c['stock_code'] not in held_codes]
+                excluded = before_count - len(self.today_candidates)
+                if excluded > 0:
+                    logger.info(f"   보유 종목 제외: {excluded}개 (보유: {[h['stock_name'] for h in current_holdings]})")
+
             elapsed = (now_kst() - start_time).total_seconds()
 
             logger.info(f"\n✅ 종목 스크리닝 완료 ({elapsed:.1f}초)")
@@ -697,6 +712,7 @@ class TradingSystem:
         logger.info(f"   신규 후보 (보유 제외): {len(new_candidates)}개")
 
         # 모닝 필터 적용
+        self._morning_excluded = []
         if settings.ENABLE_MORNING_FILTER and new_candidates:
             filter_result = await asyncio.to_thread(
                 self.morning_screener.filter_candidates,
@@ -705,6 +721,7 @@ class TradingSystem:
                 self.observation_result
             )
             filtered_new = filter_result.passed_stocks if filter_result.passed_stocks else []
+            self._morning_excluded = filter_result.excluded_stocks or []
             logger.info(f"   모닝 필터 통과: {len(filtered_new)}개")
         else:
             filtered_new = new_candidates
@@ -716,10 +733,12 @@ class TradingSystem:
 
         # Phase 6: 포트폴리오 최적화 (슬롯 비례 자본 배분)
         filtered_codes = {c['stock_code'] for c in filtered_new}
-        new_ai_stocks = [
+        all_ai_candidates = [
             s for s in self.today_ai_analysis
             if s['code'] in filtered_codes
-        ][:available_slots]
+        ]
+        new_ai_stocks = all_ai_candidates[:available_slots]
+        self._slot_excluded = all_ai_candidates[available_slots:]
 
         if new_ai_stocks:
             per_slot_capital = settings.TOTAL_CAPITAL / settings.MAX_POSITIONS
@@ -792,26 +811,132 @@ class TradingSystem:
         new_buy_orders: list[dict],
         bought_count: int
     ) -> None:
-        """09:25 매수 결과 텔레그램 요약 발송"""
-        lines = ["💰 09:25 매수 결과\n"]
+        """09:25 매수 리포트 텔레그램 발송"""
+        from config import now_kst
+        lines = [f"💰 {now_kst().strftime('%H:%M')} 매수 리포트\n"]
 
-        # 기존 보유 종목
+        # 보유 유지 종목
         if current_holdings:
             lines.append(f"📦 보유 유지: {len(current_holdings)}종목")
             for h in current_holdings:
                 lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
 
-        # 신규 매수 종목
-        if new_buy_orders:
-            lines.append(f"\n📥 신규 매수: {bought_count}/{len(new_buy_orders)}종목")
-            for o in new_buy_orders:
-                name = o.get('stock_name', o.get('stock_code', '?'))
-                code = o.get('stock_code', '')
-                amount = o.get('amount', 0)
-                lines.append(f"  - {name} ({code}) {amount:,}원")
-
         if not current_holdings and not new_buy_orders:
             lines.append("보유 0개, 매수 후보 없음")
+            self.notifier.send_message("\n".join(lines))
+            return
+
+        # AI 분석 lookup
+        ai_lookup = {s['code']: s for s in self.today_ai_analysis} if self.today_ai_analysis else {}
+
+        # 기업개요 크롤링 (매수 종목만)
+        overviews = {}
+        if new_buy_orders:
+            try:
+                from modules.stock_screener.kis_api import KISApi
+                api = KISApi()
+                for o in new_buy_orders:
+                    code = o.get('stock_code', '')
+                    if code:
+                        overviews[code] = api.get_company_overview(code)
+            except Exception as e:
+                logger.debug(f"기업개요 조회 실패: {e}")
+
+        # 신규 매수 상세
+        if new_buy_orders:
+            lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"\n📥 신규 매수: {bought_count}종목\n")
+            for i, o in enumerate(new_buy_orders, 1):
+                code = o.get('stock_code', '')
+                name = o.get('stock_name', code)
+                amount = o.get('amount', 0)
+                stop_loss = o.get('stop_loss', 0)
+                take_profit = o.get('take_profit', 0)
+                price = o.get('price', 0)
+                ai = ai_lookup.get(code, {})
+
+                lines.append(f"{i}. {name} ({code}) — {amount:,}원")
+
+                # 테마
+                theme = ai.get('theme', '')
+                if theme:
+                    lines.append(f"🏷 테마: {theme}")
+
+                # 기업개요
+                overview = overviews.get(code, '')
+                if overview:
+                    lines.append(f"🏢 {overview}")
+
+                # 수급 (억원 변환)
+                foreign = ai.get('foreign_net', 0)
+                institution = ai.get('institution_net', 0)
+                if foreign or institution:
+                    f_str = f"{foreign / 1e8:+,.0f}억" if foreign else "0"
+                    i_str = f"{institution / 1e8:+,.0f}억" if institution else "0"
+                    lines.append(f"📊 수급: 외국인 {f_str} / 기관 {i_str}")
+
+                # 기술 지표
+                rsi = ai.get('rsi', 0)
+                vol_ratio = ai.get('volume_ratio', 0)
+                ma = ai.get('ma_alignment', '')
+                indicators = []
+                if rsi:
+                    indicators.append(f"RSI {rsi:.0f}")
+                if ma:
+                    ma_mark = "✓" if ma in ("bullish", "정배열") else "✗"
+                    indicators.append(f"MA정배열 {ma_mark}")
+                if vol_ratio:
+                    indicators.append(f"거래량 {vol_ratio:.1f}배")
+                if indicators:
+                    lines.append(f"📈 {' | '.join(indicators)}")
+
+                # AI 분석
+                sentiment = ai.get('ai_sentiment', 0)
+                confidence = ai.get('ai_confidence', 0)
+                reason = ai.get('ai_reason', '')
+                if sentiment:
+                    conf_pct = f"{confidence * 100:.0f}%" if confidence else ""
+                    reason_short = reason[:40] if reason else ""
+                    ai_line = f"🤖 AI {sentiment:.1f}/10"
+                    if conf_pct:
+                        ai_line += f" ({conf_pct})"
+                    if reason_short:
+                        ai_line += f" — {reason_short}"
+                    lines.append(ai_line)
+
+                # 손절/목표
+                if price and price > 0:
+                    sl_pct = ((stop_loss / price) - 1) * 100 if stop_loss else 0
+                    tp_pct = ((take_profit / price) - 1) * 100 if take_profit else 0
+                    lines.append(f"⚡ 손절 {sl_pct:+.0f}% / 목표 {tp_pct:+.0f}%")
+                elif stop_loss or take_profit:
+                    lines.append(f"⚡ 손절 {stop_loss:,.0f}원 / 목표 {take_profit:,.0f}원")
+
+                lines.append("")  # 종목 간 빈 줄
+
+        # 탈락 종목
+        excluded_lines = []
+
+        # 1) 모닝필터 제외
+        for s in getattr(self, '_morning_excluded', []):
+            name = s.get('name', s.get('stock_name', s.get('code', '?')))
+            gap = s.get('gap_percent', 0)
+            reason = f"모닝필터 (갭 {gap:+.1f}%)" if gap else "모닝필터"
+            excluded_lines.append(f"  - {name} — {reason}")
+
+        # 2) 슬롯 부족
+        for s in getattr(self, '_slot_excluded', []):
+            name = s.get('name', s.get('stock_name', s.get('code', '?')))
+            excluded_lines.append(f"  - {name} — 슬롯 부족")
+
+        # 3) AI 미통과 (today_ai_analysis 중 ai_passed=False)
+        # AI 미통과 종목은 today_ai_analysis에 포함 안됨 (passed만 저장)
+        # 대신 run_daily_verification에서 이미 필터됨 — 별도 추적 불필요
+
+        if excluded_lines:
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"\n❌ 탈락: {len(excluded_lines)}종목")
+            lines.extend(excluded_lines)
 
         self.notifier.send_message("\n".join(lines))
     

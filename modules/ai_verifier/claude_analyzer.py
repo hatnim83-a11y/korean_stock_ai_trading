@@ -39,7 +39,7 @@ except ImportError:
 
 
 # ===== 상수 정의 =====
-DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1500
 TEMPERATURE = 0.3
 

@@ -17,12 +17,14 @@ scorer.py - 테마 점수 계산 모듈
     momentum = calculate_momentum_score(avg_return_5d=5.2)
 """
 
+from datetime import time
 from typing import Optional
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from config import now_kst
 from logger import logger
 
 
@@ -418,13 +420,21 @@ def _calculate_theme_momentum(theme: dict, kis) -> float:
             logger.debug(f"KIS API 모멘텀: {avg:+.2f}% ({len(returns)}종목)")
             return avg
 
-    # 2차: 크롤링 데이터 폴백 (장 전에는 당일 변동률이 0%이므로 3일 등락률로 폴백)
+    # 2차: 크롤링 데이터 폴백
     avg_change = theme.get("avg_change_rate")
+    three_day = theme.get("three_day_rate")
+
+    # 장중(09:00~15:30)이면 당일 등락률 사용, 장전이면 3일 등락률 우선
+    current_time = now_kst().time()
+    is_market_open = time(9, 0) <= current_time <= time(15, 30)
+
+    if is_market_open and avg_change is not None:
+        return avg_change
+    # 장전: 3일 등락률 우선 → 당일 등락률 폴백
+    if three_day is not None and three_day != 0.0:
+        return three_day
     if avg_change is not None:
         return avg_change
-    three_day = theme.get("three_day_rate")
-    if three_day is not None:
-        return three_day
     return 0
 
 
