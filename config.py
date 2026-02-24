@@ -10,6 +10,7 @@ config.py - 환경 변수 관리 모듈
 """
 
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from pydantic_settings import BaseSettings
@@ -27,6 +28,24 @@ KST = timezone(timedelta(hours=9))
 def now_kst() -> datetime:
     """현재 한국 시간 반환 (timezone-aware)"""
     return datetime.now(KST)
+
+
+_STOCK_CODE_RE = re.compile(r'^\d{6}$')
+
+def validate_stock_code(code: str) -> str:
+    """
+    종목코드 검증 (6자리 숫자). 유효하지 않으면 ValueError 발생.
+
+    Args:
+        code: 종목코드 문자열
+
+    Returns:
+        검증된 종목코드 (strip 적용)
+    """
+    code = str(code).strip()
+    if not _STOCK_CODE_RE.match(code):
+        raise ValueError(f"유효하지 않은 종목코드: {code!r}")
+    return code
 
 
 class Settings(BaseSettings):
@@ -109,7 +128,7 @@ class Settings(BaseSettings):
     
     # ===== 트레이딩 설정 =====
     TOTAL_CAPITAL: int = Field(
-        default=3_000_000,
+        default=4_000_000,
         description="총 투자 자본금 (원)"
     )
     MAX_POSITIONS: int = Field(
@@ -459,6 +478,8 @@ def get_kis_websocket_url(is_mock: bool = True) -> str:
     Returns:
         KIS WebSocket URL
     """
+    # NOTE: KIS 공식 API는 ws:// 만 제공 (wss:// 미지원, 2026-02 확인)
+    # 데이터 자체는 AES256으로 암호화되어 전송됨 (approval_key 기반)
     if is_mock:
         return "ws://ops.koreainvestment.com:31000"
     else:

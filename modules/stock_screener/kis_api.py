@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import now_kst
+from config import now_kst, validate_stock_code
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -219,6 +219,7 @@ class KISApi:
         Returns:
             종목명 (조회 실패 시 빈 문자열)
         """
+        stock_code = validate_stock_code(stock_code)
         # 캐시에서 먼저 확인
         if not hasattr(self, '_stock_name_cache'):
             self._stock_name_cache = {}
@@ -236,9 +237,10 @@ class KISApi:
             if response.status_code == 200:
                 # HTML에서 종목명 추출
                 import re
+                import html as html_mod
                 match = re.search(r'<title>([^:]+):', response.text)
                 if match:
-                    name = match.group(1).strip()
+                    name = html_mod.unescape(match.group(1).strip())
                     self._stock_name_cache[stock_code] = name
                     return name
 
@@ -257,6 +259,7 @@ class KISApi:
         Returns:
             기업개요 텍스트 (2-3문장, 실패 시 빈 문자열)
         """
+        stock_code = validate_stock_code(stock_code)
         try:
             url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
             headers = {
@@ -266,6 +269,7 @@ class KISApi:
 
             if response.status_code == 200:
                 import re
+                import html as html_mod
                 # 기업개요 섹션 추출
                 match = re.search(
                     r'<div class="summary_info"[^>]*>(.*?)</div>',
@@ -273,7 +277,7 @@ class KISApi:
                     re.DOTALL
                 )
                 if match:
-                    text = re.sub(r'<[^>]+>', '', match.group(1)).strip()
+                    text = html_mod.unescape(re.sub(r'<[^>]+>', '', match.group(1)).strip())
                     # 첫 2-3문장만 추출 (마침표 기준)
                     sentences = [s.strip() for s in text.split('.') if s.strip()]
                     if sentences:

@@ -22,6 +22,7 @@ import asyncio
 from datetime import datetime, date
 from typing import Optional
 import json
+import time
 
 import httpx
 
@@ -67,6 +68,8 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self._enabled = bool(self.bot_token and self.chat_id)
         self._listening = False
+        self._rate_limit: dict[int, float] = {}  # chat_id → last command timestamp
+        self._rate_limit_seconds = 5
 
         if self._enabled:
             logger.info("텔레그램 알림 초기화 완료")
@@ -564,6 +567,22 @@ class TelegramNotifier:
 
     # ===== 명령어 리스너 =====
 
+    def _is_authorized(self, chat_id: int) -> bool:
+        """chat_id가 허가된 사용자인지 확인"""
+        try:
+            return chat_id == int(self.chat_id)
+        except (ValueError, TypeError):
+            return False
+
+    def _is_rate_limited(self, chat_id: int) -> bool:
+        """chat_id별 레이트 리밋 확인 (쿨다운 내이면 True)"""
+        now = time.monotonic()
+        last = self._rate_limit.get(chat_id, 0)
+        if now - last < self._rate_limit_seconds:
+            return True
+        self._rate_limit[chat_id] = now
+        return False
+
     async def start_command_listener(self) -> None:
         """
         텔레그램 명령어 리스너 시작 (getUpdates long polling)
@@ -600,6 +619,16 @@ class TelegramNotifier:
 
                         cmd = text.strip().lower()
                         if not chat_id:
+                            continue
+
+                        # 인가되지 않은 사용자 차단
+                        if not self._is_authorized(chat_id):
+                            logger.warning(f"⚠️ 미인가 텔레그램 요청 차단: chat_id={chat_id}, cmd={cmd}")
+                            continue
+
+                        # 레이트 리밋 초과
+                        if self._is_rate_limited(chat_id):
+                            logger.debug(f"레이트 리밋: chat_id={chat_id}")
                             continue
 
                         if cmd == "/portfolio":
@@ -723,8 +752,8 @@ class TelegramNotifier:
             self._send_to_chat(chat_id, text)
 
         except Exception as e:
-            logger.error(f"/portfolio 처리 오류: {e}")
-            self._send_to_chat(chat_id, f"⚠️ 포트폴리오 조회 실패: {e}")
+            logger.error(f"/portfolio 처리 오류: {e}", exc_info=True)
+            self._send_to_chat(chat_id, "⚠️ 일시적 오류 — 잠시 후 다시 시도해주세요")
 
     def _send_to_chat(self, chat_id: int, text: str) -> bool:
         """특정 chat_id로 메시지 전송 (명령어 응답용)"""

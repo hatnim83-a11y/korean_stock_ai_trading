@@ -99,6 +99,8 @@ class DataLoader:
         if cache_path.exists():
             try:
                 with open(cache_path, 'rb') as f:
+                    # SECURITY: pickle.load는 임의 코드 실행 가능 — 백테스트 로컬 캐시 전용
+                    # 외부 입력이나 네트워크에서 받은 데이터에는 절대 사용 금지
                     data = pickle.load(f)
                 logger.debug(f"[{symbol}] 캐시에서 로드")
                 return data

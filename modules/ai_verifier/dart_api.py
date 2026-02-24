@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import now_kst
+from config import now_kst, validate_stock_code
 
 
 # ===== 상수 정의 =====
@@ -113,8 +113,9 @@ def fetch_dart_disclosures(
             ...
         ]
     """
+    stock_code = validate_stock_code(stock_code)
     api_key = _get_api_key()
-    
+
     if not api_key or api_key.startswith("your_"):
         logger.warning("DART API 키가 설정되지 않았습니다")
         return []

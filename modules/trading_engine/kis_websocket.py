@@ -47,6 +47,8 @@ except ImportError:
 
 # ===== 상수 정의 =====
 # WebSocket URL
+# NOTE: KIS 공식 API는 ws:// 만 제공 (wss:// 미지원, 2026-02 확인)
+# 데이터 자체는 AES256으로 암호화되어 전송됨 (approval_key 기반)
 WS_URL_REAL = "ws://ops.koreainvestment.com:21000"
 WS_URL_MOCK = "ws://ops.koreainvestment.com:31000"
 

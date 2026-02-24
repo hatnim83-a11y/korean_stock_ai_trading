@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import now_kst, KST
+from config import now_kst, KST, validate_stock_code
 
 
 # ===== 상수 정의 =====
@@ -81,6 +81,7 @@ def fetch_stock_news(
         >>> print(news[0]['title'])
         '삼성전자, AI 반도체 투자 확대 발표'
     """
+    stock_code = validate_stock_code(stock_code)
     news_list = []
     
     # 네이버 금융 종목 뉴스 URL
@@ -274,7 +275,11 @@ def fetch_multiple_stocks_news(
     result = {}
     
     for code in stock_codes:
-        news = fetch_stock_news(code, days, max_per_stock)
+        try:
+            news = fetch_stock_news(code, days, max_per_stock)
+        except ValueError as e:
+            logger.warning(f"[{code}] 잘못된 종목코드 스킵: {e}")
+            news = []
         result[code] = news
         _random_delay()
     
