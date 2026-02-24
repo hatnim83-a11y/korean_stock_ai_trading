@@ -344,8 +344,10 @@ class PortfolioMonitorV2:
         import time as _time
         status_interval = 30 * 60  # 30분마다 상태 로그
         db_update_interval = 5 * 60  # 5분마다 DB 가격 갱신
+        state_dump_interval = 30  # 30초마다 대시보드용 상태 덤프
         last_status_log = 0
         last_db_update = 0
+        last_state_dump = 0
 
         while self._running:
             await asyncio.sleep(CHECK_INTERVAL)
@@ -363,6 +365,11 @@ class PortfolioMonitorV2:
             if now_ts - last_db_update >= db_update_interval:
                 last_db_update = now_ts
                 self._update_db_prices()
+
+            # 대시보드용 상태 JSON 덤프 (30초마다)
+            if now_ts - last_state_dump >= state_dump_interval:
+                last_state_dump = now_ts
+                self._dump_monitor_state()
 
             # 주기적 상태 로그 (30분마다)
             if now_ts - last_status_log >= status_interval:
@@ -418,6 +425,26 @@ class PortfolioMonitorV2:
                 f"{trail_info}"
             )
         logger.info("\n".join(lines))
+
+    def _dump_monitor_state(self) -> None:
+        """대시보드용 트레일링 상태를 JSON 파일로 덤프 (30초 간격)"""
+        import json
+        state = {}
+        for code, pos in self.positions.items():
+            state[code] = {
+                "trailing_level": pos.trailing_level,
+                "trailing_active": pos.trailing_active,
+                "trailing_stop_price": pos.trailing_stop,
+                "highest_price": int(pos.highest_price) if pos.highest_price else 0,
+                "max_profit_rate": round(pos.max_profit_rate * 100, 2),
+                "current_price": int(pos.current_price) if pos.current_price else 0,
+            }
+        state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+        try:
+            with open(state_path, "w") as f:
+                json.dump(state, f, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"상태 덤프 실패: {e}")
 
     def _on_price_update(self, price_data: PriceData) -> None:
         """

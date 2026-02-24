@@ -1,0 +1,46 @@
+# trading_dashboard.service - 트레이딩 웹 대시보드 systemd 서비스
+#
+# 설치:
+#   sudo cp trading_dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable trading_dashboard
+#   sudo systemctl start trading_dashboard
+#
+# 관리:
+#   sudo systemctl status trading_dashboard
+#   sudo journalctl -u trading_dashboard -f
+#   sudo systemctl restart trading_dashboard
+
+[Unit]
+Description=Trading Web Dashboard (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=hatni
+Group=hatni
+
+WorkingDirectory=/home/hatni/korean_stock_ai_trading
+ExecStart=/home/hatni/korean_stock_ai_trading/venv/bin/python web_server.py
+
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/hatni/korean_stock_ai_trading/.env
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=15
+TimeoutStopSec=10
+
+# 메모리 제한 (256MB)
+MemoryMax=256M
+CPUQuota=30%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading_dashboard
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

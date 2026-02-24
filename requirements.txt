@@ -46,5 +46,12 @@ loguru==0.7.2              # 구조화된 로깅
 # pytest==7.4.4            # 테스트 프레임워크
 # mypy==1.8.0              # 타입 체커
 
+# ===== 웹 대시보드 =====
+fastapi==0.109.0           # 웹 프레임워크
+uvicorn[standard]==0.27.0  # ASGI 서버
+python-jose[cryptography]==3.3.0  # JWT 토큰
+jinja2==3.1.3              # HTML 템플릿
+python-multipart==0.0.6    # Form 데이터 파싱
+
 # ===== 시각화 (선택사항) =====
 # plotly==5.18.0           # 차트 시각화
