@@ -370,6 +370,24 @@ class TradingSystem:
             self._last_theme_rotation_date = now_kst().date()  # 로테이션 날짜 기록
             logger.info(f"   선정 테마: {len(themes)}개")
 
+            # 5. DB 저장 (대시보드 테마 탭용)
+            try:
+                themes_to_save = [
+                    {
+                        "theme": t.get("theme", t.get("name", "")),
+                        "score": t.get("score", 0),
+                        "momentum": t.get("momentum_score", 0),
+                        "supply_ratio": 0,
+                        "news_count": 0,
+                        "ai_sentiment": 0,
+                    }
+                    for t in themes
+                ]
+                self.db.save_theme_scores(themes_to_save, now_kst().date())
+                logger.info(f"   DB 저장 완료: {len(themes_to_save)}개 테마")
+            except Exception as e:
+                logger.error(f"   테마 DB 저장 실패: {e}")
+
             if not themes:
                 logger.warning("선정된 테마가 없습니다")
                 return {"success": False, "reason": "테마 없음"}

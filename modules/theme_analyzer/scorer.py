@@ -502,6 +502,7 @@ def score_themes(themes: list[dict]) -> list[dict]:
         scored_theme = {
             **theme,
             "theme": theme_name,
+            "avg_change_rate": round(avg_return, 2),  # 실제 계산된 모멘텀 수익률로 덮어쓰기
             "total_score": round(total, 2),
             "score": round(total, 2),
             "momentum": round(momentum_score, 2),
