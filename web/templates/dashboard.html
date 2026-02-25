@@ -167,7 +167,7 @@ tr:hover td { background:#16162a; }
     <div class="table-wrap">
       <table id="portfolio-table">
         <thead><tr>
-          <th>종목</th><th>테마</th><th>수량</th><th>매수가</th><th>현재가</th>
+          <th>종목</th><th>테마</th><th>수량</th><th>매수가</th><th>현재가</th><th>평가금액</th>
           <th>수익률</th><th>수익금</th><th>보유일</th><th>트레일링</th>
         </tr></thead>
         <tbody id="portfolio-body"></tbody>
@@ -347,6 +347,7 @@ async function loadPortfolio() {
       <td>${fmt(h.shares)}</td>
       <td>${fmt(h.buy_price)}</td>
       <td>${fmt(h.current_price)}</td>
+      <td>${fmt(h.eval_amount)}원</td>
       <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
       <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
       <td>${h.hold_days}일</td>
@@ -599,6 +600,7 @@ function updatePortfolioTable(d) {
     <td>${fmt(h.shares)}</td>
     <td>${fmt(h.buy_price)}</td>
     <td>${fmt(h.current_price)}</td>
+    <td>${fmt(h.eval_amount)}원</td>
     <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
     <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
     <td>${h.hold_days}일</td>
