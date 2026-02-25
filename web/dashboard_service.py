@@ -23,11 +23,16 @@ from database import Database
 _price_cache: dict[str, tuple[float, dict]] = {}  # code -> (timestamp, data)
 PRICE_CACHE_TTL = 5.0
 
+# ===== DB 싱글턴 (커넥션 재사용) =====
+_db_instance: Optional[Database] = None
+
 
 def _get_db() -> Database:
-    db = Database()
-    db.connect()
-    return db
+    global _db_instance
+    if _db_instance is None or _db_instance.conn is None:
+        _db_instance = Database()
+        _db_instance.connect()
+    return _db_instance
 
 
 def _get_kis_api():
@@ -57,11 +62,8 @@ def get_cached_price(kis, stock_code: str) -> Optional[dict]:
 async def get_portfolio_data() -> dict:
     """포트폴리오 조회 (DB + 실시간 가격)"""
     db = _get_db()
-    try:
-        holdings = db.get_portfolio(status="holding")
-        sell_trades = db.get_all_sell_trades()
-    finally:
-        db.close()
+    holdings = db.get_portfolio(status="holding")
+    sell_trades = db.get_all_sell_trades()
 
     realized_pnl = sum(t.get("profit_amount") or 0 for t in sell_trades)
 
@@ -172,16 +174,13 @@ def _load_monitor_state() -> dict:
 
 async def get_trades_data(days: int = 30, page: int = 1, per_page: int = 50) -> dict:
     db = _get_db()
-    try:
-        with db.get_cursor() as cursor:
-            start_date = (now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
-            cursor.execute(
-                "SELECT * FROM trades WHERE date >= ? ORDER BY date DESC, time DESC",
-                (start_date,)
-            )
-            all_rows = [dict(r) for r in cursor.fetchall()]
-    finally:
-        db.close()
+    with db.get_cursor() as cursor:
+        start_date = (now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cursor.execute(
+            "SELECT * FROM trades WHERE date >= ? ORDER BY date DESC, time DESC",
+            (start_date,)
+        )
+        all_rows = [dict(r) for r in cursor.fetchall()]
 
     total = len(all_rows)
     start = (page - 1) * per_page
@@ -194,11 +193,8 @@ async def get_trades_data(days: int = 30, page: int = 1, per_page: int = 50) -> 
 
 async def get_performance_data(days: int = 90) -> dict:
     db = _get_db()
-    try:
-        perf_history = db.get_performance_history(days=days)
-        sell_trades = db.get_all_sell_trades()
-    finally:
-        db.close()
+    perf_history = db.get_performance_history(days=days)
+    sell_trades = db.get_all_sell_trades()
 
     # 역순 정렬 (오래된 순)
     perf_history = list(reversed(perf_history))
@@ -232,16 +228,13 @@ async def get_performance_data(days: int = 90) -> dict:
 
 async def get_themes_data(days: int = 30) -> dict:
     db = _get_db()
-    try:
-        with db.get_cursor() as cursor:
-            start_date = (now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
-            cursor.execute(
-                "SELECT * FROM themes WHERE date >= ? ORDER BY date DESC, score DESC",
-                (start_date,)
-            )
-            all_themes = [dict(r) for r in cursor.fetchall()]
-    finally:
-        db.close()
+    with db.get_cursor() as cursor:
+        start_date = (now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cursor.execute(
+            "SELECT * FROM themes WHERE date >= ? ORDER BY date DESC, score DESC",
+            (start_date,)
+        )
+        all_themes = [dict(r) for r in cursor.fetchall()]
 
     # 최신 날짜 테마
     current_themes = []
@@ -263,10 +256,7 @@ async def get_news_data(stock_code: Optional[str] = None) -> dict:
 
     # 전체 보유 종목 뉴스
     db = _get_db()
-    try:
-        holdings = db.get_portfolio(status="holding")
-    finally:
-        db.close()
+    holdings = db.get_portfolio(status="holding")
 
     from modules.ai_verifier.news_crawler import fetch_stock_news
     all_news = []
@@ -337,10 +327,7 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
     if quantity is None:
         # DB에서 보유 수량 조회
         db = _get_db()
-        try:
-            holdings = db.get_portfolio(status="holding")
-        finally:
-            db.close()
+        holdings = db.get_portfolio(status="holding")
         pos = next((h for h in holdings if h["stock_code"] == stock_code), None)
         if not pos:
             return {"success": False, "message": f"{stock_code} 보유 없음"}
@@ -353,20 +340,17 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
     if result.get("success"):
         # DB 포지션 청산
         db = _get_db()
-        try:
-            db.close_position(stock_code, "대시보드 수동 매도")
-            db.save_trade({
-                "date": now_kst().date(),
-                "stock_code": stock_code,
-                "stock_name": result.get("stock_name", stock_code),
-                "action": "sell",
-                "shares": quantity,
-                "price": result.get("price", 0),
-                "amount": result.get("amount", 0),
-                "reason": "대시보드 수동 매도",
-            })
-        finally:
-            db.close()
+        db.close_position(stock_code, "대시보드 수동 매도")
+        db.save_trade({
+            "date": now_kst().date(),
+            "stock_code": stock_code,
+            "stock_name": result.get("stock_name", stock_code),
+            "action": "sell",
+            "shares": quantity,
+            "price": result.get("price", 0),
+            "amount": result.get("amount", 0),
+            "reason": "대시보드 수동 매도",
+        })
 
     return result
 
@@ -374,10 +358,7 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
 async def execute_sell_all() -> dict:
     """전 종목 시장가 매도"""
     db = _get_db()
-    try:
-        holdings = db.get_portfolio(status="holding")
-    finally:
-        db.close()
+    holdings = db.get_portfolio(status="holding")
 
     if not holdings:
         return {"success": True, "message": "보유 종목 없음", "results": []}

@@ -45,6 +45,14 @@ except ImportError:
     logger.warning("websockets 라이브러리가 설치되지 않았습니다")
 
 
+def _safe_int(val: str) -> int:
+    """비숫자 문자('A' 등 동시호가 플래그)를 0으로 처리"""
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 0
+
+
 # ===== 상수 정의 =====
 # WebSocket URL
 # NOTE: KIS 공식 API는 ws:// 만 제공 (wss:// 미지원, 2026-02 확인)
@@ -480,8 +488,8 @@ class KISWebSocket:
                 volume_idx = 22 + i    # 매도호가잔량1~5: index 22~26
                 if len(data_fields) > volume_idx:
                     asks.append({
-                        "price": int(data_fields[price_idx]) if data_fields[price_idx] else 0,
-                        "volume": int(data_fields[volume_idx]) if data_fields[volume_idx] else 0
+                        "price": _safe_int(data_fields[price_idx]),
+                        "volume": _safe_int(data_fields[volume_idx]),
                     })
 
             # 매수호가 (하위 5개)
@@ -491,8 +499,8 @@ class KISWebSocket:
                 volume_idx = 32 + i    # 매수호가잔량1~5: index 32~36
                 if len(data_fields) > volume_idx:
                     bids.append({
-                        "price": int(data_fields[price_idx]) if data_fields[price_idx] else 0,
-                        "volume": int(data_fields[volume_idx]) if data_fields[volume_idx] else 0
+                        "price": _safe_int(data_fields[price_idx]),
+                        "volume": _safe_int(data_fields[volume_idx]),
                     })
 
             orderbook = OrderbookData(
