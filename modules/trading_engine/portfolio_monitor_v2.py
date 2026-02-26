@@ -322,6 +322,11 @@ class PortfolioMonitorV2:
             for code, pos in self.positions.items():
                 if code in state:
                     s = state[code]
+                    # current_price 복원 (WebSocket 수신 전 buy_price로 오발동 방지)
+                    saved_price = s.get("current_price", 0)
+                    if saved_price > 0:
+                        pos.current_price = saved_price
+
                     if s.get("trailing_active"):
                         pos.trailing_level = s.get("trailing_level", 0)
                         pos.trailing_active = True
@@ -335,7 +340,8 @@ class PortfolioMonitorV2:
                         stop_str = f"{pos.trailing_stop:,.0f}원" if pos.trailing_stop is not None else "미설정"
                         logger.info(
                             f"   트레일링 복원: {pos.stock_name} L{pos.trailing_level} "
-                            f"(최고가 {pos.highest_price:,}원, 스탑 {stop_str})"
+                            f"(최고가 {pos.highest_price:,}원, 스탑 {stop_str}, "
+                            f"현재가 {pos.current_price:,}원)"
                         )
 
             if restored:
