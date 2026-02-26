@@ -336,11 +336,22 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
     if quantity <= 0:
         return {"success": False, "message": "수량이 0 이하입니다"}
 
+    # DB에서 현재 보유 수량 조회
+    db = _get_db()
+    holdings = db.get_portfolio(status="holding")
+    pos = next((h for h in holdings if h["stock_code"] == stock_code), None)
+    total_shares = pos.get("shares", 0) if pos else 0
+
     result = await asyncio.to_thread(order_api.sell_market_order, stock_code, quantity)
     if result.get("success"):
-        # DB 포지션 청산
-        db = _get_db()
-        db.close_position(stock_code, "대시보드 수동 매도")
+        remaining = total_shares - quantity
+        if remaining <= 0:
+            # 전량 매도: 포지션 청산
+            db.close_position(stock_code, "대시보드 수동 매도")
+        else:
+            # 부분 매도: 보유 수량만 업데이트
+            db.update_portfolio_shares(stock_code, remaining)
+
         db.save_trade({
             "date": now_kst().date(),
             "stock_code": stock_code,
