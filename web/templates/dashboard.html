@@ -87,6 +87,9 @@ tr:hover td { background:#16162a; }
 .chart-container { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px; }
 .chart-container canvas { max-height:300px; }
 
+/* ===== 섹션 구분선 ===== */
+.section-divider { border:none; border-top:3px solid var(--border); margin:28px 0 20px; }
+
 /* ===== 테마 카드 ===== */
 .theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; margin-bottom:20px; }
 .theme-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
@@ -152,7 +155,6 @@ tr:hover td { background:#16162a; }
   <div class="tab active" data-tab="portfolio">Portfolio</div>
   <div class="tab" data-tab="trades">Trades</div>
   <div class="tab" data-tab="performance">Performance</div>
-  <div class="tab" data-tab="themes">Themes</div>
   <div class="tab" data-tab="news">News</div>
   <div class="tab" data-tab="system">System</div>
   <div class="tab" data-tab="actions">Actions</div>
@@ -171,6 +173,16 @@ tr:hover td { background:#16162a; }
           <th>수익률</th><th>수익금</th><th>보유일</th><th>트레일링</th>
         </tr></thead>
         <tbody id="portfolio-body"></tbody>
+      </table>
+    </div>
+    <hr class="section-divider">
+    <h3 style="margin:0 0 12px;color:var(--cyan)">Active Themes</h3>
+    <div class="theme-grid" id="portfolio-theme-grid"></div>
+    <h3 style="margin:4px 0 12px">Theme History</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>날짜</th><th>테마</th><th>점수</th><th>모멘텀</th><th>수급비율</th><th>뉴스</th></tr></thead>
+        <tbody id="theme-history-body"></tbody>
       </table>
     </div>
   </div>
@@ -202,19 +214,6 @@ tr:hover td { background:#16162a; }
     <div class="summary" id="perf-summary"></div>
     <div class="chart-container"><canvas id="cumReturnChart"></canvas></div>
     <div class="chart-container"><canvas id="dailyReturnChart"></canvas></div>
-  </div>
-
-  <!-- ========== Themes ========== -->
-  <div class="panel" id="panel-themes">
-    <h3 style="margin-bottom:12px;color:var(--cyan)">Current Themes</h3>
-    <div class="theme-grid" id="theme-grid"></div>
-    <h3 style="margin-bottom:12px;margin-top:20px">Theme History</h3>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>날짜</th><th>테마</th><th>점수</th><th>모멘텀</th><th>수급비율</th><th>뉴스</th></tr></thead>
-        <tbody id="theme-history-body"></tbody>
-      </table>
-    </div>
   </div>
 
   <!-- ========== News ========== -->
@@ -339,7 +338,7 @@ async function loadPortfolio() {
 
   const tbody = document.getElementById('portfolio-body');
   if (!holdingsData.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2)">보유 종목 없음</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text2)">보유 종목 없음</td></tr>';
   } else {
     tbody.innerHTML = holdingsData.map(h => `<tr>
       <td><strong>${h.stock_name}</strong><br><span style="color:var(--text2);font-size:0.75rem">${h.stock_code}</span></td>
@@ -359,6 +358,35 @@ async function loadPortfolio() {
   const sel = document.getElementById('sell-stock-select');
   sel.innerHTML = '<option value="">종목 선택</option>' +
     holdingsData.map(h => `<option value="${h.stock_code}">${h.stock_name} (${h.shares}주)</option>`).join('');
+
+  // 포트폴리오 하단 테마 로드
+  const themeData = await api('/themes?days=7');
+  const grid = document.getElementById('portfolio-theme-grid');
+  if (themeData && themeData.current_themes && themeData.current_themes.length) {
+    grid.innerHTML = themeData.current_themes.map(t => {
+      const score = Number(t.score);
+      const grade = score >= 80 ? 'S' : score >= 65 ? 'A' : score >= 50 ? 'B' : score >= 40 ? 'C' : 'D';
+      const gradeColor = score >= 80 ? 'var(--green)' : score >= 65 ? 'var(--cyan)' : score >= 50 ? 'var(--yellow)' : 'var(--text2)';
+      let meta = `Momentum: ${Number(t.momentum||0).toFixed(1)}`;
+      if (t.supply_ratio) meta += ` | Supply: ${Number(t.supply_ratio).toFixed(0)}%`;
+      if (t.news_count) meta += ` | News: ${t.news_count}`;
+      return `<div class="theme-card">
+        <div class="name">${t.theme_name} <span style="color:${gradeColor};font-size:0.8rem">${grade}</span></div>
+        <div class="score">${score.toFixed(1)}</div>
+        <div class="meta">${meta}</div>
+        <div class="meta" style="margin-top:4px;font-size:0.65rem">${t.date}</div>
+      </div>`;
+    }).join('');
+  } else {
+    grid.innerHTML = '<p style="color:var(--text2)">테마 데이터 없음</p>';
+  }
+
+  // 테마 히스토리 테이블
+  const histBody = document.getElementById('theme-history-body');
+  histBody.innerHTML = (themeData && themeData.history || []).slice(0, 50).map(t => `<tr>
+    <td>${t.date}</td><td>${t.theme_name}</td><td>${Number(t.score).toFixed(1)}</td>
+    <td>${Number(t.momentum||0).toFixed(1)}</td><td>${Number(t.supply_ratio||0).toFixed(0)}%</td><td>${t.news_count||0}</td>
+  </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2)">히스토리 없음</td></tr>';
 }
 
 // ===== Trades =====
@@ -416,31 +444,6 @@ async function loadPerformance() {
       data:d.daily_returns, backgroundColor: d.daily_returns.map(v => v >= 0 ? 'rgba(0,255,136,0.6)' : 'rgba(255,51,102,0.6)'), borderWidth:0
     }]}, options:{...chartOpt, plugins:{...chartOpt.plugins, title:{display:true,text:'Daily Return (%)',color:'#888'}}}
   });
-}
-
-// ===== Themes =====
-async function loadThemes() {
-  const d = await api('/themes?days=30');
-  if (!d) return;
-
-  const grid = document.getElementById('theme-grid');
-  if (!d.current_themes.length) {
-    grid.innerHTML = '<p style="color:var(--text2)">테마 데이터 없음</p>';
-  } else {
-    grid.innerHTML = d.current_themes.map(t => `
-      <div class="theme-card">
-        <div class="name">${t.theme_name}</div>
-        <div class="score">${Number(t.score).toFixed(1)}</div>
-        <div class="meta">Momentum: ${Number(t.momentum||0).toFixed(1)} | Supply: ${Number(t.supply_ratio||0).toFixed(0)}% | News: ${t.news_count||0}</div>
-      </div>
-    `).join('');
-  }
-
-  const tbody = document.getElementById('theme-history-body');
-  tbody.innerHTML = (d.history || []).slice(0, 50).map(t => `<tr>
-    <td>${t.date}</td><td>${t.theme_name}</td><td>${Number(t.score).toFixed(1)}</td>
-    <td>${Number(t.momentum||0).toFixed(1)}</td><td>${Number(t.supply_ratio||0).toFixed(0)}%</td><td>${t.news_count||0}</td>
-  </tr>`).join('');
 }
 
 // ===== News =====
@@ -550,7 +553,6 @@ function loadTab(tab) {
     case 'portfolio': loadPortfolio(); break;
     case 'trades': loadTrades(); break;
     case 'performance': loadPerformance(); break;
-    case 'themes': loadThemes(); break;
     case 'news': loadNews(); break;
     case 'system': loadSystem(); break;
   }

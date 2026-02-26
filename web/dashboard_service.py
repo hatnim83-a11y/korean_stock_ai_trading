@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from logger import logger
 from config import settings, now_kst, validate_stock_code, KST
 from database import Database
+from modules.reporter.performance_calculator import PerformanceCalculator
 
 # ===== 가격 캐시 (5초) =====
 _price_cache: dict[str, tuple[float, dict]] = {}  # code -> (timestamp, data)
@@ -215,11 +216,15 @@ async def get_performance_data(days: int = 90) -> dict:
         daily_returns = [s.get("daily_return") or 0 for s in snapshots]
         latest = snapshots[-1] if snapshots else {}
 
+        # Sharpe ratio 계산 (daily_returns는 % 단위 → 소수로 변환)
+        calc = PerformanceCalculator()
+        sharpe = calc.calculate_sharpe_ratio([r / 100 for r in daily_returns])
+
         return {
             "dates": dates,
             "cumulative_returns": cumulative_returns,
             "daily_returns": daily_returns,
-            "sharpe_ratio": 0,
+            "sharpe_ratio": sharpe,
             "mdd": latest.get("mdd") or 0,
             "win_rate": latest.get("win_rate") or 0,
             "win_count": latest.get("win_count_cumulative") or 0,
