@@ -759,10 +759,11 @@ class TradingSystem:
         self._slot_excluded = all_ai_candidates[available_slots:]
 
         if new_ai_stocks:
-            per_slot_capital = settings.TOTAL_CAPITAL / settings.MAX_POSITIONS
+            # 가용현금 기반 슬롯 배분 (수익 재투자 반영)
+            per_slot_capital = available_cash // available_slots
             target_capital = per_slot_capital * len(new_ai_stocks)
             capital_for_new = min(target_capital, available_cash)
-            logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 = {target_capital:,.0f}원")
+            logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 = {target_capital:,.0f}원 (가용현금÷빈슬롯)")
             logger.info(f"   실제 배분: {capital_for_new:,.0f}원 (가용: {available_cash:,.0f}원)")
 
             optimization_result = await asyncio.to_thread(
