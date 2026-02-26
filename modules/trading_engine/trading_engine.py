@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 from modules.trading_engine.kis_order_api import KISOrderApi, MockOrderApi
 
@@ -379,14 +379,29 @@ class TradingEngine:
         logger.warning(f"   매수가: {buy_price:,}원 → 현재가: {current_price:,}원 ({loss_pct:+.2f}%)")
         
         result = self.order_api.sell_market_order(stock_code, quantity)
+
+        # 시장가 체결 후 실제 체결가 조회 (1초 대기 후)
+        actual_price = current_price
+        if result.get("success") and result.get("order_id"):
+            time.sleep(1)
+            try:
+                orders = self.order_api.get_order_status(order_id=result["order_id"])
+                if orders and orders[0].get("filled_price", 0) > 0:
+                    actual_price = orders[0]["filled_price"]
+                    logger.info(f"   실제 체결가: {actual_price:,}원")
+            except Exception as e:
+                logger.debug(f"체결가 조회 실패 (현재가 사용): {e}")
+
+        actual_loss_pct = (actual_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+
         result.update({
             "stock_name": stock_name,
             "reason": "손절",
             "buy_price": buy_price,
-            "sell_price": current_price,
-            "profit_rate": loss_pct
+            "sell_price": actual_price,
+            "profit_rate": actual_loss_pct
         })
-        
+
         return result
     
     def execute_take_profit(
@@ -415,14 +430,29 @@ class TradingEngine:
         logger.info(f"   매수가: {buy_price:,}원 → 현재가: {current_price:,}원 ({profit_pct:+.2f}%)")
         
         result = self.order_api.sell_market_order(stock_code, quantity)
+
+        # 시장가 체결 후 실제 체결가 조회 (1초 대기 후)
+        actual_price = current_price
+        if result.get("success") and result.get("order_id"):
+            time.sleep(1)
+            try:
+                orders = self.order_api.get_order_status(order_id=result["order_id"])
+                if orders and orders[0].get("filled_price", 0) > 0:
+                    actual_price = orders[0]["filled_price"]
+                    logger.info(f"   실제 체결가: {actual_price:,}원")
+            except Exception as e:
+                logger.debug(f"체결가 조회 실패 (현재가 사용): {e}")
+
+        actual_profit_pct = (actual_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+
         result.update({
             "stock_name": stock_name,
             "reason": "익절",
             "buy_price": buy_price,
-            "sell_price": current_price,
-            "profit_rate": profit_pct
+            "sell_price": actual_price,
+            "profit_rate": actual_profit_pct
         })
-        
+
         return result
     
     # ===== 잔고 조회 =====
@@ -452,7 +482,7 @@ class TradingEngine:
             db = Database()
             db.connect()
             
-            today = date.today()
+            today = now_kst().date()
             
             for order in orders:
                 if not order.get("success"):
@@ -483,7 +513,7 @@ class TradingEngine:
         try:
             db = Database()
             db.connect()
-            today = date.today()
+            today = now_kst().date()
 
             for order in orders:
                 if not order.get("success"):

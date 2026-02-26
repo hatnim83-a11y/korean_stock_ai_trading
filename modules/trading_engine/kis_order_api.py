@@ -1023,6 +1023,10 @@ class MockOrderApi:
             "position_count": len(positions)
         }
     
+    def get_order_status(self, order_id: Optional[str] = None, order_date: Optional[str] = None) -> list[dict]:
+        """모의 주문 상태 조회"""
+        return []
+
     def execute_buy_orders(self, orders: list[dict], delay: float = 0) -> list[dict]:
         results = []
         for order in orders:

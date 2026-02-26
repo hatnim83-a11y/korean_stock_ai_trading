@@ -523,7 +523,7 @@ class Database:
                     price, amount, reason, profit_rate, profit_amount, order_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                trade.get('date', date.today()),
+                trade.get('date', now_kst().date()),
                 trade.get('time', now_kst().strftime("%H:%M:%S")),
                 trade['stock_code'],
                 trade['stock_name'],
