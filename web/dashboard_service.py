@@ -159,7 +159,17 @@ def _calc_hold_days(date_str) -> int:
 
 
 def _load_monitor_state() -> dict:
-    """data/monitor_state.json에서 트레일링 상태 로드"""
+    """트레일링 상태 로드 (DB 우선, JSON 폴백)"""
+    # DB에서 position_state 읽기
+    try:
+        db = _get_db()
+        states = db.get_all_position_states()
+        if states:
+            return states
+    except Exception:
+        pass
+
+    # JSON 폴백
     state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
     try:
         if state_path.exists():
@@ -193,6 +203,31 @@ async def get_trades_data(days: int = 30, page: int = 1, per_page: int = 50) -> 
 
 async def get_performance_data(days: int = 90) -> dict:
     db = _get_db()
+
+    # daily_snapshots 우선 사용, 없으면 performance 폴백
+    snapshots = db.get_daily_snapshots(days=days)
+
+    if snapshots:
+        # 역순 정렬 (오래된 순)
+        snapshots = list(reversed(snapshots))
+        dates = [s["date"] for s in snapshots]
+        cumulative_returns = [s.get("cumulative_return") or 0 for s in snapshots]
+        daily_returns = [s.get("daily_return") or 0 for s in snapshots]
+        latest = snapshots[-1] if snapshots else {}
+
+        return {
+            "dates": dates,
+            "cumulative_returns": cumulative_returns,
+            "daily_returns": daily_returns,
+            "sharpe_ratio": 0,
+            "mdd": latest.get("mdd") or 0,
+            "win_rate": latest.get("win_rate") or 0,
+            "win_count": latest.get("win_count_cumulative") or 0,
+            "loss_count": latest.get("loss_count_cumulative") or 0,
+            "total_trades": (latest.get("win_count_cumulative") or 0) + (latest.get("loss_count_cumulative") or 0),
+        }
+
+    # 폴백: 기존 performance 테이블
     perf_history = db.get_performance_history(days=days)
     sell_trades = db.get_all_sell_trades()
 

@@ -75,6 +75,9 @@ class Position:
     trailing_active: bool = False  # 트레일링 활성화 여부
     trailing_level: int = 0  # 트레일링 레벨 (0=미활성, 1=5%, 2=3%, 3=2%)
     max_profit_rate: float = 0.0  # 최대 수익률 기록
+
+    # WebSocket 가격 수신 확인 (재시작 시 오발동 방지)
+    price_confirmed: bool = False
     
     @property
     def profit(self) -> float:
@@ -254,11 +257,22 @@ class PortfolioMonitorV2:
         logger.info(f"포지션 추가: {stock_name} ({stock_code}) {shares}주 @ {buy_price:,}원")
     
     def remove_position(self, stock_code: str) -> None:
-        """포지션 제거"""
+        """포지션 제거 + position_state DB 삭제"""
         if stock_code in self.positions:
             pos = self.positions[stock_code]
             logger.info(f"포지션 제거: {pos.stock_name} (보유 {pos.hold_days}일)")
             del self.positions[stock_code]
+            # position_state DB에서도 삭제
+            db = None
+            try:
+                db = Database()
+                db.connect()
+                db.delete_position_state(stock_code)
+            except Exception as e:
+                logger.debug(f"position_state 삭제 실패: {e}")
+            finally:
+                if db:
+                    db.close()
     
     def load_positions_from_db(self) -> int:
         """
@@ -309,55 +323,90 @@ class PortfolioMonitorV2:
                 db.close()
 
     def _restore_trailing_state(self) -> None:
-        """monitor_state.json에서 트레일링 상태 복원 (재시작 시)"""
+        """DB에서 트레일링 상태 복원 (재시작 시). DB 우선, JSON 폴백."""
         import json
-        state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+
+        # 1) DB에서 position_state 로드 시도
+        state = {}
+        db_source = False
+        db = None
         try:
-            if not state_path.exists():
-                return
-            with open(state_path) as f:
-                state = json.load(f)
-
-            restored = 0
-            for code, pos in self.positions.items():
-                if code in state:
-                    s = state[code]
-                    # current_price 복원 (WebSocket 수신 전 buy_price로 오발동 방지)
-                    saved_price = s.get("current_price", 0)
-                    if saved_price > 0:
-                        pos.current_price = saved_price
-
-                    # 분할 익절 상태 복원 (이중 매도 방지)
-                    pos.partial_1_executed = s.get("partial_1_executed", False)
-                    pos.partial_2_executed = s.get("partial_2_executed", False)
-                    pos.partial_3_executed = s.get("partial_3_executed", False)
-                    if any([pos.partial_1_executed, pos.partial_2_executed, pos.partial_3_executed]):
-                        logger.info(
-                            f"   익절 상태 복원: {pos.stock_name} "
-                            f"P1={pos.partial_1_executed} P2={pos.partial_2_executed} P3={pos.partial_3_executed}"
-                        )
-
-                    if s.get("trailing_active"):
-                        pos.trailing_level = s.get("trailing_level", 0)
-                        pos.trailing_active = True
-                        pos.trailing_stop = s.get("trailing_stop_price")
-                        pos.max_profit_rate = s.get("max_profit_rate", 0) / 100  # %→비율
-                        # highest_price: 저장값과 현재 buy_price 기반 중 큰 값
-                        saved_highest = s.get("highest_price", 0)
-                        if saved_highest > pos.highest_price:
-                            pos.highest_price = saved_highest
-                        restored += 1
-                        stop_str = f"{pos.trailing_stop:,.0f}원" if pos.trailing_stop is not None else "미설정"
-                        logger.info(
-                            f"   트레일링 복원: {pos.stock_name} L{pos.trailing_level} "
-                            f"(최고가 {pos.highest_price:,}원, 스탑 {stop_str}, "
-                            f"현재가 {pos.current_price:,}원)"
-                        )
-
-            if restored:
-                logger.info(f"트레일링 상태 복원: {restored}개 종목")
+            db = Database()
+            db.connect()
+            db_states = db.get_all_position_states()
+            if db_states:
+                state = db_states
+                db_source = True
         except Exception as e:
-            logger.warning(f"트레일링 상태 복원 실패: {e}")
+            logger.debug(f"position_state DB 조회 실패: {e}")
+        finally:
+            if db:
+                db.close()
+
+        # 2) DB 비어있으면 JSON 폴백
+        if not state:
+            state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+            try:
+                if state_path.exists():
+                    with open(state_path) as f:
+                        state = json.load(f)
+            except Exception as e:
+                logger.debug(f"monitor_state.json 로드 실패: {e}")
+
+        if not state:
+            return
+
+        restored = 0
+        for code, pos in self.positions.items():
+            if code not in state:
+                continue
+            s = state[code]
+
+            # current_price 복원 (WebSocket 수신 전 buy_price로 오발동 방지)
+            saved_price = s.get("current_price", 0)
+            if saved_price > 0:
+                pos.current_price = saved_price
+
+            # remaining_shares 복원 (DB source)
+            saved_remaining = s.get("remaining_shares", 0)
+            if saved_remaining > 0 and saved_remaining <= pos.shares:
+                pos.remaining_shares = saved_remaining
+
+            # 분할 익절 상태 복원 (이중 매도 방지)
+            pos.partial_1_executed = bool(s.get("partial_1_executed", False))
+            pos.partial_2_executed = bool(s.get("partial_2_executed", False))
+            pos.partial_3_executed = bool(s.get("partial_3_executed", False))
+            if any([pos.partial_1_executed, pos.partial_2_executed, pos.partial_3_executed]):
+                logger.info(
+                    f"   익절 상태 복원: {pos.stock_name} "
+                    f"P1={pos.partial_1_executed} P2={pos.partial_2_executed} P3={pos.partial_3_executed}"
+                )
+
+            if s.get("trailing_active"):
+                pos.trailing_level = s.get("trailing_level", 0)
+                pos.trailing_active = True
+                pos.trailing_stop = s.get("trailing_stop_price")
+                # DB는 비율 그대로 저장, JSON은 %로 저장
+                raw_rate = s.get("max_profit_rate", 0)
+                if db_source:
+                    pos.max_profit_rate = raw_rate  # 비율 그대로
+                else:
+                    pos.max_profit_rate = raw_rate / 100  # %→비율
+                # highest_price: 저장값과 현재 buy_price 기반 중 큰 값
+                saved_highest = s.get("highest_price", 0)
+                if saved_highest > pos.highest_price:
+                    pos.highest_price = saved_highest
+                restored += 1
+                stop_str = f"{pos.trailing_stop:,.0f}원" if pos.trailing_stop is not None else "미설정"
+                logger.info(
+                    f"   트레일링 복원: {pos.stock_name} L{pos.trailing_level} "
+                    f"(최고가 {pos.highest_price:,}원, 스탑 {stop_str}, "
+                    f"현재가 {pos.current_price:,}원)"
+                )
+
+        source_str = "DB" if db_source else "JSON"
+        if restored:
+            logger.info(f"트레일링 상태 복원: {restored}개 종목 (소스: {source_str})")
     
     # ===== 모니터링 =====
     
@@ -456,6 +505,7 @@ class PortfolioMonitorV2:
         if not self.positions:
             return
 
+        db = None
         try:
             db = Database()
             db.connect()
@@ -467,10 +517,12 @@ class PortfolioMonitorV2:
                         profit_rate=pos.profit_rate,
                         profit_amount=pos.profit
                     )
-            db.close()
             logger.debug(f"DB 가격 갱신: {len(self.positions)}종목")
         except Exception as e:
             logger.error(f"DB 가격 갱신 실패: {e}")
+        finally:
+            if db:
+                db.close()
 
     def _log_status(self) -> None:
         """주기적 모니터링 상태 로그 (30분 간격)"""
@@ -493,7 +545,7 @@ class PortfolioMonitorV2:
         logger.info("\n".join(lines))
 
     def _dump_monitor_state(self) -> None:
-        """대시보드용 트레일링 상태를 JSON 파일로 덤프 (30초 간격)"""
+        """트레일링 상태를 DB + JSON에 동시 저장 (30초 간격)"""
         import json
         state = {}
         for code, pos in self.positions.items():
@@ -507,13 +559,40 @@ class PortfolioMonitorV2:
                 "partial_1_executed": pos.partial_1_executed,
                 "partial_2_executed": pos.partial_2_executed,
                 "partial_3_executed": pos.partial_3_executed,
+                "remaining_shares": pos.remaining_shares,
             }
+
+        # 1) JSON 파일 (대시보드 캐시용)
         state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
         try:
             with open(state_path, "w") as f:
                 json.dump(state, f, ensure_ascii=False)
         except Exception as e:
-            logger.debug(f"상태 덤프 실패: {e}")
+            logger.debug(f"JSON 상태 덤프 실패: {e}")
+
+        # 2) DB position_state (primary source of truth)
+        db = None
+        try:
+            db = Database()
+            db.connect()
+            for code, s in state.items():
+                db.upsert_position_state(code, {
+                    "current_price": s["current_price"],
+                    "highest_price": s["highest_price"],
+                    "trailing_active": s["trailing_active"],
+                    "trailing_level": s["trailing_level"],
+                    "trailing_stop_price": s["trailing_stop_price"],
+                    "max_profit_rate": s["max_profit_rate"] / 100,  # %→비율로 DB 저장
+                    "partial_1_executed": s["partial_1_executed"],
+                    "partial_2_executed": s["partial_2_executed"],
+                    "partial_3_executed": s["partial_3_executed"],
+                    "remaining_shares": s["remaining_shares"],
+                })
+        except Exception as e:
+            logger.debug(f"DB position_state 저장 실패: {e}")
+        finally:
+            if db:
+                db.close()
 
     def _on_price_update(self, price_data: PriceData) -> None:
         """
@@ -529,10 +608,11 @@ class PortfolioMonitorV2:
             return
         
         pos = self.positions[stock_code]
-        
+
         # 현재가 업데이트
         pos.current_price = current_price
-        
+        pos.price_confirmed = True
+
         # 최고가 업데이트 (트레일링 스탑용)
         if current_price > pos.highest_price:
             pos.highest_price = current_price
@@ -549,7 +629,12 @@ class PortfolioMonitorV2:
         for stock_code, pos in list(self.positions.items()):
             if pos.current_price <= 0:
                 continue
-            
+
+            # WebSocket에서 실제 가격 수신 전이면 매매 판단 스킵 (재시작 오발동 방지)
+            if not pos.price_confirmed:
+                logger.debug(f"가격 미확인 스킵: {pos.stock_name} ({stock_code})")
+                continue
+
             # 1. 손절 체크
             if self._check_stop_loss(pos):
                 await self._execute_stop_loss(pos)
@@ -587,19 +672,20 @@ class PortfolioMonitorV2:
 
     def _close_position_in_db(self, pos: Position, reason: str, sell_price: float,
                               sell_shares: int = 0) -> None:
-        """DB에서 포지션 청산 + 매도 기록 저장
+        """DB에서 포지션 청산 + 매도 기록 저장 + trade_review 생성
 
         Args:
             sell_shares: 매도 수량 (0이면 pos.remaining_shares 사용)
         """
         shares = sell_shares if sell_shares > 0 else pos.remaining_shares
+        db = None
         try:
             db = Database()
             db.connect()
             db.close_position(pos.stock_code, reason)
             actual_profit_rate = (sell_price - pos.buy_price) / pos.buy_price * 100 if pos.buy_price > 0 else 0
             actual_profit_amount = (sell_price - pos.buy_price) * shares
-            db.save_trade({
+            trade_id = db.save_trade({
                 "stock_code": pos.stock_code,
                 "stock_name": pos.stock_name,
                 "action": "sell",
@@ -609,21 +695,64 @@ class PortfolioMonitorV2:
                 "reason": reason,
                 "profit_rate": actual_profit_rate,
                 "profit_amount": actual_profit_amount,
+                "buy_price": pos.buy_price,
+                "filled_price": sell_price,
+                "remaining_shares": 0,
             })
-            db.close()
+
+            # trade_review 생성
+            buy_date_str = pos.buy_date.strftime("%Y-%m-%d") if hasattr(pos.buy_date, 'strftime') else str(pos.buy_date)
+            db.save_trade_review({
+                "trade_id": trade_id,
+                "stock_code": pos.stock_code,
+                "stock_name": pos.stock_name,
+                "buy_date": buy_date_str,
+                "sell_date": str(now_kst().date()),
+                "buy_price": pos.buy_price,
+                "sell_price": sell_price,
+                "shares": shares,
+                "hold_days": pos.hold_days,
+                "profit_rate": actual_profit_rate,
+                "profit_amount": actual_profit_amount,
+                "sell_reason": reason,
+                "strategy_type": self._classify_strategy(reason),
+                "trailing_level": pos.trailing_level,
+                "max_profit_during_hold": round(pos.max_profit_rate * 100, 2),
+                "theme": pos.theme,
+            })
         except Exception as e:
             logger.error(f"포지션 청산 DB 업데이트 실패: {e}")
+        finally:
+            if db:
+                db.close()
+
+    @staticmethod
+    def _classify_strategy(reason: str) -> str:
+        """매도 사유로 전략 유형 분류"""
+        if "손절" in reason:
+            return "stop_loss"
+        elif "트레일링" in reason:
+            return "trailing_stop"
+        elif "익절" in reason:
+            return "take_profit"
+        elif "보유" in reason:
+            return "max_hold"
+        elif "수급" in reason:
+            return "supply_exit"
+        return "manual"
 
     def _save_partial_sell_to_db(
         self, pos: Position, sell_shares: int, stage: int, sell_price: float
     ) -> None:
-        """부분 매도 시 DB에 매도 기록 저장 + 보유 수량 업데이트"""
+        """부분 매도 시 DB에 매도 기록 저장 + 보유 수량/partial 상태 업데이트 + trade_review"""
+        db = None
         try:
             db = Database()
             db.connect()
             # 매도 기록 저장
+            actual_profit_rate = (sell_price - pos.buy_price) / pos.buy_price * 100 if pos.buy_price > 0 else 0
             partial_profit = (sell_price - pos.buy_price) * sell_shares
-            db.save_trade({
+            trade_id = db.save_trade({
                 "stock_code": pos.stock_code,
                 "stock_name": pos.stock_name,
                 "action": "sell",
@@ -631,14 +760,47 @@ class PortfolioMonitorV2:
                 "price": sell_price,
                 "amount": sell_shares * sell_price,
                 "reason": f"{stage}차 분할익절",
-                "profit_rate": pos.profit_rate,
+                "profit_rate": actual_profit_rate,
                 "profit_amount": partial_profit,
+                "buy_price": pos.buy_price,
+                "filled_price": sell_price,
+                "remaining_shares": pos.remaining_shares,
             })
             # 포트폴리오 보유 수량 업데이트
             db.update_portfolio_shares(pos.stock_code, pos.remaining_shares)
-            db.close()
+            # portfolio partial/trailing 상태 업데이트
+            db.update_portfolio_partial_state(
+                pos.stock_code,
+                pos.partial_1_executed, pos.partial_2_executed, pos.partial_3_executed,
+                pos.trailing_active, pos.trailing_level,
+                pos.trailing_stop, pos.highest_price, pos.max_profit_rate,
+            )
+
+            # trade_review 생성
+            buy_date_str = pos.buy_date.strftime("%Y-%m-%d") if hasattr(pos.buy_date, 'strftime') else str(pos.buy_date)
+            db.save_trade_review({
+                "trade_id": trade_id,
+                "stock_code": pos.stock_code,
+                "stock_name": pos.stock_name,
+                "buy_date": buy_date_str,
+                "sell_date": str(now_kst().date()),
+                "buy_price": pos.buy_price,
+                "sell_price": sell_price,
+                "shares": sell_shares,
+                "hold_days": pos.hold_days,
+                "profit_rate": actual_profit_rate,
+                "profit_amount": partial_profit,
+                "sell_reason": f"{stage}차 분할익절",
+                "strategy_type": "take_profit",
+                "trailing_level": pos.trailing_level,
+                "max_profit_during_hold": round(pos.max_profit_rate * 100, 2),
+                "theme": pos.theme,
+            })
         except Exception as e:
             logger.error(f"분할 매도 DB 업데이트 실패: {e}")
+        finally:
+            if db:
+                db.close()
 
     # ===== 손절 =====
 

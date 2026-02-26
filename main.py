@@ -1192,23 +1192,113 @@ class TradingSystem:
     
     async def run_market_close(self) -> None:
         """장 마감 정리 (15:35)"""
-        logger.info("📋 장 마감 정리")
-        
+        logger.info("장 마감 정리")
+
         # 미체결 주문 취소
         self.trading_engine.cancel_all_pending()
-        
+
         # 포트폴리오 현황 출력
         if self.monitor:
             self.monitor.display_status()
-        
-        # 리밸런싱 준비 (다음날 분석용)
-        # 실제 리밸런싱은 다음날 분석 시 수행
+            self.monitor._update_db_prices()  # 최신 가격 DB 반영 후 스냅샷
+
+        # 일일 스냅샷 저장
+        self._save_daily_snapshot()
+
+    def _save_daily_snapshot(self) -> None:
+        """장 마감 시 daily_snapshots 저장"""
+        db = None
+        try:
+            db = Database()
+            db.connect()
+
+            today = now_kst().date()
+
+            # 보유 종목
+            holdings = db.get_portfolio(status="holding")
+            sell_trades = db.get_all_sell_trades()
+
+            # 실현 손익 계산
+            today_sell = [t for t in sell_trades if str(t.get("date")) == str(today)]
+            realized_pnl_today = sum(t.get("profit_amount") or 0 for t in today_sell)
+            realized_pnl_cumulative = sum(t.get("profit_amount") or 0 for t in sell_trades)
+
+            # 미실현 손익 계산
+            total_invested = sum((h.get("shares", 0)) * (h.get("buy_price", 0)) for h in holdings)
+            total_eval = sum((h.get("shares", 0)) * (h.get("current_price") or h.get("buy_price", 0)) for h in holdings)
+            unrealized_pnl = total_eval - total_invested
+
+            # 매매 건수
+            today_trades = db.get_trades(today)
+            buy_count = sum(1 for t in today_trades if t.get("action") == "buy")
+            sell_count = sum(1 for t in today_trades if t.get("action") == "sell")
+
+            # 승패 (전체 누적)
+            win_count = sum(1 for t in sell_trades if (t.get("profit_amount") or 0) > 0)
+            loss_count = sum(1 for t in sell_trades if (t.get("profit_amount") or 0) <= 0)
+            total_trades = win_count + loss_count
+            win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+
+            # 수익률
+            capital = settings.TOTAL_CAPITAL
+            cash_balance = max(0, capital - total_invested)
+            current_total = cash_balance + total_eval + realized_pnl_cumulative
+            cumulative_return = ((current_total - capital) / capital * 100) if capital > 0 else 0
+
+            # MDD: 전일 peak 가져와서 비교
+            previous = db.get_daily_snapshots(days=1)
+            prev_peak = previous[0].get("peak_value", capital) if previous else capital
+            peak_value = max(prev_peak, current_total)
+            mdd = ((current_total - peak_value) / peak_value * 100) if peak_value > 0 else 0
+
+            # 일별 수익률
+            prev_total = previous[0].get("total_capital", capital) if previous else capital
+            daily_return = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
+
+            # 포지션 JSON
+            import json
+            positions_json = json.dumps([
+                {"code": h["stock_code"], "name": h["stock_name"],
+                 "shares": h.get("shares", 0), "buy_price": h.get("buy_price", 0),
+                 "current_price": h.get("current_price", 0)}
+                for h in holdings
+            ], ensure_ascii=False)
+
+            db.save_daily_snapshot({
+                "date": str(today),
+                "total_capital": current_total,
+                "cash_balance": cash_balance,
+                "total_invested": total_invested,
+                "total_eval": total_eval,
+                "unrealized_pnl": unrealized_pnl,
+                "realized_pnl_today": realized_pnl_today,
+                "realized_pnl_cumulative": realized_pnl_cumulative,
+                "daily_return": round(daily_return, 4),
+                "cumulative_return": round(cumulative_return, 4),
+                "mdd": round(mdd, 4),
+                "peak_value": peak_value,
+                "num_positions": len(holdings),
+                "buy_count": buy_count,
+                "sell_count": sell_count,
+                "win_count_cumulative": win_count,
+                "loss_count_cumulative": loss_count,
+                "win_rate": round(win_rate, 2),
+                "positions_json": positions_json,
+            })
+
+            logger.info(f"일일 스냅샷 저장: 수익률 {cumulative_return:+.2f}%, MDD {mdd:.2f}%")
+
+        except Exception as e:
+            logger.error(f"일일 스냅샷 저장 실패: {e}")
+        finally:
+            if db:
+                db.close()
     
     # ===== 일일 리포트 =====
     
     async def send_daily_report(self) -> None:
         """일일 리포트 발송 (16:00)"""
-        logger.info("📊 일일 리포트 생성")
+        logger.info("일일 리포트 생성")
 
         try:
             # 현재 포트폴리오
@@ -1229,6 +1319,8 @@ class TradingSystem:
             db.connect()
             try:
                 realized_trades = db.get_all_sell_trades()
+                # 전략별 성과 집계 (trade_reviews 기반)
+                self._aggregate_strategy_stats(db)
             finally:
                 db.close()
 
@@ -1243,10 +1335,49 @@ class TradingSystem:
                 total_capital=settings.TOTAL_CAPITAL
             )
 
-            logger.info("✅ 일일 리포트 발송 완료")
+            logger.info("일일 리포트 발송 완료")
 
         except Exception as e:
             logger.error(f"리포트 발송 실패: {e}")
+
+    def _aggregate_strategy_stats(self, db: Database) -> None:
+        """trade_reviews에서 전략별 성과 집계 -> strategy_stats 저장"""
+        try:
+            today = str(now_kst().date())
+            with db.get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT strategy_type,
+                           COUNT(*) as trade_count,
+                           SUM(CASE WHEN profit_amount > 0 THEN 1 ELSE 0 END) as win_count,
+                           SUM(CASE WHEN profit_amount <= 0 THEN 1 ELSE 0 END) as loss_count,
+                           SUM(profit_amount) as total_pnl,
+                           AVG(profit_rate) as avg_profit_rate,
+                           AVG(hold_days) as avg_hold_days
+                    FROM trade_reviews
+                    WHERE sell_date = ?
+                    GROUP BY strategy_type
+                """, (today,))
+                rows = cursor.fetchall()
+
+            for row in rows:
+                r = dict(row)
+                total = r["trade_count"]
+                wins = r["win_count"] or 0
+                db.save_strategy_stats({
+                    "date": today,
+                    "strategy_type": r["strategy_type"],
+                    "trade_count": total,
+                    "win_count": wins,
+                    "loss_count": r["loss_count"] or 0,
+                    "win_rate": round(wins / total * 100, 2) if total > 0 else 0,
+                    "total_pnl": r["total_pnl"] or 0,
+                    "avg_profit_rate": round(r["avg_profit_rate"] or 0, 2),
+                    "avg_hold_days": round(r["avg_hold_days"] or 0, 1),
+                })
+            if rows:
+                logger.info(f"전략별 성과 집계: {len(rows)}개 전략 유형")
+        except Exception as e:
+            logger.error(f"전략별 성과 집계 실패: {e}")
     
     # ===== 수동 실행 =====
 

@@ -18,20 +18,21 @@
 - Token sharing: `KISApi._shared_token` class variable, reused by `KISOrderApi`
 - 1-minute cooldown on token issuance per app key
 
-## DB Schema (updated 2026-02-25)
-- portfolio: id, date, stock_code, stock_name, theme, weight, shares, buy_price, current_price, stop_loss, take_profit, profit_rate, profit_amount, status (holding/closed), created_at, updated_at
-- trades: id, date, time, stock_code, stock_name, action (buy/sell), shares, price, amount, reason, profit_rate, profit_amount, order_id, created_at
+## DB Schema (updated 2026-02-26)
+- portfolio: id, date, stock_code, stock_name, theme, weight, shares, buy_price, current_price, stop_loss, take_profit, profit_rate, profit_amount, status (holding/closed), created_at, updated_at + v8 columns (original_shares, buy_date, partial_1/2/3_executed, trailing_active/level/stop, highest_price, max_profit_rate)
+- trades: id, date, time, stock_code, stock_name, action (buy/sell), shares, price, amount, reason, profit_rate, profit_amount, order_id, created_at + v8 columns (buy_price, filled_price, slippage, remaining_shares)
 - themes: id, date, theme_name, score, momentum, supply_ratio, news_count, ai_sentiment, created_at (NO status/selected_date columns)
+- **IMPORTANT**: trades.profit_rate unit is inconsistent! Old data (id<=20): ratio (0.07=7%). New data (id>=21): percent (7.0=7%). See Known Issues.
 - NOTE: NO `timestamp` column in trades; use `created_at` for ordering
-- NOTE: NO `buy_date` column in portfolio; use `date` field
 
 ## Stop Loss Calculation
 - Uses ATR-based dynamic stop loss, NOT just DEFAULT_STOP_LOSS
 - Clamped to range: MIN=-12%, MAX=-5% (see `calculators.py`)
 - DEFAULT_STOP_LOSS in .env is -0.08 but actual SL varies per stock via ATR
 
-## Known Issues (as of 2026-02-25)
-- **CRITICAL: Partial sell not saved to DB**: `_execute_partial_sell` in `portfolio_monitor_v2.py` does NOT save sell trade to DB or update portfolio shares. Only full liquidation triggers `_close_position_in_db`. Confirmed on 2/23 with Y2Solution.
+## Known Issues (as of 2026-02-26)
+- **CRITICAL: profit_rate unit inconsistency in trades table**: Before commit `5a336fe` (2026-02-26), `_close_position_in_db` saved `pos.profit_rate` as ratio (0.07). After the fix, it calculates `(sell_price - buy_price) / buy_price * 100` as percent (7.0). Old sell trades (id 8,16,17,20) show wrong % on dashboard (e.g., +0.07% instead of +7.02%). Need DB migration to multiply old profit_rate by 100. Affected: id 3,4,8,16,17,20. profit_amount is correct (won amount).
+- ~~**RESOLVED: Partial sell not saved to DB**~~: Fixed in commit `5a336fe`. `_save_partial_sell_to_db` now saves sell trade + updates portfolio shares + creates trade_review.
 - **WebSocket orderbook parse error 'A'**: `_parse_orderbook_data` in `kis_websocket.py:509` fails with `int('A')`. Happens ONLY at market close (15:20-15:30 KST). KIS sends non-numeric chars in orderbook fields during closing auction. ~5000 errors/day. Non-critical (only orderbook display). Fix: add per-field try/except or filter non-numeric.
 - **KIS API "Server disconnected"**: Intermittent `get_current_price` failures. ~48/day on 2/25. Stocks: 064760, 066570, 009240, 031980. HTTP keepalive timeout. Non-critical.
 - **Dashboard CPU 5.9%**: Higher than expected. SSE polling every ~8s causes frequent DB connect/disconnect.
@@ -53,7 +54,7 @@
 - 16:00 Daily report
 
 ## Trading Parameters (.env)
-- TOTAL_CAPITAL: 3,000,000 KRW, MAX_POSITIONS: 5, per_slot: 600,000
+- TOTAL_CAPITAL: 4,000,000 KRW, MAX_POSITIONS: 5, per_slot: 800,000
 - DEFAULT_STOP_LOSS: -8% (actual ATR-based: -5%~-12%)
 - Trailing: L1(+8%, -5%), L2(+15%, -3%), L3(+25%, -2%)
 - Theme rotation: 7 days (config default)

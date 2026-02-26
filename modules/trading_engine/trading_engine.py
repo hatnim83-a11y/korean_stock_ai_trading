@@ -481,30 +481,43 @@ class TradingEngine:
         try:
             db = Database()
             db.connect()
-            
+
             today = now_kst().date()
-            
+
             for order in orders:
                 if not order.get("success"):
                     continue
-                
+
+                filled_price = order.get("filled_price", 0)
+                order_price = order.get("price", 0)
+                buy_price = order.get("buy_price", 0)
+
+                # 슬리피지: 매도 시 (체결가 - 주문 시 current_price) / current_price
+                slippage = None
+                if is_sell and filled_price and order_price:
+                    slippage = round((filled_price - order_price) / order_price * 100, 4)
+
                 trade = {
                     "date": str(today),
                     "stock_code": order.get("stock_code"),
                     "stock_name": order.get("stock_name"),
                     "action": "sell" if is_sell else "buy",
                     "shares": order.get("quantity", 0),
-                    "price": order.get("price", 0) or order.get("filled_price", 0),
+                    "price": order_price or filled_price,
                     "amount": order.get("amount", 0),
                     "reason": order.get("reason"),
                     "profit_rate": order.get("profit_rate"),
-                    "profit_amount": order.get("profit_amount")
+                    "profit_amount": order.get("profit_amount"),
+                    "buy_price": buy_price if is_sell else (filled_price or order_price),
+                    "filled_price": filled_price,
+                    "slippage": slippage,
+                    "remaining_shares": order.get("remaining_shares"),
                 }
-                
+
                 db.save_trade(trade)
-            
+
             db.close()
-            
+
         except Exception as e:
             logger.error(f"매매 기록 저장 실패: {e}")
     
@@ -513,19 +526,20 @@ class TradingEngine:
         try:
             db = Database()
             db.connect()
-            today = now_kst().date()
+            today = str(now_kst().date())
 
             for order in orders:
                 if not order.get("success"):
                     continue
 
                 filled_price = order.get("filled_price") or order.get("price", 0)
+                quantity = order.get("quantity", 0)
                 db.save_holding_position({
-                    "date": str(today),
+                    "date": today,
                     "stock_code": order.get("stock_code"),
                     "stock_name": order.get("stock_name"),
                     "theme": order.get("theme"),
-                    "shares": order.get("quantity", 0),
+                    "shares": quantity,
                     "buy_price": filled_price,
                     "stop_loss": order.get("stop_loss"),
                     "take_profit": order.get("take_profit"),
