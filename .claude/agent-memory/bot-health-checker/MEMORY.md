@@ -22,7 +22,8 @@
 - portfolio: id, date, stock_code, stock_name, theme, weight, shares, buy_price, current_price, stop_loss, take_profit, profit_rate, profit_amount, status (holding/closed), created_at, updated_at + v8 columns (original_shares, buy_date, partial_1/2/3_executed, trailing_active/level/stop, highest_price, max_profit_rate)
 - trades: id, date, time, stock_code, stock_name, action (buy/sell), shares, price, amount, reason, profit_rate, profit_amount, order_id, created_at + v8 columns (buy_price, filled_price, slippage, remaining_shares)
 - themes: id, date, theme_name, score, momentum, supply_ratio, news_count, ai_sentiment, created_at (NO status/selected_date columns)
-- **IMPORTANT**: trades.profit_rate unit is inconsistent! Old data (id<=20): ratio (0.07=7%). New data (id>=21): percent (7.0=7%). See Known Issues.
+- position_state: stock_code (PK), current_price, highest_price, trailing_active, trailing_level, trailing_stop_price, max_profit_rate, partial_1/2/3_executed, remaining_shares, last_updated
+- **IMPORTANT**: trades.profit_rate unit is inconsistent! Old data (id<=20): ratio (0.07=7%). New data (id>=21): percent (7.0=7%).
 - NOTE: NO `timestamp` column in trades; use `created_at` for ordering
 
 ## Stop Loss Calculation
@@ -31,33 +32,30 @@
 - DEFAULT_STOP_LOSS in .env is -0.08 but actual SL varies per stock via ATR
 
 ## Known Issues (as of 2026-02-26)
-- **CRITICAL: profit_rate unit inconsistency in trades table**: Before commit `5a336fe` (2026-02-26), `_close_position_in_db` saved `pos.profit_rate` as ratio (0.07). After the fix, it calculates `(sell_price - buy_price) / buy_price * 100` as percent (7.0). Old sell trades (id 8,16,17,20) show wrong % on dashboard (e.g., +0.07% instead of +7.02%). Need DB migration to multiply old profit_rate by 100. Affected: id 3,4,8,16,17,20. profit_amount is correct (won amount).
-- ~~**RESOLVED: Partial sell not saved to DB**~~: Fixed in commit `5a336fe`. `_save_partial_sell_to_db` now saves sell trade + updates portfolio shares + creates trade_review.
-- **WebSocket orderbook parse error 'A'**: `_parse_orderbook_data` in `kis_websocket.py:509` fails with `int('A')`. Happens ONLY at market close (15:20-15:30 KST). KIS sends non-numeric chars in orderbook fields during closing auction. ~5000 errors/day. Non-critical (only orderbook display). Fix: add per-field try/except or filter non-numeric.
-- **KIS API "Server disconnected"**: Intermittent `get_current_price` failures. ~48/day on 2/25. Stocks: 064760, 066570, 009240, 031980. HTTP keepalive timeout. Non-critical.
-- **Dashboard CPU 5.9%**: Higher than expected. SSE polling every ~8s causes frequent DB connect/disconnect.
-- **Log file date uses UTC**: loguru `{time:YYYY-MM-DD}` uses server UTC. 08:00-08:59 KST logs go to PREVIOUS day's file.
+- **CRITICAL: Theme data key mismatch** (found 2026-02-26): `main.py:176` creates `{"theme": name, "score": val}` on DB restore, but `screener.py:441` expects `{"name": name, "url": url, "total_score": val}`. Causes screener to find 0 stocks because `theme.get("name")` = None. Fresh analysis works; DB restore fails. Fix: normalize keys in main.py or screener.py.
+- **CRITICAL: profit_rate unit inconsistency in trades table**: Old data ratio, new data percent.
+- **WARNING: DB portfolio trailing columns never updated at runtime**: portfolio.trailing_active=0 always. position_state has correct data. Bot uses position_state for restore.
+- **WARNING: Dashboard creates new KISApi every SSE poll**: 2195 inits/5h = ~7/min. Should cache.
+- **WebSocket orderbook parse error 'A'**: Market close only. Non-critical.
+- **KIS API "Server disconnected"**: Intermittent. Non-critical.
+- **Log file date uses UTC**: 08:00-08:59 KST logs go to PREVIOUS day's file.
 
 ## Resolved Issues
-- ~~**Service is disabled**~~: 2026-02-20 `systemctl enable` done.
-- ~~**Morning filter stock name None**~~: 2026-02-20 fix (07cc814).
-- ~~**Supply filter all zeros**~~: 2026-02-20 fix (8e55179).
+- ~~**Partial sell not saved to DB**~~: Fixed `5a336fe`.
+- ~~**Dashboard manual sell full close instead of partial**~~: Fixed `4f43344`.
+- ~~**Service is disabled**~~: 2026-02-20.
+- ~~**Morning filter stock name None**~~: 2026-02-20.
+- ~~**Supply filter all zeros**~~: 2026-02-20.
 
 ## Scheduler (KST, all CronTrigger with timezone=Asia/Seoul)
-- 08:00 Theme rotation check
-- 08:30 Theme analysis (crawl + score + select themes)
-- 09:05 Stock screening + AI verification + observation loop
-- 09:25 Auto buy execution (new positions only in empty slots)
-- 09:26 Monitoring start (trailing stop, stop loss)
-- 15:30 Monitoring stop
-- 15:35 Market close cleanup
-- 16:00 Daily report
+- 08:00 Theme rotation check | 08:30 Theme analysis | 09:05 Screening | 09:25 Auto buy
+- 09:26 Monitoring start | 15:30 Monitoring stop | 15:35 Close cleanup | 16:00 Daily report
 
 ## Trading Parameters (.env)
 - TOTAL_CAPITAL: 4,000,000 KRW, MAX_POSITIONS: 5, per_slot: 800,000
 - DEFAULT_STOP_LOSS: -8% (actual ATR-based: -5%~-12%)
 - Trailing: L1(+8%, -5%), L2(+15%, -3%), L3(+25%, -2%)
-- Theme rotation: 7 days (config default)
+- Theme rotation: 7 days
 
 ## Health Check Patterns
 - Process: PID from trading_system.pid, then `ps -p PID`
@@ -67,7 +65,6 @@
 - Orderbook parse errors: ONLY at market close 15:20-15:30 KST = NORMAL
 
 ## Recent Health Checks
-- **2026-02-25 20:57 KST**: Wed. PID 1350780, up 6h, 0.1%CPU/55MB. Dashboard PID 1354814, 5.9%CPU/160MB. 5 holdings, +47,550 KRW (+2.0%). 2 restarts during market (13:56, 14:44 KST - manual). All jobs ran. 1 buy (HD한국조선해양). Hansem trailing L1 active (+7.5%). 4,970 orderbook errors (close-only), 48 disconnect errors. Disk 52%, Mem 2.7G/3.9G.
-- **2026-02-23 11:01 KST**: Mon. 5 holdings +2.2%. 2 buys. Partial sell bug discovered.
-- **2026-02-22**: Sun. 3 holdings. Theme 18 days old, rotation due Mon.
-- **2026-02-20**: First day new account. 3 buys. VM reboot, service auto-restarted.
+- **2026-02-26 14:24 KST**: Thu. PID 39777 (11min), 0.4%CPU/62MB. Dashboard PID 458, 1.2%CPU/113MB. 3 holdings (TCK+9%, LG+10%, HD조선-2.3%). TCK/LG trailing L1 active. Screener 0 candidates (theme key mismatch). 52 bot inits (code changes). 20 errors, 9 warnings. FOREIGN KEY error 1x. Theme mismatch CRITICAL for tomorrow.
+- **2026-02-25 20:57 KST**: 5 holdings +2.0%. 1 buy (HD조선). Hansem trailing L1.
+- **2026-02-23 11:01 KST**: 5 holdings +2.2%. Partial sell bug discovered.

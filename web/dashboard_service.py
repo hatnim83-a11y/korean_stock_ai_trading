@@ -359,11 +359,12 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
     stock_code = validate_stock_code(stock_code)
     order_api = _get_order_api()
 
+    # DB에서 보유 정보 1회 조회
+    db = _get_db()
+    holdings = db.get_portfolio(status="holding")
+    pos = next((h for h in holdings if h["stock_code"] == stock_code), None)
+
     if quantity is None:
-        # DB에서 보유 수량 조회
-        db = _get_db()
-        holdings = db.get_portfolio(status="holding")
-        pos = next((h for h in holdings if h["stock_code"] == stock_code), None)
         if not pos:
             return {"success": False, "message": f"{stock_code} 보유 없음"}
         quantity = pos.get("shares") or 0
@@ -371,31 +372,62 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
     if quantity <= 0:
         return {"success": False, "message": "수량이 0 이하입니다"}
 
-    # DB에서 현재 보유 수량 조회
-    db = _get_db()
-    holdings = db.get_portfolio(status="holding")
-    pos = next((h for h in holdings if h["stock_code"] == stock_code), None)
     total_shares = pos.get("shares", 0) if pos else 0
+    buy_price = float(pos.get("buy_price") or 0) if pos else 0
+    stock_name = pos["stock_name"] if pos else stock_code
 
     result = await asyncio.to_thread(order_api.sell_market_order, stock_code, quantity)
     if result.get("success"):
         remaining = total_shares - quantity
         if remaining <= 0:
-            # 전량 매도: 포지션 청산
+            # 전량 매도: 포지션 청산 + position_state 삭제
             db.close_position(stock_code, "대시보드 수동 매도")
+            try:
+                db.delete_position_state(stock_code)
+            except Exception:
+                pass
         else:
             # 부분 매도: 보유 수량만 업데이트
             db.update_portfolio_shares(stock_code, remaining)
 
+        # 체결가 조회 (시장가 주문이므로 result["price"]가 0일 수 있음)
+        sell_price = result.get("price", 0)
+        if sell_price <= 0 and result.get("order_id"):
+            try:
+                await asyncio.sleep(1)
+                orders = await asyncio.to_thread(
+                    order_api.get_order_status, result["order_id"]
+                )
+                if orders and orders[0].get("filled_price", 0) > 0:
+                    sell_price = orders[0]["filled_price"]
+            except Exception:
+                pass
+        # 체결가 조회 실패 시 현재가로 폴백
+        if sell_price <= 0:
+            kis = _get_kis_api()
+            price_info = get_cached_price(kis, stock_code)
+            if price_info:
+                sell_price = price_info.get("price", 0)
+
+        if sell_price <= 0:
+            logger.warning(f"[execute_sell] {stock_code} 체결가 확보 실패 — price=0으로 저장")
+
+        profit_rate = ((sell_price - buy_price) / buy_price * 100) if buy_price > 0 and sell_price > 0 else None
+        profit_amount = ((sell_price - buy_price) * quantity) if buy_price > 0 and sell_price > 0 else None
+
         db.save_trade({
             "date": now_kst().date(),
             "stock_code": stock_code,
-            "stock_name": result.get("stock_name", stock_code),
+            "stock_name": stock_name,
             "action": "sell",
             "shares": quantity,
-            "price": result.get("price", 0),
-            "amount": result.get("amount", 0),
+            "price": sell_price,
+            "amount": sell_price * quantity,
             "reason": "대시보드 수동 매도",
+            "buy_price": buy_price if buy_price > 0 else None,
+            "filled_price": sell_price if sell_price > 0 else None,
+            "profit_rate": profit_rate,
+            "profit_amount": profit_amount,
         })
 
     return result
