@@ -263,17 +263,28 @@ class PortfolioMonitorV2:
     def load_positions_from_db(self) -> int:
         """
         DB에서 보유 포지션 로드
-        
+
         Returns:
             로드된 포지션 수
         """
+        db = None
         try:
             db = Database()
             db.connect()
-            
+
             portfolio = db.get_portfolio(status="holding")
-            
+
             for item in portfolio:
+                # buy_date: buy_date 컬럼 → date 컬럼 폴백 → now_kst()
+                buy_date = item.get("buy_date") or item.get("date") or None
+                if isinstance(buy_date, str):
+                    try:
+                        buy_date = datetime.strptime(buy_date, "%Y-%m-%d").replace(
+                            tzinfo=now_kst().tzinfo
+                        )
+                    except ValueError:
+                        buy_date = None
+
                 self.add_position(
                     stock_code=item["stock_code"],
                     stock_name=item["stock_name"],
@@ -281,17 +292,56 @@ class PortfolioMonitorV2:
                     buy_price=item["buy_price"],
                     stop_loss_price=item["stop_loss"],
                     theme=item.get("theme", ""),
-                    buy_date=item.get("buy_date", now_kst())
+                    buy_date=buy_date or now_kst()
                 )
-            
-            db.close()
-            
+
+            # monitor_state.json에서 트레일링 상태 복원
+            self._restore_trailing_state()
+
             logger.info(f"포지션 로드: {len(self.positions)}개")
             return len(self.positions)
-            
+
         except Exception as e:
             logger.error(f"포지션 로드 실패: {e}")
             return 0
+        finally:
+            if db:
+                db.close()
+
+    def _restore_trailing_state(self) -> None:
+        """monitor_state.json에서 트레일링 상태 복원 (재시작 시)"""
+        import json
+        state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+        try:
+            if not state_path.exists():
+                return
+            with open(state_path) as f:
+                state = json.load(f)
+
+            restored = 0
+            for code, pos in self.positions.items():
+                if code in state:
+                    s = state[code]
+                    if s.get("trailing_active"):
+                        pos.trailing_level = s.get("trailing_level", 0)
+                        pos.trailing_active = True
+                        pos.trailing_stop = s.get("trailing_stop_price")
+                        pos.max_profit_rate = s.get("max_profit_rate", 0) / 100  # %→비율
+                        # highest_price: 저장값과 현재 buy_price 기반 중 큰 값
+                        saved_highest = s.get("highest_price", 0)
+                        if saved_highest > pos.highest_price:
+                            pos.highest_price = saved_highest
+                        restored += 1
+                        stop_str = f"{pos.trailing_stop:,.0f}원" if pos.trailing_stop is not None else "미설정"
+                        logger.info(
+                            f"   트레일링 복원: {pos.stock_name} L{pos.trailing_level} "
+                            f"(최고가 {pos.highest_price:,}원, 스탑 {stop_str})"
+                        )
+
+            if restored:
+                logger.info(f"트레일링 상태 복원: {restored}개 종목")
+        except Exception as e:
+            logger.warning(f"트레일링 상태 복원 실패: {e}")
     
     # ===== 모니터링 =====
     
