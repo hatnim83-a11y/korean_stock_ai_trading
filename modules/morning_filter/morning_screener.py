@@ -33,7 +33,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 
 try:
     from .gap_filter import GapFilter
@@ -205,7 +205,7 @@ class MorningScreener:
         Returns:
             MorningScreenResult: 스크리닝 결과
         """
-        start_time = datetime.now()
+        start_time = now_kst()
         initial_count = len(candidates)
         
         logger.info("=" * 60)
@@ -299,7 +299,7 @@ class MorningScreener:
         elif not observation_result:
             logger.info("\n👁️ Step 5: 트렌드 필터 (스킵 - 관찰 데이터 없음)")
 
-        end_time = datetime.now()
+        end_time = now_kst()
         elapsed = (end_time - start_time).total_seconds()
 
         # 결과 로깅

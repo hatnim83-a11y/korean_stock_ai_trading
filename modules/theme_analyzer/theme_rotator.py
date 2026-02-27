@@ -215,16 +215,16 @@ class ThemeRotator:
         # 현재 메인 테마 정보 찾기
         main_theme_data = None
         for theme in current_themes:
-            if theme['theme'] == self.current_main_theme.theme_name:
+            if theme.get('theme', theme.get('name', '')) == self.current_main_theme.theme_name:
                 main_theme_data = theme
                 break
-        
+
         if main_theme_data is None:
             logger.warning(f"현재 메인 테마 '{self.current_main_theme.theme_name}'를 찾을 수 없습니다")
             return True, "메인 테마 데이터 없음"
-        
+
         # 점수 업데이트
-        self.update_main_theme_score(main_theme_data['score'])
+        self.update_main_theme_score(main_theme_data.get('score', 0))
         
         # 1. 2주 경과 체크
         if self.current_main_theme.should_review:
@@ -276,11 +276,11 @@ class ThemeRotator:
         
         for theme in current_themes:
             # 메인 테마 제외
-            if theme['theme'] == self.current_main_theme.theme_name:
+            if theme.get('theme', theme.get('name', '')) == self.current_main_theme.theme_name:
                 continue
-            
+
             # 점수가 메인 테마보다 높고
-            if theme['score'] > main_score:
+            if theme.get('score', 0) > main_score:
                 # 급등 조건 충족 (변화율 +15% 이상)
                 # 여기서는 간단히 avg_change_rate로 체크
                 change_rate = theme.get('avg_change_rate', 0) / 100  # % -> 비율
@@ -309,31 +309,31 @@ class ThemeRotator:
         # 점수 순으로 정렬
         sorted_themes = sorted(
             current_themes,
-            key=lambda x: x['score'],
+            key=lambda x: x.get('score', x.get('total_score', 0)),
             reverse=True
         )
-        
+
         # 상위 테마 선정
         new_theme = sorted_themes[0]
-        
+
         # 메인 테마 변경
         old_theme = self.current_main_theme.theme_name if self.current_main_theme else None
-        
+
         self.set_main_theme(
-            theme_name=new_theme['theme'],
-            initial_score=new_theme['score']
+            theme_name=new_theme.get('theme', new_theme.get('name', '')),
+            initial_score=new_theme.get('score', 0)
         )
-        
+
         # 히스토리에 추가
         self._add_to_history(
-            theme_name=new_theme['theme'],
-            score=new_theme['score'],
+            theme_name=new_theme.get('theme', new_theme.get('name', '')),
+            score=new_theme.get('score', 0),
             action="change",
             reason=f"이전 테마: {old_theme}"
         )
         
-        logger.info(f"메인 테마 변경: {old_theme} → {new_theme['theme']}")
-        logger.info(f"  새 테마 점수: {new_theme['score']:.1f}")
+        logger.info(f"메인 테마 변경: {old_theme} → {new_theme.get('theme', new_theme.get('name', ''))}")
+        logger.info(f"  새 테마 점수: {new_theme.get('score', 0):.1f}")
         
         return new_theme
     

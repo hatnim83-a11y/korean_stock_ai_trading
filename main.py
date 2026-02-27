@@ -542,6 +542,14 @@ class TradingSystem:
             logger.warning("선정된 테마가 없습니다 (08:30 테마 분석 확인 필요)")
             return {"success": False, "reason": "테마 없음"}
 
+        # 장중 재시작 방어: DB 복원 테마에 url이 없으면 재분석 실행
+        if not any(t.get("url") for t in themes):
+            logger.warning("today_themes에 url 없음 — 테마 재분석 실행")
+            await self.run_theme_analysis()
+            themes = getattr(self, 'today_themes', None)
+            if not themes:
+                return {"success": False, "reason": "테마 재분석 실패"}
+
         logger.info(f"   대상 테마: {len(themes)}개")
         for t in themes:
             logger.info(f"   - {t.get('name', t.get('theme', '?'))}")

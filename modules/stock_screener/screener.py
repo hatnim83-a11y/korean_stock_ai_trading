@@ -417,7 +417,7 @@ def run_daily_screening(
     logger.info("🔍 일일 종목 스크리닝 시작")
     logger.info("=" * 60)
     
-    start_time = datetime.now()
+    start_time = now_kst()
     
     if not themes:
         logger.warning("스크리닝할 테마가 없습니다")
@@ -480,7 +480,7 @@ def run_daily_screening(
                     for c in candidates
                 ]
                 
-                db.save_screened_stocks(stocks_to_save, date.today())
+                db.save_screened_stocks(stocks_to_save, now_kst().date())
                 db.close()
                 
                 logger.info(f"💾 스크리닝 결과 DB 저장 완료")
