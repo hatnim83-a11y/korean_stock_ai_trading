@@ -225,7 +225,7 @@ def format_theme_report(themes: list[dict]) -> str:
 # ===== 일일 테마 분석 파이프라인 =====
 
 async def run_daily_theme_analysis(
-    top_count: int = 4,
+    top_count: int = 5,
     save_to_db: bool = True
 ) -> list[dict]:
     """
@@ -317,7 +317,7 @@ async def run_daily_theme_analysis(
 
 
 def run_daily_theme_analysis_sync(
-    top_count: int = 4,
+    top_count: int = 5,
     save_to_db: bool = True
 ) -> list[dict]:
     """

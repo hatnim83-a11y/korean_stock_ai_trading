@@ -135,7 +135,7 @@ class TradingSystem:
         logger.info(f"🚀 트레이딩 시스템 초기화 ({mode})")
         logger.info(f"   분할 익절: {settings.TAKE_PROFIT_1:.0%}/{settings.TAKE_PROFIT_2:.0%}/{settings.TAKE_PROFIT_3:.0%}")
         logger.info(f"   트레일링 스탑: 최고가 -{settings.TRAILING_STOP_PERCENT:.0%}")
-        logger.info(f"   테마 로테이션: {settings.THEME_REVIEW_DAYS}일 단위")
+        logger.info(f"   테마 로테이션: 주간 (매주 월요일)")
     
     def _signal_handler(self, signum, frame):
         """시그널 핸들러 (Ctrl+C 등)"""
@@ -171,9 +171,15 @@ class TradingSystem:
             # DB에서 최근 테마도 복원
             themes_from_db = self.db.get_top_themes(last_date, count=settings.TOP_THEME_COUNT)
             if themes_from_db:
-                # DB 행(theme_name 키)을 코드 내부 형식(theme 키)으로 정규화
+                # DB 행을 코드 내부 형식으로 정규화 (name+theme 양쪽 키 포함)
                 normalized = [
-                    {"theme": t["theme_name"], "score": t["score"]} for t in themes_from_db
+                    {
+                        "name": t["theme_name"],
+                        "theme": t["theme_name"],
+                        "score": t["score"],
+                        "total_score": t["score"],
+                    }
+                    for t in themes_from_db
                 ]
                 self.today_themes = normalized
                 self._previous_themes = [t.copy() for t in normalized]
@@ -300,21 +306,29 @@ class TradingSystem:
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
 
-        # 기존 테마가 있고, 7일 미경과면 재사용
+        # 기존 테마가 있고, 같은 주(월~일) 내 비월요일이면 재사용
         if self.today_themes and self._last_theme_rotation_date:
-            days_since = (now_kst().date() - self._last_theme_rotation_date).days
-            if days_since < settings.THEME_REVIEW_DAYS:
+            today = now_kst().date()
+            is_monday = (today.weekday() == 0)
+            last_iso = self._last_theme_rotation_date.isocalendar()
+            today_iso = today.isocalendar()
+            same_week = (last_iso[1] == today_iso[1] and last_iso[0] == today_iso[0])
+            themes_have_url = all(t.get("url") for t in self.today_themes)
+            if not is_monday and same_week and themes_have_url:
                 logger.info(
-                    f"🔄 기존 테마 유지 ({days_since}일차/{settings.THEME_REVIEW_DAYS}일)"
+                    f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
                 )
                 for t in self.today_themes:
                     t_name = t.get("theme", t.get("name", ""))
                     t_score = t.get("score", 0)
                     logger.info(f"   - {t_name} ({t_score:.1f}점)")
 
-                # 텔레그램 유지 보고
-                days_remaining = settings.THEME_REVIEW_DAYS - days_since
-                next_review = self._last_theme_rotation_date + timedelta(days=settings.THEME_REVIEW_DAYS)
+                # 다음 월요일 계산
+                days_until_monday = (7 - today.weekday()) % 7
+                if days_until_monday == 0:
+                    days_until_monday = 7
+                next_review = today + timedelta(days=days_until_monday)
+
                 theme_lines = []
                 for i, t in enumerate(self.today_themes, 1):
                     t_name = t.get("theme", t.get("name", ""))
@@ -322,9 +336,9 @@ class TradingSystem:
                     theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점) 📌유지")
                 self.notifier.send_message(
                     f"📊 08:30 테마 분석\n\n"
-                    f"🔄 기존 테마 유지 ({days_since}일차/{settings.THEME_REVIEW_DAYS}일)\n"
+                    f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)\n"
                     + "\n".join(theme_lines)
-                    + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} ({days_remaining}일 후)"
+                    + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} (월) ({days_until_monday}일 후)"
                 )
 
                 return {"success": True, "themes": len(self.today_themes), "reused": True}
@@ -431,14 +445,19 @@ class TradingSystem:
 
             # 메시지 구성
             is_emergency = should_rotate and ("급락" in reason or "급등" in reason)
-            next_review = self._last_theme_rotation_date + timedelta(days=settings.THEME_REVIEW_DAYS)
+            # 다음 월요일 계산
+            today = now_kst().date()
+            days_until_monday = (7 - today.weekday()) % 7
+            if days_until_monday == 0:
+                days_until_monday = 7
+            next_review = today + timedelta(days=days_until_monday)
 
             msg = "📊 08:30 테마 분석\n\n"
 
             if is_emergency:
                 msg += f"⚡ 긴급 테마 변경! (사유: {reason})\n\n"
             elif had_previous:
-                msg += f"🔄 {settings.THEME_REVIEW_DAYS}일 경과 — 테마 재선정\n\n"
+                msg += f"🔄 월요일 — 주간 테마 재선정\n\n"
             else:
                 msg += f"🎯 신규 테마 선정: {len(themes)}개\n\n"
 
@@ -483,7 +502,7 @@ class TradingSystem:
                     score = t.get("score", 0)
                     msg += f"  {i}. {name} ({score:.1f}점)\n"
 
-            msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} ({settings.THEME_REVIEW_DAYS}일 후)\n"
+            msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} (월) ({days_until_monday}일 후)\n"
             msg += f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"
 
             self.notifier.send_message(msg)
@@ -1170,7 +1189,9 @@ class TradingSystem:
             theme_info = self.theme_rotator.get_main_theme_info()
             if theme_info:
                 logger.info(f"   현재 테마: {theme_info['theme_name']}")
-                logger.info(f"   보유 일수: {theme_info['days_held']}일 / {settings.THEME_REVIEW_DAYS}일")
+                is_review_day = now_kst().weekday() == 0
+                review_status = "월요일 재평가일" if is_review_day else f"보유 {theme_info['days_held']}일"
+                logger.info(f"   상태: {review_status}")
                 logger.info(f"   점수 변화: {theme_info['score_change_rate']:+.1%}")
 
                 # 긴급 트리거: -20% 하락 또는 +15% 급등 시 강제 재선정

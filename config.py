@@ -291,7 +291,7 @@ class Settings(BaseSettings):
     
     # ===== 테마 선정 =====
     TOP_THEME_COUNT: int = Field(
-        default=4,
+        default=5,
         description="선정할 상위 테마 수"
     )
     MIN_THEME_STOCK_COUNT: int = Field(
@@ -306,7 +306,7 @@ class Settings(BaseSettings):
     # ===== 테마 로테이션 설정 =====
     THEME_REVIEW_DAYS: int = Field(
         default=7,
-        description="메인 테마 재평가 주기 (7일, 14일 대비 +75% 수익)"
+        description="테마 재평가 주기 (매주 월요일, 긴급 트리거 시 즉시 변경)"
     )
     THEME_CHANGE_THRESHOLD: float = Field(
         default=-0.20,
