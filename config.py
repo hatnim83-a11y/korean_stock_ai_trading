@@ -30,6 +30,25 @@ def now_kst() -> datetime:
     return datetime.now(KST)
 
 
+# ===== 한국 공휴일 =====
+try:
+    import holidays as _holidays_mod
+    _kr_holidays = _holidays_mod.KR()
+except ImportError:
+    _kr_holidays = None
+
+
+def is_trading_day(check_date=None) -> bool:
+    """한국 증시 거래일 여부 (평일 + 비공휴일)"""
+    if check_date is None:
+        check_date = now_kst().date()
+    if check_date.weekday() >= 5:
+        return False
+    if _kr_holidays is not None:
+        return check_date not in _kr_holidays
+    return True  # holidays 미설치 시 평일이면 거래일로 간주
+
+
 _STOCK_CODE_RE = re.compile(r'^\d{6}$')
 
 def validate_stock_code(code: str) -> str:

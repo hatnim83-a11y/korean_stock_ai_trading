@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings
+from config import settings, now_kst
 from database import Database
 
 
@@ -130,7 +130,7 @@ class Rebalancer:
         buy_orders = self._generate_buy_orders(to_buy, cash_available)
         
         result = {
-            "date": str(date.today()),
+            "date": str(now_kst().date()),
             "sell_orders": sell_orders,
             "buy_orders": buy_orders,
             "sell_count": len(sell_orders),
@@ -183,7 +183,7 @@ class Rebalancer:
             매도 대상 리스트
         """
         to_sell = []
-        today = date.today()
+        today = now_kst().date()
         
         for pos in positions:
             sell_reason = None

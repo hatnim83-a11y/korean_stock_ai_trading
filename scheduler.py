@@ -26,6 +26,7 @@ scheduler.py - APScheduler 스케줄링 모듈
 """
 
 import asyncio
+import functools
 from datetime import datetime, time as dt_time, date
 from typing import Optional, Callable
 import signal
@@ -39,11 +40,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from logger import logger
-from config import settings, now_kst
+from config import settings, now_kst, is_trading_day
 from database import Database
 
 # CronTrigger용 KST timezone 문자열
 _KST_TZ = "Asia/Seoul"
+
+
+def _skip_on_holiday(func):
+    """휴장일 스킵 데코레이터"""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        if not is_trading_day():
+            logger.info(f"휴장일 - {func.__name__} 스킵 ({now_kst().date()})")
+            return
+        return await func(*args, **kwargs)
+    return wrapper
 
 
 class TradingScheduler:
@@ -186,7 +198,8 @@ class TradingScheduler:
             logger.info(f"   - {job.name}: {job.trigger}{next_run}")
     
     # ===== 작업 실행 =====
-    
+
+    @_skip_on_holiday
     async def _run_theme_check(self) -> None:
         """08:00 - 테마 로테이션 체크"""
         logger.info("=" * 60)
@@ -203,6 +216,7 @@ class TradingScheduler:
             logger.error(f"테마 체크 실패: {e}")
             self._send_error_notification("테마 체크", str(e))
     
+    @_skip_on_holiday
     async def _run_theme_analysis(self) -> None:
         """08:30 - 테마 분석 (장 시작 전)"""
         logger.info("=" * 60)
@@ -220,6 +234,7 @@ class TradingScheduler:
             logger.error(f"테마 분석 실패: {e}")
             self._send_error_notification("테마 분석", str(e))
 
+    @_skip_on_holiday
     async def _run_stock_screening(self) -> None:
         """09:05 - 종목 스크리닝 (장 시작 후)"""
         logger.info("=" * 60)
@@ -238,6 +253,7 @@ class TradingScheduler:
             logger.error(f"종목 스크리닝 실패: {e}")
             self._send_error_notification("종목 스크리닝", str(e))
     
+    @_skip_on_holiday
     async def _run_execute_buy(self) -> None:
         """09:25 - 자동 매수 실행 (관찰 후)"""
         logger.info("=" * 60)
@@ -255,6 +271,7 @@ class TradingScheduler:
             logger.error(f"자동 매수 실패: {e}")
             self._send_error_notification("자동 매수", str(e))
     
+    @_skip_on_holiday
     async def _run_monitoring_start(self) -> None:
         """09:26 - 모니터링 시작"""
         logger.info("📊 실시간 모니터링 시작")
@@ -266,6 +283,7 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"모니터링 시작 실패: {e}")
     
+    @_skip_on_holiday
     async def _run_monitoring_stop(self) -> None:
         """15:30 - 모니터링 종료"""
         logger.info("📊 실시간 모니터링 종료")
@@ -277,6 +295,7 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"모니터링 종료 실패: {e}")
     
+    @_skip_on_holiday
     async def _run_market_close(self) -> None:
         """15:35 - 장 마감 정리"""
         logger.info("=" * 60)
@@ -290,6 +309,7 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"장 마감 정리 실패: {e}")
     
+    @_skip_on_holiday
     async def _run_daily_report(self) -> None:
         """16:00 - 일일 리포트"""
         logger.info("=" * 60)

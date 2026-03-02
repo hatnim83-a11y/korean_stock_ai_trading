@@ -25,7 +25,8 @@ import json
 import time
 import random
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from config import now_kst
 
 import httpx
 from bs4 import BeautifulSoup
@@ -36,7 +37,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import now_kst
 
 
 # ===== 상수 정의 =====
@@ -348,8 +348,8 @@ def crawl_krx_themes() -> list[dict]:
             return themes
 
         # 최근 영업일 기준 5일간 데이터로 등락률 계산
-        end = datetime.now().strftime('%Y%m%d')
-        start = (datetime.now() - timedelta(days=14)).strftime('%Y%m%d')
+        end = now_kst().strftime('%Y%m%d')
+        start = (now_kst() - timedelta(days=14)).strftime('%Y%m%d')
 
         for ticker in tickers:
             try:
@@ -526,7 +526,9 @@ def _get_cached_theme(cache: dict, theme_name: str) -> Optional[dict]:
         return None
 
     cached_time = datetime.fromisoformat(entry.get("timestamp", "2000-01-01"))
-    age_days = (datetime.now() - cached_time).days
+    if cached_time.tzinfo is None:
+        cached_time = cached_time.replace(tzinfo=timezone.utc)  # 기존 캐시는 naive(UTC)
+    age_days = (now_kst() - cached_time).days
 
     if age_days <= THEME_CACHE_MAX_AGE_DAYS:
         logger.info(f"  ♻ [{theme_name}] 캐시 데이터 사용 ({age_days}일 전)")
@@ -553,27 +555,48 @@ def get_predefined_themes() -> list[dict]:
         테마 정보 리스트
     """
     predefined = [
-        {"name": "2차전지", "category": "신성장", "keywords": ["배터리", "리튬", "전기차"]},
-        {"name": "AI반도체", "category": "반도체", "keywords": ["AI칩", "HBM", "GPU"]},
-        {"name": "반도체", "category": "반도체", "keywords": ["반도체", "메모리", "파운드리"]},
-        {"name": "K-방산", "category": "방위산업", "keywords": ["방산", "무기", "수출"]},
-        {"name": "바이오", "category": "헬스케어", "keywords": ["신약", "임상", "바이오텍"]},
-        {"name": "로봇", "category": "신성장", "keywords": ["로봇", "자동화", "휴머노이드"]},
-        {"name": "자율주행", "category": "모빌리티", "keywords": ["자율주행", "라이다", "센서"]},
-        {"name": "원자력", "category": "에너지", "keywords": ["원전", "SMR", "핵융합"]},
-        {"name": "수소", "category": "에너지", "keywords": ["수소", "연료전지", "그린수소"]},
-        {"name": "조선", "category": "산업재", "keywords": ["조선", "LNG선", "컨테이너선"]},
-        {"name": "건설", "category": "산업재", "keywords": ["건설", "아파트", "인프라"]},
-        {"name": "금융", "category": "금융", "keywords": ["은행", "증권", "보험"]},
-        {"name": "엔터테인먼트", "category": "소비재", "keywords": ["K-POP", "드라마", "콘텐츠"]},
-        {"name": "게임", "category": "IT서비스", "keywords": ["게임", "모바일게임", "e스포츠"]},
-        {"name": "플랫폼", "category": "IT서비스", "keywords": ["플랫폼", "이커머스", "핀테크"]},
-        {"name": "클라우드", "category": "IT서비스", "keywords": ["클라우드", "SaaS", "데이터센터"]},
-        {"name": "음식료", "category": "소비재", "keywords": ["식품", "음료", "주류"]},
-        {"name": "화장품", "category": "소비재", "keywords": ["화장품", "K-뷰티", "스킨케어"]},
-        {"name": "철강", "category": "소재", "keywords": ["철강", "스테인리스", "특수강"]},
-        {"name": "화학", "category": "소재", "keywords": ["화학", "석유화학", "정밀화학"]},
-        {"name": "통신", "category": "통신", "keywords": ["5G", "6G", "통신장비"]},
+        {"name": "2차전지", "category": "신성장", "keywords": ["배터리", "리튬", "전기차"],
+         "naver_aliases": ["2차전지"]},
+        {"name": "AI반도체", "category": "반도체", "keywords": ["AI칩", "HBM", "GPU"],
+         "naver_aliases": ["온디바이스 AI", "AI 반도체"]},
+        {"name": "반도체", "category": "반도체", "keywords": ["반도체", "메모리", "파운드리"],
+         "naver_aliases": ["반도체 대표주", "반도체 장비", "반도체 재료"]},
+        {"name": "K-방산", "category": "방위산업", "keywords": ["방산", "무기", "수출"],
+         "naver_aliases": ["방위산업", "방산"]},
+        {"name": "바이오", "category": "헬스케어", "keywords": ["신약", "임상", "바이오텍"],
+         "naver_aliases": ["바이오", "바이오시밀러"]},
+        {"name": "로봇", "category": "신성장", "keywords": ["로봇", "자동화", "휴머노이드"],
+         "naver_aliases": ["로봇", "휴머노이드", "피지컬 AI"]},
+        {"name": "자율주행", "category": "모빌리티", "keywords": ["자율주행", "라이다", "센서"],
+         "naver_aliases": ["자율주행", "자율주행차"]},
+        {"name": "원자력", "category": "에너지", "keywords": ["원전", "SMR", "핵융합"],
+         "naver_aliases": ["원자력발전", "원자력"]},
+        {"name": "수소", "category": "에너지", "keywords": ["수소", "연료전지", "그린수소"],
+         "naver_aliases": ["수소에너지", "수소차"]},
+        {"name": "조선", "category": "산업재", "keywords": ["조선", "LNG선", "컨테이너선"],
+         "naver_aliases": ["조선"]},
+        {"name": "건설", "category": "산업재", "keywords": ["건설", "아파트", "인프라"],
+         "naver_aliases": ["건설", "건설 대표주"]},
+        {"name": "금융", "category": "금융", "keywords": ["은행", "증권", "보험"],
+         "naver_aliases": ["은행", "증권", "금융"]},
+        {"name": "엔터테인먼트", "category": "소비재", "keywords": ["K-POP", "드라마", "콘텐츠"],
+         "naver_aliases": ["엔터테인먼트"]},
+        {"name": "게임", "category": "IT서비스", "keywords": ["게임", "모바일게임", "e스포츠"],
+         "naver_aliases": ["게임", "모바일게임"]},
+        {"name": "플랫폼", "category": "IT서비스", "keywords": ["플랫폼", "이커머스", "핀테크"],
+         "naver_aliases": ["인터넷 대표주", "인터넷은행"]},
+        {"name": "클라우드", "category": "IT서비스", "keywords": ["클라우드", "SaaS", "데이터센터"],
+         "naver_aliases": ["클라우드 컴퓨팅", "클라우드"]},
+        {"name": "음식료", "category": "소비재", "keywords": ["식품", "음료", "주류"],
+         "naver_aliases": ["음식료업종", "음식료"]},
+        {"name": "화장품", "category": "소비재", "keywords": ["화장품", "K-뷰티", "스킨케어"],
+         "naver_aliases": ["화장품"]},
+        {"name": "철강", "category": "소재", "keywords": ["철강", "스테인리스", "특수강"],
+         "naver_aliases": ["철강"]},
+        {"name": "화학", "category": "소재", "keywords": ["화학", "석유화학", "정밀화학"],
+         "naver_aliases": ["석유화학", "화학"]},
+        {"name": "통신", "category": "통신", "keywords": ["5G", "6G", "통신장비"],
+         "naver_aliases": ["5G", "통신장비", "통신"]},
     ]
 
     return [
@@ -581,18 +604,33 @@ def get_predefined_themes() -> list[dict]:
             "name": t["name"],
             "category": t["category"],
             "keywords": t["keywords"],
+            "naver_aliases": t.get("naver_aliases", []),
             "source": "predefined"
         }
         for t in predefined
     ]
 
 
-def _search_naver_theme_once(theme_name: str) -> Optional[dict]:
+def _match_theme_name(found_name: str, theme_name: str, aliases: list[str] = None) -> bool:
+    """테마명 매칭: 이름 또는 별칭 중 하나라도 부분 매칭되면 True"""
+    # 기본 부분 매칭
+    if theme_name in found_name or found_name in theme_name:
+        return True
+    # 별칭 매칭
+    if aliases:
+        for alias in aliases:
+            if alias in found_name or found_name in alias:
+                return True
+    return False
+
+
+def _search_naver_theme_once(theme_name: str, aliases: list[str] = None) -> Optional[dict]:
     """
     네이버 증권에서 특정 테마를 1회 검색 (내부 헬퍼)
 
     Args:
         theme_name: 검색할 테마명
+        aliases: 네이버 매칭용 별칭 리스트
 
     Returns:
         테마 정보 딕셔너리 또는 None
@@ -616,7 +654,7 @@ def _search_naver_theme_once(theme_name: str) -> Optional[dict]:
 
     rows = table.find_all("tr")
 
-    # 테마명과 유사한 것 찾기 (부분 매칭)
+    # 테마명과 유사한 것 찾기 (이름 + 별칭 매칭)
     for row in rows:
         cols = row.find_all("td")
         if len(cols) < 5:
@@ -628,8 +666,7 @@ def _search_naver_theme_once(theme_name: str) -> Optional[dict]:
 
         found_name = theme_link.get_text(strip=True)
 
-        # 부분 매칭 (예: "2차전지" in "2차전지 관련주")
-        if theme_name in found_name or found_name in theme_name:
+        if _match_theme_name(found_name, theme_name, aliases):
             theme_url = "https://finance.naver.com" + theme_link.get("href", "")
 
             # 등락률 추출
@@ -686,7 +723,7 @@ def _search_naver_theme_once(theme_name: str) -> Optional[dict]:
 
             found_name = theme_link.get_text(strip=True)
 
-            if theme_name in found_name or found_name in theme_name:
+            if _match_theme_name(found_name, theme_name, aliases):
                 theme_url = "https://finance.naver.com" + theme_link.get("href", "")
 
                 change_rate_elem = cols[1].find("span")
@@ -720,7 +757,7 @@ def _search_naver_theme_once(theme_name: str) -> Optional[dict]:
     return None
 
 
-def search_naver_theme(theme_name: str, max_retries: int = 2) -> Optional[dict]:
+def search_naver_theme(theme_name: str, aliases: list[str] = None, max_retries: int = 2) -> Optional[dict]:
     """
     네이버 증권에서 특정 테마를 검색하여 데이터 반환 (재시도 포함)
 
@@ -729,6 +766,7 @@ def search_naver_theme(theme_name: str, max_retries: int = 2) -> Optional[dict]:
 
     Args:
         theme_name: 검색할 테마명
+        aliases: 네이버 매칭용 별칭 리스트
         max_retries: 최대 재시도 횟수 (기본 2, 총 3회 시도)
 
     Returns:
@@ -736,7 +774,7 @@ def search_naver_theme(theme_name: str, max_retries: int = 2) -> Optional[dict]:
     """
     for attempt in range(max_retries + 1):
         try:
-            result = _search_naver_theme_once(theme_name)
+            result = _search_naver_theme_once(theme_name, aliases=aliases)
             # None(찾지 못함)은 재시도 불필요 - 페이지에 없는 것
             return result
         except Exception as e:
@@ -797,15 +835,22 @@ def crawl_all_themes() -> list[dict]:
 
     for predef in predefined_themes:
         theme_name = predef["name"]
+        aliases = predef.get("naver_aliases", [])
 
-        # 이미 수집된 테마면 스킵 (실제 데이터가 있음)
-        if theme_name in collected_names:
+        # 이미 수집된 테마면 스킵 (이름 또는 별칭으로 매칭)
+        already_collected = theme_name in collected_names
+        if not already_collected and aliases:
+            for alias in aliases:
+                if any(alias in cn or cn in alias for cn in collected_names):
+                    already_collected = True
+                    break
+        if already_collected:
             logger.debug(f"[{theme_name}] 이미 수집됨 - 스킵")
             continue
 
-        # 네이버에서 검색하여 실제 데이터 가져오기
+        # 네이버에서 검색하여 실제 데이터 가져오기 (별칭 포함)
         _random_delay()
-        naver_data = search_naver_theme(theme_name)
+        naver_data = search_naver_theme(theme_name, aliases=aliases)
 
         if naver_data:
             # 네이버에서 찾은 데이터와 predefined 정보 병합
@@ -824,7 +869,7 @@ def crawl_all_themes() -> list[dict]:
                 "avg_change_rate": naver_data.get("avg_change_rate", 0.0),
                 "stock_count": naver_data.get("stock_count", 0),
                 "three_day_rate": naver_data.get("three_day_rate", 0.0),
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now_kst().isoformat(),
             }
             cache_updated = True
         else:

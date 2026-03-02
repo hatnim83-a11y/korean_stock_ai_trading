@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 PID_FILE = Path(__file__).parent / "trading_system.pid"
 
 from logger import logger
-from config import settings, now_kst
+from config import settings, now_kst, is_trading_day
 from database import Database
 from scheduler import TradingScheduler
 
@@ -306,15 +306,15 @@ class TradingSystem:
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
 
-        # 기존 테마가 있고, 같은 주(월~일) 내 비월요일이면 재사용
+        # 기존 테마가 있고, 같은 주에 이미 선정했으면 재사용
+        # (월요일 휴장 시 화요일이 첫 거래일 → 그 주 첫 거래일에 재선정)
         if self.today_themes and self._last_theme_rotation_date:
             today = now_kst().date()
-            is_monday = (today.weekday() == 0)
             last_iso = self._last_theme_rotation_date.isocalendar()
             today_iso = today.isocalendar()
             same_week = (last_iso[1] == today_iso[1] and last_iso[0] == today_iso[0])
             themes_have_url = all(t.get("url") for t in self.today_themes)
-            if not is_monday and same_week and themes_have_url:
+            if same_week and themes_have_url:
                 logger.info(
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
                 )
@@ -323,7 +323,7 @@ class TradingSystem:
                     t_score = t.get("score", 0)
                     logger.info(f"   - {t_name} ({t_score:.1f}점)")
 
-                # 다음 월요일 계산
+                # 다음 주 첫 거래일 계산
                 days_until_monday = (7 - today.weekday()) % 7
                 if days_until_monday == 0:
                     days_until_monday = 7
@@ -1197,8 +1197,9 @@ class TradingSystem:
             theme_info = self.theme_rotator.get_main_theme_info()
             if theme_info:
                 logger.info(f"   현재 테마: {theme_info['theme_name']}")
-                is_review_day = now_kst().weekday() == 0
-                review_status = "월요일 재평가일" if is_review_day else f"보유 {theme_info['days_held']}일"
+                is_review_day = (self._last_theme_rotation_date is None or
+                    self._last_theme_rotation_date.isocalendar()[1] != now_kst().date().isocalendar()[1])
+                review_status = "이번 주 재평가 예정" if is_review_day else f"보유 {theme_info['days_held']}일"
                 logger.info(f"   상태: {review_status}")
                 logger.info(f"   점수 변화: {theme_info['score_change_rate']:+.1%}")
 

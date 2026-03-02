@@ -17,6 +17,7 @@ report_generator.py - 리포트 생성 모듈
 """
 
 from datetime import datetime, date, timedelta
+from config import now_kst
 from typing import Optional
 
 import sys
@@ -70,7 +71,7 @@ class ReportGenerator:
         Returns:
             리포트 문자열
         """
-        today = date.today()
+        today = now_kst().date()
         
         # 포트폴리오 통계
         total_value = sum(p.get("current_amount", 0) or p.get("amount", 0) for p in portfolio)

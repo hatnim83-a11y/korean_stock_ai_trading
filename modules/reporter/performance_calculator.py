@@ -19,6 +19,7 @@ performance_calculator.py - 성과 지표 계산 모듈
 
 import math
 from datetime import datetime, date, timedelta
+from config import now_kst
 from typing import Optional
 
 import sys
@@ -365,8 +366,8 @@ class PerformanceCalculator:
             current_value = sorted_values[-1].get("value", initial_capital)
             trading_days = len(sorted_values)
         else:
-            start_date = str(date.today())
-            end_date = str(date.today())
+            start_date = str(now_kst().date())
+            end_date = str(now_kst().date())
             current_value = initial_capital
             trading_days = 0
         
@@ -453,7 +454,7 @@ class PerformanceCalculator:
                     mdd, sharpe_ratio, win_rate, trade_count
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                str(date.today()),
+                str(now_kst().date()),
                 metrics.get("current_value", 0),
                 metrics.get("total_return", 0),
                 metrics.get("total_return", 0),

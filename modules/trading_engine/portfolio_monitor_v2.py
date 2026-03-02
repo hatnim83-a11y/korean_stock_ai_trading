@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings, now_kst
+from config import settings, now_kst, is_trading_day
 from database import Database
 from modules.trading_engine.kis_websocket import KISWebSocket, MockWebSocket, PriceData
 from modules.trading_engine.trading_engine import TradingEngine
@@ -492,13 +492,11 @@ class PortfolioMonitorV2:
                 self._log_status()
     
     def _is_market_hours(self) -> bool:
-        """장 시간 여부 (KST 기준)"""
-        from config import now_kst
+        """장 시간 여부 (KST 기준, 휴장일 체크 포함)"""
+        if not is_trading_day():
+            return False
         now = now_kst().time()
-        market_open = dt_time(9, 0)
-        market_close = dt_time(15, 30)
-
-        return market_open <= now <= market_close
+        return dt_time(9, 0) <= now <= dt_time(15, 30)
 
     def _update_db_prices(self) -> None:
         """보유 종목 현재가를 DB에 주기적으로 갱신"""

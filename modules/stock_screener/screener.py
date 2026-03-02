@@ -492,7 +492,7 @@ def run_daily_screening(
         report = format_screening_report(candidates)
         print(report)
         
-        elapsed = (datetime.now() - start_time).total_seconds()
+        elapsed = (now_kst() - start_time).total_seconds()
         logger.info("=" * 60)
         logger.info(f"✅ 일일 스크리닝 완료 ({elapsed:.1f}초, {len(candidates)}개 종목)")
         logger.info("=" * 60)

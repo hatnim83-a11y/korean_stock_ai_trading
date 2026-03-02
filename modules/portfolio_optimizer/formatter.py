@@ -51,7 +51,7 @@ def display_portfolio(
     print("=" * 80)
     print("📊 최적화 포트폴리오")
     print("=" * 80)
-    print(f"  날짜: {portfolio.get('date', str(date.today()))}")
+    print(f"  날짜: {portfolio.get('date', str(now_kst().date()))}")
     print(f"  전략: {portfolio.get('strategy', 'score_based')}")
     print()
     
@@ -182,7 +182,7 @@ def format_portfolio_for_telegram(
         마크다운 형식 문자열
     """
     positions = portfolio.get("positions", [])
-    today = portfolio.get("date", str(date.today()))
+    today = portfolio.get("date", str(now_kst().date()))
     
     # 헤더
     lines = [
@@ -256,7 +256,7 @@ def format_orders_for_telegram(orders: list[dict]) -> str:
     
     lines = [
         f"🛒 *매수 주문 ({len(orders)}건)*",
-        f"📅 {date.today()}",
+        f"📅 {now_kst().date()}",
         "",
         "```"
     ]

@@ -381,7 +381,7 @@ def run_daily_verification(
                     }
                     for s in passed
                 ]
-                db.save_screened_stocks(stocks_to_save, date.today())
+                db.save_screened_stocks(stocks_to_save, now_kst().date())
                 db.close()
                 
                 logger.info("💾 검증 결과 DB 저장 완료")

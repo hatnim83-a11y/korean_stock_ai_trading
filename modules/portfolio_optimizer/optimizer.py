@@ -258,7 +258,7 @@ def optimize_portfolio(
     if not verified_stocks:
         logger.warning("최적화할 종목이 없습니다")
         return {
-            "date": str(date.today()),
+            "date": str(now_kst().date()),
             "capital": capital,
             "investable": 0,
             "positions": [],
@@ -340,7 +340,7 @@ def optimize_portfolio(
     
     # 결과 구성
     result = {
-        "date": str(date.today()),
+        "date": str(now_kst().date()),
         "capital": capital,
         "investable": investable,
         "positions": positions,
@@ -433,7 +433,7 @@ def save_portfolio_to_db(
             db.connect()
             close_db = True
         
-        today = date.today()
+        today = now_kst().date()
         
         for pos in portfolio.get("positions", []):
             db.save_portfolio([{
