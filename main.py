@@ -1197,8 +1197,10 @@ class TradingSystem:
             theme_info = self.theme_rotator.get_main_theme_info()
             if theme_info:
                 logger.info(f"   현재 테마: {theme_info['theme_name']}")
+                last_iso = self._last_theme_rotation_date.isocalendar() if self._last_theme_rotation_date else (0, 0, 0)
+                today_iso = now_kst().date().isocalendar()
                 is_review_day = (self._last_theme_rotation_date is None or
-                    self._last_theme_rotation_date.isocalendar()[1] != now_kst().date().isocalendar()[1])
+                    (last_iso[0], last_iso[1]) != (today_iso[0], today_iso[1]))
                 review_status = "이번 주 재평가 예정" if is_review_day else f"보유 {theme_info['days_held']}일"
                 logger.info(f"   상태: {review_status}")
                 logger.info(f"   점수 변화: {theme_info['score_change_rate']:+.1%}")
