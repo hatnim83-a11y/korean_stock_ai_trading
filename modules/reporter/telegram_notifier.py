@@ -364,6 +364,41 @@ class TelegramNotifier:
 """
         return self.send_message(text)
     
+    # ===== 매매 사후 분석 알림 =====
+
+    def send_post_trade_report(self, results: list[dict]) -> bool:
+        """
+        매매 사후 분석 결과 알림
+
+        Args:
+            results: PostTradeAnalyzer.run_daily_analysis() 반환값
+
+        Returns:
+            전송 성공 여부
+        """
+        if not results:
+            return False
+
+        text = f"🔍 *매매 사후 분석*\n📅 {now_kst().strftime('%Y-%m-%d')}\n\n"
+
+        for r in results[:5]:
+            pnl_emoji = "🔺" if (r.get("profit_rate") or 0) >= 0 else "🔻"
+            score = r.get("timing_score", 5)
+            score_bar = "⭐" * min(score // 2, 5)
+
+            text += (
+                f"{pnl_emoji} *{r.get('stock_name', '')}* ({r.get('stock_code', '')})\n"
+                f"  수익률: {r.get('profit_rate', 0):+.1f}% | 사유: {r.get('sell_reason', '')}\n"
+                f"  타이밍: {score}/10 {score_bar}\n"
+                f"  평가: {r.get('overall', 'N/A')}\n"
+                f"  교훈: {r.get('lesson', 'N/A')}\n\n"
+            )
+
+        if len(results) > 5:
+            text += f"... 외 {len(results) - 5}건\n"
+
+        return self.send_message(text)
+
     # ===== 리포트 전송 =====
     
     def send_daily_report(

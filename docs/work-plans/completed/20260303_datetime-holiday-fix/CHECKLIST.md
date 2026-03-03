@@ -18,7 +18,7 @@
 - [x] code-tester 에이전트 검증 (심각 0건, 배포 가능)
 
 ## 배포 항목
-- [ ] systemctl restart trading_system (내일 장 전)
+- [x] systemctl restart trading_system — post-trade-analyzer 배포 시 함께 적용 (2026-03-03 20:28 KST)
 
 ## 문서 업데이트 항목
 - [x] memory/MEMORY.md 업데이트

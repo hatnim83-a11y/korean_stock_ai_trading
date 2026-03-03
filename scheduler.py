@@ -91,6 +91,9 @@ class TradingScheduler:
         self.on_daily_report: Optional[Callable] = None         # 16:00 일일 리포트
         self.on_monitoring_start: Optional[Callable] = None     # 09:26 모니터링 시작
         self.on_monitoring_stop: Optional[Callable] = None      # 15:30 모니터링 종료
+        self.on_post_trade_analysis: Optional[Callable] = None  # 17:00 매매 사후 분석
+        self.on_daily_theme_collection: Optional[Callable] = None  # 17:05 일별 테마 수집
+        self.on_weekly_trade_review: Optional[Callable] = None  # 금 17:30 주간 복기
         
         # 이벤트 리스너
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
@@ -182,7 +185,34 @@ class TradingScheduler:
             name='일일 리포트',
             replace_existing=True
         )
-        
+
+        # 8. 매매 사후 분석 (KST 17:00)
+        self.scheduler.add_job(
+            self._run_post_trade_analysis,
+            CronTrigger(hour=17, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='post_trade_analysis',
+            name='매매 사후 분석',
+            replace_existing=True
+        )
+
+        # 9. 일별 테마 데이터 수집 (KST 17:05, 장 마감 후)
+        self.scheduler.add_job(
+            self._run_daily_theme_collection,
+            CronTrigger(hour=17, minute=5, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='daily_theme_collection',
+            name='일별 테마 수집',
+            replace_existing=True
+        )
+
+        # 10. 주간 매매 복기 (KST 금요일 17:30)
+        self.scheduler.add_job(
+            self._run_weekly_trade_review,
+            CronTrigger(hour=17, minute=30, day_of_week='fri', timezone=_KST_TZ),
+            id='weekly_trade_review',
+            name='주간 매매 복기',
+            replace_existing=True
+        )
+
         logger.info("스케줄 등록 완료")
         self._print_schedules()
     
@@ -323,6 +353,57 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"일일 리포트 실패: {e}")
     
+    @_skip_on_holiday
+    async def _run_post_trade_analysis(self) -> None:
+        """17:00 - 매매 사후 분석"""
+        logger.info("=" * 60)
+        logger.info("🔍 매매 사후 분석 시작 (17:00)")
+        logger.info("=" * 60)
+
+        try:
+            if self.on_post_trade_analysis:
+                await self.on_post_trade_analysis()
+            else:
+                logger.warning("매매 사후 분석 콜백 미등록")
+
+        except Exception as e:
+            logger.error(f"매매 사후 분석 실패: {e}")
+            self._send_error_notification("매매 사후 분석", str(e))
+
+    @_skip_on_holiday
+    async def _run_daily_theme_collection(self) -> None:
+        """17:05 - 일별 테마 데이터 수집 (모멘텀 + 뉴스 + AI 감성)"""
+        logger.info("=" * 60)
+        logger.info("📊 일별 테마 데이터 수집 시작 (17:05)")
+        logger.info("=" * 60)
+
+        try:
+            if self.on_daily_theme_collection:
+                await self.on_daily_theme_collection()
+            else:
+                logger.warning("일별 테마 수집 콜백 미등록")
+
+        except Exception as e:
+            logger.error(f"일별 테마 수집 실패: {e}")
+            self._send_error_notification("일별 테마 수집", str(e))
+
+    @_skip_on_holiday
+    async def _run_weekly_trade_review(self) -> None:
+        """금요일 17:30 - 주간 매매 복기"""
+        logger.info("=" * 60)
+        logger.info("📝 주간 매매 복기 시작 (금 17:30)")
+        logger.info("=" * 60)
+
+        try:
+            if self.on_weekly_trade_review:
+                await self.on_weekly_trade_review()
+            else:
+                logger.warning("주간 매매 복기 콜백 미등록")
+
+        except Exception as e:
+            logger.error(f"주간 매매 복기 실패: {e}")
+            self._send_error_notification("주간 매매 복기", str(e))
+
     def _send_error_notification(self, task: str, error: str) -> None:
         """에러 알림 전송"""
         try:

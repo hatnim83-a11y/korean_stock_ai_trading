@@ -169,6 +169,8 @@ class Database:
             (6, "strategy_stats 테이블", self._migrate_v6),
             (7, "screening_log 테이블", self._migrate_v7),
             (8, "신규 인덱스 추가", self._migrate_v8),
+            (9, "post_trade_prices 테이블", self._migrate_v9),
+            (10, "themes에 category 컬럼 추가", self._migrate_v10),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -365,6 +367,38 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_date ON screening_log(date)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_stock ON screening_log(stock_code)")
 
+    def _migrate_v9(self) -> None:
+        """post_trade_prices 테이블 (매도 후 주가 추이)"""
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS post_trade_prices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id INTEGER NOT NULL,
+                    stock_code VARCHAR(10) NOT NULL,
+                    sell_date DATE NOT NULL,
+                    check_date DATE NOT NULL,
+                    days_after_sell INTEGER NOT NULL,
+                    close_price REAL,
+                    high_price REAL,
+                    low_price REAL,
+                    volume INTEGER,
+                    change_from_sell REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (review_id) REFERENCES trade_reviews(id),
+                    UNIQUE(review_id, check_date)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_trade_prices_review ON post_trade_prices(review_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_trade_prices_stock ON post_trade_prices(stock_code)")
+
+    def _migrate_v10(self) -> None:
+        """themes 테이블에 category 컬럼 추가"""
+        with self.get_cursor() as cursor:
+            try:
+                cursor.execute("ALTER TABLE themes ADD COLUMN category VARCHAR(20) DEFAULT '기타'")
+            except Exception:
+                pass  # 이미 존재하면 무시
+
     def init_tables(self) -> None:
         """
         모든 테이블 생성
@@ -383,6 +417,7 @@ class Database:
                     supply_ratio REAL,
                     news_count INTEGER,
                     ai_sentiment REAL,
+                    category VARCHAR(20) DEFAULT '기타',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
                     -- 인덱스를 위한 유니크 제약
@@ -504,7 +539,7 @@ class Database:
         테마 점수 저장
 
         Args:
-            themes: 테마 리스트 [{'theme': '2차전지', 'score': 87.5, ...}, ...]
+            themes: 테마 리스트 [{'theme': '2차전지', 'score': 87.5, 'category': '신성장', ...}, ...]
             target_date: 날짜
         """
         with self.get_cursor() as cursor:
@@ -512,8 +547,8 @@ class Database:
                 cursor.execute("""
                     INSERT OR REPLACE INTO themes (
                         date, theme_name, score, momentum, supply_ratio,
-                        news_count, ai_sentiment
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        news_count, ai_sentiment, category
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     target_date,
                     theme['theme'],
@@ -521,7 +556,8 @@ class Database:
                     theme.get('momentum', 0),
                     theme.get('supply_ratio', 0),
                     theme.get('news_count', 0),
-                    theme.get('ai_sentiment', 0)
+                    theme.get('ai_sentiment', 0),
+                    theme.get('category', '기타'),
                 ))
 
         logger.info(f"{len(themes)}개 테마 점수 저장 완료 ({target_date})")
@@ -1061,6 +1097,54 @@ class Database:
                 SET ai_review = ?, lesson_learned = ?
                 WHERE id = ?
             """, (ai_review, lesson, review_id))
+
+    # ===== post_trade_prices =====
+
+    def save_post_trade_prices(self, review_id: int, prices: list[dict]) -> None:
+        """매도 후 주가 추이 저장 (INSERT OR IGNORE로 중복 방지)"""
+        with self.get_cursor() as cursor:
+            for p in prices:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO post_trade_prices (
+                        review_id, stock_code, sell_date, check_date,
+                        days_after_sell, close_price, high_price, low_price,
+                        volume, change_from_sell
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    review_id,
+                    p['stock_code'],
+                    p['sell_date'],
+                    p['check_date'],
+                    p['days_after_sell'],
+                    p.get('close_price'),
+                    p.get('high_price'),
+                    p.get('low_price'),
+                    p.get('volume'),
+                    p.get('change_from_sell'),
+                ))
+        logger.debug(f"매도 후 주가 저장: review_id={review_id}, {len(prices)}건")
+
+    def get_post_trade_prices(self, review_id: int) -> list[dict]:
+        """특정 trade_review의 매도 후 주가 추이 조회"""
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM post_trade_prices
+                WHERE review_id = ?
+                ORDER BY days_after_sell ASC
+            """, (review_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_reviews_ready_for_analysis(self, min_days: int = 5) -> list[dict]:
+        """매도 후 min_days 이상 경과한 미분석 trade_reviews 조회"""
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM trade_reviews
+                WHERE ai_review IS NULL
+                  AND sell_date IS NOT NULL
+                  AND julianday('now') - julianday(sell_date) >= ?
+                ORDER BY sell_date ASC
+            """, (min_days,))
+            return [dict(row) for row in cursor.fetchall()]
 
     # ===== strategy_stats =====
 

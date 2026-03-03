@@ -43,11 +43,36 @@
 - 3차 익절 profit_amount=0: `_close_position_in_db` 4번째 파라미터 추가로 해결됨
 - execute_sell `_get_kis()` NameError → `_get_kis_api()`로 수정됨
 
-### 테마 파이프라인 (2026-02-27)
+### 테마 파이프라인 v2 (2026-03-03 개편)
 - url 키 누락 버그: DB 복원 후 비월요일 재시작 시 스크리닝 종목 0개 — 수정 확인 필요
-- main.py ISO week same_week: `rotation_date.year == today.year` → 연말 edge case
-  - 수정 권장: `rotation_date.isocalendar().year == today.isocalendar().year`
-- crawlers.py line 351-352: now_kst() 수정 완료 (2026-03-02 배치에서)
+- main.py ISO week same_week: isocalendar() 비교로 수정 완료 (연말 edge case 해결)
+- **심각 버그**: main.py `run_daily_theme_collection` lines 1427-1431 — ai_results(list)에 dict key lookup
+  - `ai_results[name]` → list에 string key 접근 불가 (TypeError), `name in ai_results` 항상 False
+  - 올바른 수정: `ai_map = {r['theme_name']: r for r in ai_results}`, `if name in ai_map`
+  - 키 이름 불일치: `ai_results[name].get('sentiment_score', 0)` → 실제 키는 `'score'`
+- crawlers.py `_PREDEFINED_THEMES`: 모듈 로드 시 1회 정의, `THEME_NAME_MAP` 자동 생성
+- scorer.py `calculate_momentum_score` docstring 오류: 배점 60점 기준 → 실제 MAX_MOMENTUM_SCORE=40
+  - line 93 로그도 `/60` 하드코딩 → `/{MAX_MOMENTUM_SCORE}` 권장
+- scorer.py `include_ai` 파라미터: theme.get('ai_sentiment') 재사용만, 추가 수집 없음 (미완성)
+- weekly_aggregator.py: DAILY_WEIGHTS=[0.25,0.20,0.18,0.15,0.12,0.10] 합=1.0 확인됨
+- aggregate_weekly_scores: 연결된 db 객체 필요 (connect() 선행), score/momentum 컬럼 읽음
+- DB themes 테이블: UNIQUE(date, theme_name), INSERT OR REPLACE → 멱등 안전
+- 08:30 run_theme_analysis + 17:05 run_daily_theme_collection 이중 저장: 17:05가 덮어씀 (설계 의도)
+
+### DB 스키마 v9 추가 (2026-03-03 post_trade_analyzer)
+- `post_trade_prices` 테이블: review_id FK, UNIQUE(review_id, check_date)
+- `get_reviews_ready_for_analysis`: `julianday('now')` — UTC 기준이나 D+5 체크에서 실질 영향 없음
+- `update_trade_review_ai`, `save_post_trade_prices`, `get_post_trade_prices` 추가됨
+- **주의**: price_tracker.py `_fetch_yfinance()` 내 `int(row.get('volume', 0))` — volume이 NaN이면 ValueError
+  - `pd.isna()` 가드 없음, 수정 필요 (🔴 심각)
+
+### post_trade_analyzer 패턴 (2026-03-03)
+- `analyzer.py` line 261: `__import__('datetime').timedelta` — 동작은 하나, 가독성 낮음
+  - `from datetime import date, datetime, timedelta`로 교체 권장
+- `DEFAULT_MODEL = 'claude-sonnet-4-6'` (fallback) vs 실제 `settings.CLAUDE_MODEL` 사용 — 충돌 없음
+- `max_tokens=2000` (주간 요약) 하드코딩 — `MAX_TOKENS` 상수 미사용, 참고 수준
+- `sys.path.insert(0, ...)` 중복: price_tracker.py + analyzer.py 각각 있으나 기능 무관
+- `import json` in main.py `run_weekly_trade_review` 내부 inline — top-level로 이동 권장
 
 ### DB 스키마 v8 주요 구조
 - WAL 백업 불완전: `_migrate()` `.db-wal` 미포함 — 서비스 중단 없이 마이그레이션 시 위험

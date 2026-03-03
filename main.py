@@ -35,6 +35,7 @@ main.py - 한국 주식 AI 스윙 트레이딩 시스템 메인 엔트리
 
 import asyncio
 import argparse
+import json
 import os
 import signal
 import sys
@@ -67,6 +68,7 @@ from modules.reporter import (
 )
 from modules.morning_filter import MorningScreener, run_morning_observation
 from modules.morning_filter.candidate_observer import CandidateObserver
+from modules.post_trade_analyzer import PostTradeAnalyzer
 
 
 class TradingSystem:
@@ -110,6 +112,7 @@ class TradingSystem:
         self.morning_screener = MorningScreener()  # 장 초반 스크리너
         self.theme_rotator = ThemeRotator()  # 테마 로테이션 (2주 단위)
         self.notifier = TelegramNotifier()
+        self.post_trade_analyzer: Optional[PostTradeAnalyzer] = None  # 매매 사후 분석
         self.db = Database()
         
         # 상태
@@ -288,7 +291,10 @@ class TradingSystem:
         self.scheduler.on_market_close = self.run_market_close           # 15:35
         self.scheduler.on_daily_report = self.send_daily_report          # 16:00
         self.scheduler.on_theme_check = self.check_theme_rotation        # 08:00 테마 체크
-    
+        self.scheduler.on_post_trade_analysis = self.run_post_trade_analysis  # 17:00 사후 분석
+        self.scheduler.on_daily_theme_collection = self.run_daily_theme_collection  # 17:05 일별 테마 수집
+        self.scheduler.on_weekly_trade_review = self.run_weekly_trade_review  # 금 17:30 주간 복기
+
     # ===== 08:30 테마 분석 (장 시작 전) =====
 
     async def run_theme_analysis(self) -> dict:
@@ -306,8 +312,8 @@ class TradingSystem:
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
 
-        # 기존 테마가 있고, 같은 주에 이미 선정했으면 재사용
-        # (월요일 휴장 시 화요일이 첫 거래일 → 그 주 첫 거래일에 재선정)
+        # 기존 테마가 있고, 이번 주 화요일에 이미 선정했으면 재사용
+        # (화요일 휴장 시 수요일이 첫 거래일 → 그 주 첫 거래일에 재선정)
         if self.today_themes and self._last_theme_rotation_date:
             today = now_kst().date()
             last_iso = self._last_theme_rotation_date.isocalendar()
@@ -323,11 +329,11 @@ class TradingSystem:
                     t_score = t.get("score", 0)
                     logger.info(f"   - {t_name} ({t_score:.1f}점)")
 
-                # 다음 주 첫 거래일 계산
-                days_until_monday = (7 - today.weekday()) % 7
-                if days_until_monday == 0:
-                    days_until_monday = 7
-                next_review = today + timedelta(days=days_until_monday)
+                # 다음 화요일 계산
+                days_until_tuesday = (1 - today.weekday()) % 7
+                if days_until_tuesday == 0:
+                    days_until_tuesday = 7
+                next_review = today + timedelta(days=days_until_tuesday)
 
                 theme_lines = []
                 for i, t in enumerate(self.today_themes, 1):
@@ -338,7 +344,7 @@ class TradingSystem:
                     f"📊 08:30 테마 분석\n\n"
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)\n"
                     + "\n".join(theme_lines)
-                    + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} (월) ({days_until_monday}일 후)"
+                    + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} (화) ({days_until_tuesday}일 후)"
                 )
 
                 return {"success": True, "themes": len(self.today_themes), "reused": True}
@@ -346,20 +352,32 @@ class TradingSystem:
         start_time = now_kst()
 
         try:
-            # 1. 테마 크롤링
-            logger.info("\n📊 Step 1: 테마 크롤링")
+            # 1. 화요일: 6일 누적 가중 집계 사용, 그 외: 실시간 크롤링
             from modules.theme_analyzer import (
                 crawl_all_themes,
                 score_themes,
-                select_top_themes
+                select_top_themes,
+                aggregate_weekly_scores,
             )
 
-            raw_themes = crawl_all_themes()
-            logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
+            today = now_kst().date()
+            is_tuesday = (today.weekday() == 1)
 
-            # 2. 테마 점수화 (모멘텀 중심)
-            scored_themes = score_themes(raw_themes[:20])
-            logger.info(f"   점수화 완료: {len(scored_themes)}개")
+            if is_tuesday:
+                logger.info("\n📊 Step 1: 화요일 — 6일 누적 가중 집계")
+                scored_themes = aggregate_weekly_scores(self.db, base_date=today - timedelta(days=1))
+                if scored_themes:
+                    logger.info(f"   가중 집계 완료: {len(scored_themes)}개 테마")
+                else:
+                    logger.warning("   가중 집계 데이터 없음 → 실시간 크롤링 폴백")
+                    is_tuesday = False  # 폴백
+
+            if not is_tuesday:
+                logger.info("\n📊 Step 1: 테마 크롤링")
+                raw_themes = crawl_all_themes()
+                logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
+                scored_themes = score_themes(raw_themes[:20])
+                logger.info(f"   점수화 완료: {len(scored_themes)}개")
 
             # 현재 테마 저장
             self.current_themes = scored_themes
@@ -392,8 +410,9 @@ class TradingSystem:
                         "score": t.get("score", 0),
                         "momentum": t.get("momentum_score", 0),
                         "supply_ratio": 0,
-                        "news_count": 0,
-                        "ai_sentiment": 0,
+                        "news_count": t.get("news_count", 0),
+                        "ai_sentiment": t.get("ai_sentiment", 0),
+                        "category": t.get("category", "기타"),
                     }
                     for t in themes
                 ]
@@ -445,19 +464,19 @@ class TradingSystem:
 
             # 메시지 구성
             is_emergency = should_rotate and ("급락" in reason or "급등" in reason)
-            # 다음 월요일 계산
+            # 다음 화요일 계산
             today = now_kst().date()
-            days_until_monday = (7 - today.weekday()) % 7
-            if days_until_monday == 0:
-                days_until_monday = 7
-            next_review = today + timedelta(days=days_until_monday)
+            days_until_tuesday = (1 - today.weekday()) % 7
+            if days_until_tuesday == 0:
+                days_until_tuesday = 7
+            next_review = today + timedelta(days=days_until_tuesday)
 
             msg = "📊 08:30 테마 분석\n\n"
 
             if is_emergency:
                 msg += f"⚡ 긴급 테마 변경! (사유: {reason})\n\n"
             elif had_previous:
-                msg += f"🔄 월요일 — 주간 테마 재선정\n\n"
+                msg += f"🔄 화요일 — 주간 테마 재선정\n\n"
             else:
                 msg += f"🎯 신규 테마 선정: {len(themes)}개\n\n"
 
@@ -495,14 +514,14 @@ class TradingSystem:
                             diff = curr_score - prev_score
                             msg += f"  • {name} ({curr_score:.1f}점, {diff:+.1f}) — 점수 하락\n"
                         else:
-                            msg += f"  • {name} ({prev_score:.1f}점) — 테마 목록 제외\n"
+                            msg += f"  • {name} — 이번 주 상위 테마 아님\n"
             else:
                 for i, t in enumerate(themes[:5], 1):
                     name = t.get("theme", t.get("name", ""))
                     score = t.get("score", 0)
                     msg += f"  {i}. {name} ({score:.1f}점)\n"
 
-            msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} (월) ({days_until_monday}일 후)\n"
+            msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} (화) ({days_until_tuesday}일 후)\n"
             msg += f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"
 
             self.notifier.send_message(msg)
@@ -1289,7 +1308,6 @@ class TradingSystem:
             daily_return = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
 
             # 포지션 JSON
-            import json
             positions_json = json.dumps([
                 {"code": h["stock_code"], "name": h["stock_name"],
                  "shares": h.get("shares", 0), "buy_price": h.get("buy_price", 0),
@@ -1372,6 +1390,134 @@ class TradingSystem:
 
         except Exception as e:
             logger.error(f"리포트 발송 실패: {e}")
+
+    # ===== 17:05 일별 테마 데이터 수집 =====
+
+    async def run_daily_theme_collection(self) -> None:
+        """일별 테마 데이터 수집 (17:05, 장 마감 후)
+
+        매일 테마 크롤링 + 뉴스 + AI 감성 점수를 수집하여 DB에 저장.
+        화요일 가중 집계 시 이 데이터를 사용한다.
+        """
+        logger.info("=" * 60)
+        logger.info("📊 일별 테마 데이터 수집 시작 (17:05)")
+        logger.info("=" * 60)
+
+        try:
+            from modules.theme_analyzer import crawl_all_themes, score_themes
+
+            # 1. 전체 테마 크롤링 (정규화 적용)
+            raw_themes = await asyncio.to_thread(crawl_all_themes)
+            logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
+
+            # 2. 점수화 (모멘텀 + 뉴스 + AI 감성)
+            scored_themes = await asyncio.to_thread(
+                score_themes, raw_themes[:30], True, False  # include_news=True, include_ai=False (비용 절감)
+            )
+            logger.info(f"   점수화 완료: {len(scored_themes)}개 테마")
+
+            # 3. AI 감성 분석 (상위 20개)
+            try:
+                from modules.theme_analyzer.ai_analyzer import analyze_themes_sync
+                from modules.theme_analyzer.scorer import calculate_ai_sentiment_score
+                top_20 = scored_themes[:20]
+                ai_results = await asyncio.to_thread(analyze_themes_sync, top_20)
+                if ai_results:
+                    # list[dict] → {theme_name: dict} 변환
+                    ai_map = {r["theme_name"]: r for r in ai_results if r and "theme_name" in r}
+                    for theme in scored_themes:
+                        name = theme.get("theme", theme.get("name", ""))
+                        if name in ai_map:
+                            ai_val = ai_map[name].get("score", 0)
+                            theme["ai_sentiment"] = ai_val
+                            theme["ai_score"] = calculate_ai_sentiment_score(ai_val)
+                            # 총점 재계산
+                            theme["total_score"] = round(
+                                theme.get("momentum", 0) + theme.get("news_score", 0) +
+                                theme["ai_score"] + theme.get("bonus_score", 0) + 15.0, 2
+                            )
+                            theme["score"] = theme["total_score"]
+                    # 재정렬
+                    scored_themes.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+                    logger.info(f"   AI 감성 분석 완료: {len(ai_map)}개 테마")
+            except Exception as ai_err:
+                logger.warning(f"   AI 감성 분석 스킵: {ai_err}")
+
+            # 4. DB 저장
+            themes_to_save = [
+                {
+                    "theme": t.get("theme", t.get("name", "")),
+                    "score": t.get("score", 0),
+                    "momentum": t.get("momentum_score", 0),
+                    "supply_ratio": 0,
+                    "news_count": t.get("news_count", 0),
+                    "ai_sentiment": t.get("ai_sentiment", 0),
+                    "category": t.get("category", "기타"),
+                }
+                for t in scored_themes
+            ]
+            self.db.save_theme_scores(themes_to_save, now_kst().date())
+            logger.info(f"   DB 저장 완료: {len(themes_to_save)}개 테마 ({now_kst().date()})")
+
+        except Exception as e:
+            logger.error(f"일별 테마 수집 실패: {e}")
+
+    # ===== 17:00 매매 사후 분석 =====
+
+    async def run_post_trade_analysis(self) -> None:
+        """매도 후 사후 분석 (17:00)"""
+        logger.info("=" * 60)
+        logger.info("🔍 매매 사후 분석 시작 (17:00)")
+        logger.info("=" * 60)
+
+        try:
+            if self.post_trade_analyzer is None:
+                self.post_trade_analyzer = PostTradeAnalyzer(db=self.db)
+
+            results = await asyncio.to_thread(self.post_trade_analyzer.run_daily_analysis)
+
+            if results:
+                logger.info(f"매매 사후 분석 완료: {len(results)}건")
+                self.notifier.send_post_trade_report(results)
+            else:
+                logger.info("매매 사후 분석: 대상 없음")
+
+        except Exception as e:
+            logger.error(f"매매 사후 분석 실패: {e}")
+
+    # ===== 금 17:30 주간 매매 복기 =====
+
+    async def run_weekly_trade_review(self) -> None:
+        """주간 매매 복기 (금요일 17:30)"""
+        logger.info("=" * 60)
+        logger.info("📝 주간 매매 복기 시작 (금 17:30)")
+        logger.info("=" * 60)
+
+        try:
+            if self.post_trade_analyzer is None:
+                self.post_trade_analyzer = PostTradeAnalyzer(db=self.db)
+
+            summary = await asyncio.to_thread(self.post_trade_analyzer.generate_weekly_summary)
+
+            if summary:
+                logger.info(f"주간 복기 완료: 평균 타이밍 {summary.get('avg_timing_score', 0)}/10")
+                # 텔레그램으로 주간 복기 리포트 발송
+                report_text = (
+                    f"📝 *주간 매매 복기*\n"
+                    f"📅 {now_kst().strftime('%Y-%m-%d')}\n\n"
+                    f"📊 *주간 패턴*\n{summary.get('weekly_pattern', 'N/A')}\n\n"
+                    f"💡 *파라미터 제안*\n"
+                )
+                for s in summary.get("parameter_suggestions", []):
+                    report_text += f"  • {s}\n"
+                report_text += f"\n⚠️ *다음 주 주의*\n{summary.get('next_week_caution', 'N/A')}"
+                report_text += f"\n\n⭐ 평균 타이밍 점수: {summary.get('avg_timing_score', 0)}/10"
+                self.notifier.send_message(report_text)
+            else:
+                logger.info("주간 복기: 분석 대상 없음")
+
+        except Exception as e:
+            logger.error(f"주간 매매 복기 실패: {e}")
 
     def _aggregate_strategy_stats(self, db: Database) -> None:
         """trade_reviews에서 전략별 성과 집계 -> strategy_stats 저장"""

@@ -17,7 +17,7 @@
 - [x] code-tester 에이전트 검증
 
 ## 배포 항목
-- [ ] 서비스 재시작 (사용자가 수동으로 진행)
+- [x] 서비스 재시작 — post-trade-analyzer 배포 시 함께 적용 (2026-03-03 20:28 KST)
 
 ## 문서 업데이트 항목
 - [x] memory/MEMORY.md 업데이트

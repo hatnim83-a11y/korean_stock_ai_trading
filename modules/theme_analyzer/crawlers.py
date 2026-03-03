@@ -547,6 +547,74 @@ def _get_cached_theme(cache: dict, theme_name: str) -> Optional[dict]:
     return None
 
 
+# ===== 테마명 정규화 =====
+
+def _build_theme_name_map() -> dict[str, str]:
+    """predefined 테마의 naver_aliases에서 역매핑(alias→표준명) 자동 생성"""
+    name_map = {}
+    for t in _PREDEFINED_THEMES:
+        canonical = t["name"]
+        for alias in t.get("naver_aliases", []):
+            if alias != canonical:
+                name_map[alias] = canonical
+    return name_map
+
+
+# predefined 테마 원본 데이터 (모듈 로드 시 1회 정의)
+_PREDEFINED_THEMES = [
+    {"name": "2차전지", "category": "신성장", "keywords": ["배터리", "리튬", "전기차"],
+     "naver_aliases": ["2차전지"]},
+    {"name": "AI반도체", "category": "반도체", "keywords": ["AI칩", "HBM", "GPU"],
+     "naver_aliases": ["온디바이스 AI", "AI 반도체"]},
+    {"name": "반도체", "category": "반도체", "keywords": ["반도체", "메모리", "파운드리"],
+     "naver_aliases": ["반도체 대표주", "반도체 장비", "반도체 재료"]},
+    {"name": "K-방산", "category": "방위산업", "keywords": ["방산", "무기", "수출"],
+     "naver_aliases": ["방위산업", "방산"]},
+    {"name": "바이오", "category": "헬스케어", "keywords": ["신약", "임상", "바이오텍"],
+     "naver_aliases": ["바이오", "바이오시밀러"]},
+    {"name": "로봇", "category": "신성장", "keywords": ["로봇", "자동화", "휴머노이드"],
+     "naver_aliases": ["로봇", "휴머노이드", "피지컬 AI"]},
+    {"name": "자율주행", "category": "모빌리티", "keywords": ["자율주행", "라이다", "센서"],
+     "naver_aliases": ["자율주행", "자율주행차"]},
+    {"name": "원자력", "category": "에너지", "keywords": ["원전", "SMR", "핵융합"],
+     "naver_aliases": ["원자력발전", "원자력"]},
+    {"name": "수소", "category": "에너지", "keywords": ["수소", "연료전지", "그린수소"],
+     "naver_aliases": ["수소에너지", "수소차"]},
+    {"name": "조선", "category": "산업재", "keywords": ["조선", "LNG선", "컨테이너선"],
+     "naver_aliases": ["조선"]},
+    {"name": "건설", "category": "산업재", "keywords": ["건설", "아파트", "인프라"],
+     "naver_aliases": ["건설", "건설 대표주"]},
+    {"name": "금융", "category": "금융", "keywords": ["은행", "증권", "보험"],
+     "naver_aliases": ["은행", "증권", "금융"]},
+    {"name": "엔터테인먼트", "category": "소비재", "keywords": ["K-POP", "드라마", "콘텐츠"],
+     "naver_aliases": ["엔터테인먼트"]},
+    {"name": "게임", "category": "IT서비스", "keywords": ["게임", "모바일게임", "e스포츠"],
+     "naver_aliases": ["게임", "모바일게임"]},
+    {"name": "플랫폼", "category": "IT서비스", "keywords": ["플랫폼", "이커머스", "핀테크"],
+     "naver_aliases": ["인터넷 대표주", "인터넷은행"]},
+    {"name": "클라우드", "category": "IT서비스", "keywords": ["클라우드", "SaaS", "데이터센터"],
+     "naver_aliases": ["클라우드 컴퓨팅", "클라우드"]},
+    {"name": "음식료", "category": "소비재", "keywords": ["식품", "음료", "주류"],
+     "naver_aliases": ["음식료업종", "음식료"]},
+    {"name": "화장품", "category": "소비재", "keywords": ["화장품", "K-뷰티", "스킨케어"],
+     "naver_aliases": ["화장품"]},
+    {"name": "철강", "category": "소재", "keywords": ["철강", "스테인리스", "특수강"],
+     "naver_aliases": ["철강"]},
+    {"name": "화학", "category": "소재", "keywords": ["화학", "석유화학", "정밀화학"],
+     "naver_aliases": ["석유화학", "화학"]},
+    {"name": "통신", "category": "통신", "keywords": ["5G", "6G", "통신장비"],
+     "naver_aliases": ["5G", "통신장비", "통신"]},
+]
+
+# alias → 표준명 역매핑 (모듈 로드 시 자동 생성)
+THEME_NAME_MAP = _build_theme_name_map()
+
+
+def normalize_theme_name(name: str) -> str:
+    """크롤링된 테마명을 표준명으로 정규화. 매핑 없으면 원본 반환."""
+    return THEME_NAME_MAP.get(name, name)
+
+
 # ===== 자체 정의 테마 목록 =====
 
 def get_predefined_themes() -> list[dict]:
@@ -554,55 +622,11 @@ def get_predefined_themes() -> list[dict]:
     자체 정의된 20개 핵심 테마 반환
 
     네이버/한경에 없거나 중요한 테마를 직접 정의합니다.
+    테마 원본 데이터는 _PREDEFINED_THEMES 모듈 변수 참조.
 
     Returns:
         테마 정보 리스트
     """
-    predefined = [
-        {"name": "2차전지", "category": "신성장", "keywords": ["배터리", "리튬", "전기차"],
-         "naver_aliases": ["2차전지"]},
-        {"name": "AI반도체", "category": "반도체", "keywords": ["AI칩", "HBM", "GPU"],
-         "naver_aliases": ["온디바이스 AI", "AI 반도체"]},
-        {"name": "반도체", "category": "반도체", "keywords": ["반도체", "메모리", "파운드리"],
-         "naver_aliases": ["반도체 대표주", "반도체 장비", "반도체 재료"]},
-        {"name": "K-방산", "category": "방위산업", "keywords": ["방산", "무기", "수출"],
-         "naver_aliases": ["방위산업", "방산"]},
-        {"name": "바이오", "category": "헬스케어", "keywords": ["신약", "임상", "바이오텍"],
-         "naver_aliases": ["바이오", "바이오시밀러"]},
-        {"name": "로봇", "category": "신성장", "keywords": ["로봇", "자동화", "휴머노이드"],
-         "naver_aliases": ["로봇", "휴머노이드", "피지컬 AI"]},
-        {"name": "자율주행", "category": "모빌리티", "keywords": ["자율주행", "라이다", "센서"],
-         "naver_aliases": ["자율주행", "자율주행차"]},
-        {"name": "원자력", "category": "에너지", "keywords": ["원전", "SMR", "핵융합"],
-         "naver_aliases": ["원자력발전", "원자력"]},
-        {"name": "수소", "category": "에너지", "keywords": ["수소", "연료전지", "그린수소"],
-         "naver_aliases": ["수소에너지", "수소차"]},
-        {"name": "조선", "category": "산업재", "keywords": ["조선", "LNG선", "컨테이너선"],
-         "naver_aliases": ["조선"]},
-        {"name": "건설", "category": "산업재", "keywords": ["건설", "아파트", "인프라"],
-         "naver_aliases": ["건설", "건설 대표주"]},
-        {"name": "금융", "category": "금융", "keywords": ["은행", "증권", "보험"],
-         "naver_aliases": ["은행", "증권", "금융"]},
-        {"name": "엔터테인먼트", "category": "소비재", "keywords": ["K-POP", "드라마", "콘텐츠"],
-         "naver_aliases": ["엔터테인먼트"]},
-        {"name": "게임", "category": "IT서비스", "keywords": ["게임", "모바일게임", "e스포츠"],
-         "naver_aliases": ["게임", "모바일게임"]},
-        {"name": "플랫폼", "category": "IT서비스", "keywords": ["플랫폼", "이커머스", "핀테크"],
-         "naver_aliases": ["인터넷 대표주", "인터넷은행"]},
-        {"name": "클라우드", "category": "IT서비스", "keywords": ["클라우드", "SaaS", "데이터센터"],
-         "naver_aliases": ["클라우드 컴퓨팅", "클라우드"]},
-        {"name": "음식료", "category": "소비재", "keywords": ["식품", "음료", "주류"],
-         "naver_aliases": ["음식료업종", "음식료"]},
-        {"name": "화장품", "category": "소비재", "keywords": ["화장품", "K-뷰티", "스킨케어"],
-         "naver_aliases": ["화장품"]},
-        {"name": "철강", "category": "소재", "keywords": ["철강", "스테인리스", "특수강"],
-         "naver_aliases": ["철강"]},
-        {"name": "화학", "category": "소재", "keywords": ["화학", "석유화학", "정밀화학"],
-         "naver_aliases": ["석유화학", "화학"]},
-        {"name": "통신", "category": "통신", "keywords": ["5G", "6G", "통신장비"],
-         "naver_aliases": ["5G", "통신장비", "통신"]},
-    ]
-
     return [
         {
             "name": t["name"],
@@ -611,20 +635,25 @@ def get_predefined_themes() -> list[dict]:
             "naver_aliases": t.get("naver_aliases", []),
             "source": "predefined"
         }
-        for t in predefined
+        for t in _PREDEFINED_THEMES
     ]
 
 
 def _match_theme_name(found_name: str, theme_name: str, aliases: list[str] = None) -> bool:
-    """테마명 매칭: 이름 또는 별칭 중 하나라도 부분 매칭되면 True"""
-    # 기본 부분 매칭
-    if theme_name in found_name or found_name in theme_name:
+    """
+    테마명 매칭: 정규화 후 정확 매칭 우선, 별칭 정확 매칭 허용.
+    부분 매칭은 사용하지 않아 거짓양성을 방지한다.
+    """
+    # 1. 정규화 후 정확 매칭
+    norm = normalize_theme_name(found_name)
+    if norm == theme_name:
         return True
-    # 별칭 매칭
-    if aliases:
-        for alias in aliases:
-            if alias in found_name or found_name in alias:
-                return True
+    # 2. 원본 이름 정확 매칭
+    if found_name == theme_name:
+        return True
+    # 3. 별칭 정확 매칭
+    if aliases and found_name in aliases:
+        return True
     return False
 
 
@@ -841,11 +870,11 @@ def crawl_all_themes() -> list[dict]:
         theme_name = predef["name"]
         aliases = predef.get("naver_aliases", [])
 
-        # 이미 수집된 테마면 스킵 (이름 또는 별칭으로 매칭)
+        # 이미 수집된 테마면 스킵 (정규화된 이름 기준 정확 매칭)
         already_collected = theme_name in collected_names
         if not already_collected and aliases:
             for alias in aliases:
-                if any(alias in cn or cn in alias for cn in collected_names):
+                if alias in collected_names or normalize_theme_name(alias) in collected_names:
                     already_collected = True
                     break
         if already_collected:
@@ -906,10 +935,11 @@ def crawl_all_themes() -> list[dict]:
 
     logger.info(f"📊 주요 테마 {enriched_count}개 데이터 보강 완료")
 
-    # 중복 제거 (테마명 기준, 첫 번째 것 유지)
+    # 테마명 정규화 + 중복 제거 (정규화된 이름 기준, 첫 번째 것 유지)
     seen = set()
     unique_themes = []
     for theme in all_themes:
+        theme["name"] = normalize_theme_name(theme["name"])
         if theme["name"] not in seen:
             seen.add(theme["name"])
             unique_themes.append(theme)

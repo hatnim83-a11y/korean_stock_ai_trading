@@ -66,8 +66,8 @@ class MainTheme:
     
     @property
     def should_review(self) -> bool:
-        """재평가 필요 여부 (매주 월요일)"""
-        return now_kst().weekday() == 0  # 0 = Monday
+        """재평가 필요 여부 (매주 화요일)"""
+        return now_kst().weekday() == 1  # 1 = Tuesday
 
 
 class ThemeRotator:
@@ -232,7 +232,7 @@ class ThemeRotator:
                 f"메인 테마 재평가 시점 도달: {self.current_main_theme.theme_name} "
                 f"(보유 {self.current_main_theme.days_held}일)"
             )
-            return True, "월요일 주간 로테이션"
+            return True, "화요일 주간 로테이션"
         
         # 2. 점수 급락 체크 (-20% 이상)
         score_change_rate = self.current_main_theme.score_change_rate

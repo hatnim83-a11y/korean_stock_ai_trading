@@ -3,10 +3,12 @@ scorer.py - 테마 점수 계산 모듈
 
 이 파일은 수집된 테마 데이터를 바탕으로 투자 매력도 점수를 계산합니다.
 
-점수 계산 로직 (0-100점) — 결정적 모멘텀 중심:
-- 모멘텀 점수 (60점): 테마 내 평균 5일 수익률 (KIS API 우선, 크롤링 폴백)
+점수 계산 로직 (0-100점):
+- 모멘텀 점수 (40점): 테마 내 평균 5일 수익률 (KIS API 우선, 크롤링 폴백)
+- 뉴스 화제성 (20점): 최근 3일 뉴스 언급 횟수
+- AI 감성 (15점): Claude AI 테마 전망 분석
 - 종목수 보너스 (10점): 테마 규모 반영
-- 기본 점수 (30점): 고정
+- 기본 점수 (15점): 고정
 
 사용법:
     from modules.theme_analyzer.scorer import (
@@ -29,14 +31,14 @@ from logger import logger
 
 
 # ===== 점수 배점 상수 =====
-MAX_MOMENTUM_SCORE = 60.0    # 모멘텀 최대 60점
+MAX_MOMENTUM_SCORE = 40.0    # 모멘텀 최대 40점
+MAX_NEWS_SCORE = 20.0        # 뉴스 화제성 최대 20점
+MAX_AI_SCORE = 15.0          # AI 감성 최대 15점
 MAX_SIZE_BONUS = 10.0        # 종목수 보너스 최대 10점
-BASE_SCORE = 30.0            # 기본 점수 30점 (뉴스/AI 대체)
+BASE_SCORE = 15.0            # 기본 점수 15점
 
 # 하위 호환용 (기존 함수 참조)
 MAX_SUPPLY_SCORE = 25.0
-MAX_NEWS_SCORE = 20.0
-MAX_AI_SCORE = 25.0
 
 TOTAL_MAX_SCORE = 100.0
 
@@ -50,14 +52,14 @@ def calculate_momentum_score(
     weight_20d: float = 0.3
 ) -> float:
     """
-    모멘텀 점수 계산 (최대 60점)
+    모멘텀 점수 계산 (최대 40점)
 
     테마의 평균 수익률을 바탕으로 모멘텀 점수를 계산합니다.
-    백테스트와 동일한 선형 매핑 공식 사용.
+    선형 매핑 공식 사용.
 
     계산 로직:
-    - 5일 수익률 +15% 이상: 60점 (만점)
-    - 5일 수익률 0%: 30점 (중간)
+    - 5일 수익률 +15% 이상: 40점 (만점)
+    - 5일 수익률 0%: 20점 (중간)
     - 5일 수익률 -15% 이하: 0점 (최저)
 
     Args:
@@ -67,7 +69,7 @@ def calculate_momentum_score(
         weight_20d: 20일 수익률 가중치 (기본 30%)
 
     Returns:
-        모멘텀 점수 (0 ~ 60)
+        모멘텀 점수 (0 ~ 40)
     """
     # 범위 제한 (-15% ~ +15%)
     clamped_5d = max(-15.0, min(15.0, avg_return_5d))
@@ -88,7 +90,7 @@ def calculate_momentum_score(
     # 범위 보정
     final_score = max(0.0, min(MAX_MOMENTUM_SCORE, final_score))
 
-    logger.debug(f"모멘텀 점수: {final_score:.1f}/60 (5일 수익률: {avg_return_5d:+.2f}%)")
+    logger.debug(f"모멘텀 점수: {final_score:.1f}/{MAX_MOMENTUM_SCORE:.0f} (5일 수익률: {avg_return_5d:+.2f}%)")
 
     return round(final_score, 2)
 
@@ -234,28 +236,28 @@ def calculate_news_score(
 
 def calculate_ai_sentiment_score(ai_sentiment: float) -> float:
     """
-    AI 감성 분석 점수 계산 (최대 25점)
-    
-    Claude AI가 분석한 감성 점수(0-10)를 25점 만점으로 변환
-    
+    AI 감성 분석 점수 계산 (최대 15점)
+
+    Claude AI가 분석한 감성 점수(0-10)를 15점 만점으로 변환
+
     Args:
         ai_sentiment: AI 감성 점수 (0 ~ 10)
-    
+
     Returns:
-        AI 점수 (0 ~ 25)
-        
+        AI 점수 (0 ~ 15)
+
     Example:
         >>> calculate_ai_sentiment_score(8.5)
-        21.25  # 8.5 / 10 * 25 = 21.25
+        12.75  # 8.5 / 10 * 15 = 12.75
     """
     # 범위 제한 (0 ~ 10)
     clamped = max(0.0, min(10.0, ai_sentiment))
-    
-    # 점수 변환 (0~10 → 0~25)
+
+    # 점수 변환 (0~10 → 0~15)
     score = (clamped / 10.0) * MAX_AI_SCORE
-    
-    logger.debug(f"AI 점수: {score:.1f}/25 (감성: {ai_sentiment:.1f}/10)")
-    
+
+    logger.debug(f"AI 점수: {score:.1f}/15 (감성: {ai_sentiment:.1f}/10)")
+
     return round(score, 2)
 
 
@@ -438,15 +440,17 @@ def _calculate_theme_momentum(theme: dict, kis) -> float:
     return 0
 
 
-def score_themes(themes: list[dict]) -> list[dict]:
+def score_themes(themes: list[dict], include_news: bool = False, include_ai: bool = False) -> list[dict]:
     """
-    여러 테마에 대해 점수 일괄 계산 (결정적 모멘텀 중심)
+    여러 테마에 대해 점수 일괄 계산
 
-    배점: 모멘텀(60) + 종목수 보너스(10) + 기본점수(30) = 100
-    KIS API 5일 수익률 우선, 크롤링 avg_change_rate 폴백.
+    배점: 모멘텀(40) + 뉴스(20) + AI감성(15) + 종목수 보너스(10) + 기본점수(15) = 100
+    뉴스/AI는 include_news/include_ai 플래그로 활성화 (17:00 일별 수집 시).
 
     Args:
         themes: 테마 정보 리스트
+        include_news: 뉴스 점수 수집 및 반영 여부
+        include_ai: AI 감성 점수 수집 및 반영 여부
 
     Returns:
         점수가 추가된 테마 리스트 (점수 내림차순 정렬)
@@ -456,22 +460,35 @@ def score_themes(themes: list[dict]) -> list[dict]:
     # KIS API 인스턴스 (테마 종목 가격 조회용)
     kis = _get_kis_api()
 
+    # 뉴스 건수 수집 (상위 테마 대상)
+    news_counts = {}
+    if include_news:
+        news_counts = _collect_news_counts(themes)
+
     for theme in themes:
         theme_name = theme.get("name", theme.get("theme", ""))
 
         # 1. 모멘텀: KIS API 5일 수익률 (우선) → 크롤링 폴백
         avg_return = _calculate_theme_momentum(theme, kis)
 
-        # 모멘텀 점수: ((avg_return + 15) / 30) * 60 (백테스트 공식)
+        # 모멘텀 점수: ((avg_return + 15) / 30) * 40
         clamped = max(-15.0, min(15.0, avg_return))
         momentum_score = ((clamped + 15) / 30) * MAX_MOMENTUM_SCORE
 
-        # 2. 종목수 보너스 (최대 10점, 백테스트: min(10, valid_stocks * 2))
+        # 2. 뉴스 점수 (최대 20점)
+        news_count = news_counts.get(theme_name, theme.get("news_count", 0) or 0)
+        news_score = calculate_news_score(news_count) if news_count > 0 else 0.0
+
+        # 3. AI 감성 점수 (최대 15점) — 이미 theme에 있으면 재사용
+        ai_sentiment = theme.get("ai_sentiment", 0) or 0
+        ai_score = calculate_ai_sentiment_score(ai_sentiment) if ai_sentiment > 0 else 0.0
+
+        # 4. 종목수 보너스 (최대 10점)
         stock_count = theme.get("stock_count", len(theme.get("stocks", [])))
         size_bonus = min(MAX_SIZE_BONUS, stock_count * 2)
 
-        # 3. 기본점수 30점 (뉴스/AI 대신 고정)
-        total = momentum_score + size_bonus + BASE_SCORE
+        # 5. 기본점수 15점
+        total = momentum_score + news_score + ai_score + size_bonus + BASE_SCORE
 
         # 등급 산정
         if total >= 80:
@@ -487,12 +504,16 @@ def score_themes(themes: list[dict]) -> list[dict]:
 
         # 선정 이유 생성
         reasons = []
-        if momentum_score >= 40:
+        if momentum_score >= 27:
             reasons.append(f"강한모멘텀({avg_return:+.1f}%)")
-        elif momentum_score >= 30:
+        elif momentum_score >= 20:
             reasons.append(f"양호한모멘텀({avg_return:+.1f}%)")
         elif avg_return != 0:
             reasons.append(f"모멘텀({avg_return:+.1f}%)")
+        if news_score >= 10:
+            reasons.append(f"화제({news_count}건)")
+        if ai_score >= 8:
+            reasons.append(f"AI긍정({ai_sentiment:.0f})")
         if stock_count >= 5:
             reasons.append(f"{stock_count}종목")
 
@@ -502,14 +523,16 @@ def score_themes(themes: list[dict]) -> list[dict]:
         scored_theme = {
             **theme,
             "theme": theme_name,
-            "avg_change_rate": round(avg_return, 2),  # 실제 계산된 모멘텀 수익률로 덮어쓰기
+            "avg_change_rate": round(avg_return, 2),
             "total_score": round(total, 2),
             "score": round(total, 2),
             "momentum": round(momentum_score, 2),
             "momentum_score": round(momentum_score, 2),
             "supply_score": 0,
-            "news_score": 0,
-            "ai_score": 0,
+            "news_score": round(news_score, 2),
+            "news_count": news_count,
+            "ai_score": round(ai_score, 2),
+            "ai_sentiment": round(ai_sentiment, 2) if ai_sentiment else 0,
             "bonus_score": round(size_bonus, 2),
             "grade": grade,
             "selection_reason": selection_reason
@@ -519,9 +542,38 @@ def score_themes(themes: list[dict]) -> list[dict]:
     # 총점 기준 내림차순 정렬
     scored_themes.sort(key=lambda x: x["total_score"], reverse=True)
 
-    logger.info(f"📊 {len(scored_themes)}개 테마 점수 계산 완료 (모멘텀 중심)")
+    active = []
+    if include_news:
+        active.append("뉴스")
+    if include_ai:
+        active.append("AI")
+    mode = f"모멘텀+{'+'.join(active)}" if active else "모멘텀"
+    logger.info(f"📊 {len(scored_themes)}개 테마 점수 계산 완료 ({mode})")
 
     return scored_themes
+
+
+def _collect_news_counts(themes: list[dict]) -> dict[str, int]:
+    """상위 30개 테마의 뉴스 건수 일괄 수집"""
+    try:
+        from modules.theme_analyzer.crawlers import crawl_theme_news_count
+    except ImportError:
+        logger.warning("[scorer] crawl_theme_news_count 임포트 실패")
+        return {}
+
+    counts = {}
+    for theme in themes[:30]:
+        theme_name = theme.get("name", theme.get("theme", ""))
+        if not theme_name:
+            continue
+        try:
+            count = crawl_theme_news_count(theme_name, days=3)
+            if count and count > 0:
+                counts[theme_name] = count
+        except Exception as e:
+            logger.debug(f"[scorer] 뉴스 수집 실패 ({theme_name}): {e}")
+    logger.info(f"📰 뉴스 건수 수집: {len(counts)}개 테마")
+    return counts
 
 
 # ===== 직접 실행 시 테스트 =====

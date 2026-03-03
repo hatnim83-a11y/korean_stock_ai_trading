@@ -63,6 +63,12 @@ from .selector import (
     run_daily_theme_analysis_sync,
 )
 
+# 가중 집계
+from .weekly_aggregator import (
+    aggregate_weekly_scores,
+    get_recent_trading_days,
+)
+
 # 테마 로테이션
 from .theme_rotator import (
     ThemeRotator,
@@ -97,6 +103,9 @@ __all__ = [
     "format_theme_report",
     "run_daily_theme_analysis",
     "run_daily_theme_analysis_sync",
+    # 가중 집계
+    "aggregate_weekly_scores",
+    "get_recent_trading_days",
     # 테마 로테이션
     "ThemeRotator",
     "ThemeSnapshot",
