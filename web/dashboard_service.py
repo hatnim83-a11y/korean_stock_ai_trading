@@ -36,14 +36,26 @@ def _get_db() -> Database:
     return _db_instance
 
 
+_kis_instance = None
+_order_instance = None
+
+
 def _get_kis_api():
-    from modules.stock_screener.kis_api import KISApi
-    return KISApi()
+    global _kis_instance
+    if _kis_instance is None:
+        from modules.stock_screener.kis_api import KISApi
+        _kis_instance = KISApi()
+        logger.info("KISApi 싱글톤 인스턴스 생성")
+    return _kis_instance
 
 
 def _get_order_api():
-    from modules.trading_engine.kis_order_api import KISOrderApi
-    return KISOrderApi()
+    global _order_instance
+    if _order_instance is None:
+        from modules.trading_engine.kis_order_api import KISOrderApi
+        _order_instance = KISOrderApi()
+        logger.info("KISOrderApi 싱글톤 인스턴스 생성")
+    return _order_instance
 
 
 def get_cached_price(kis, stock_code: str) -> Optional[dict]:

@@ -34,7 +34,7 @@ from config import now_kst
 
 # ===== 검증 상수 =====
 MIN_AI_SCORE = 5.0  # AI 점수 최소 기준
-EXCLUDE_RECOMMENDATIONS = ["No"]  # 제외할 추천 유형
+EXCLUDE_RECOMMENDATIONS = ["No", "Hold"]  # 제외할 추천 유형
 
 
 def verify_single_stock(
@@ -338,7 +338,7 @@ def run_daily_verification(
     logger.info("🤖 일일 AI 검증 시작")
     logger.info("=" * 60)
     
-    start_time = datetime.now()
+    start_time = now_kst()
     
     if not candidates:
         logger.warning("검증할 종목이 없습니다")
@@ -393,7 +393,7 @@ def run_daily_verification(
         report = format_verification_report(verified)
         print(report)
         
-        elapsed = (datetime.now() - start_time).total_seconds()
+        elapsed = (now_kst() - start_time).total_seconds()
         logger.info("=" * 60)
         logger.info(f"✅ AI 검증 완료 ({elapsed:.1f}초, {len(passed)}개 통과)")
         logger.info("=" * 60)
@@ -426,7 +426,7 @@ def _mock_verification(stocks: list[dict]) -> list[dict]:
         result["ai_risk"] = "테스트용"
         result["ai_target_return"] = int(ai_score * 2)
         result["ai_confidence"] = 0.8
-        result["ai_passed"] = ai_score >= MIN_AI_SCORE and recommend != "No"
+        result["ai_passed"] = ai_score >= MIN_AI_SCORE and recommend not in EXCLUDE_RECOMMENDATIONS
         
         verified.append(result)
     

@@ -31,16 +31,18 @@
 - Clamped to range: MIN=-12%, MAX=-5% (see `calculators.py`)
 - DEFAULT_STOP_LOSS in .env is -0.08 but actual SL varies per stock via ATR
 
-## Known Issues (as of 2026-02-26)
-- **CRITICAL: Theme data key mismatch** (found 2026-02-26): `main.py:176` creates `{"theme": name, "score": val}` on DB restore, but `screener.py:441` expects `{"name": name, "url": url, "total_score": val}`. Causes screener to find 0 stocks because `theme.get("name")` = None. Fresh analysis works; DB restore fails. Fix: normalize keys in main.py or screener.py.
-- **CRITICAL: profit_rate unit inconsistency in trades table**: Old data ratio, new data percent.
-- **WARNING: DB portfolio trailing columns never updated at runtime**: portfolio.trailing_active=0 always. position_state has correct data. Bot uses position_state for restore.
-- **WARNING: Dashboard creates new KISApi every SSE poll**: 2195 inits/5h = ~7/min. Should cache.
-- **WebSocket orderbook parse error 'A'**: Market close only. Non-critical.
+## Known Issues (as of 2026-03-03)
+- **CRITICAL: screening_log table always empty**: `screener.py:486` says "DB 저장 완료" but 0 rows. Save logic may be broken or saving to wrong table/DB.
+- **CRITICAL: profit_rate unit inconsistency in trades table**: Old data (id<=20) ratio, new data (id>=21) percent.
+- **WARNING: DB portfolio trailing columns never updated at runtime**: portfolio.trailing_active=0 always. position_state has correct data.
+- **WARNING: Dashboard creates new KISApi every SSE poll**: 42 inits in ~7h = ~6/min. Should cache.
+- **WARNING: Dashboard log rotation error**: Tries to write to previous date's log file (e.g. `system_2026-02-28.log`) which doesn't exist. FileNotFoundError.
+- **WARNING: KRX theme crawl fails**: `crawl_krx_themes:390` error `'시장'` key missing from response.
 - **KIS API "Server disconnected"**: Intermittent. Non-critical.
 - **Log file date uses UTC**: 08:00-08:59 KST logs go to PREVIOUS day's file.
 
 ## Resolved Issues
+- ~~**Theme data key mismatch**~~: Fixed `da6276b` (2026-03-02). Screener now works on DB restore.
 - ~~**Partial sell not saved to DB**~~: Fixed `5a336fe`.
 - ~~**Dashboard manual sell full close instead of partial**~~: Fixed `4f43344`.
 - ~~**Service is disabled**~~: 2026-02-20.
@@ -65,6 +67,7 @@
 - Orderbook parse errors: ONLY at market close 15:20-15:30 KST = NORMAL
 
 ## Recent Health Checks
-- **2026-02-26 14:24 KST**: Thu. PID 39777 (11min), 0.4%CPU/62MB. Dashboard PID 458, 1.2%CPU/113MB. 3 holdings (TCK+9%, LG+10%, HD조선-2.3%). TCK/LG trailing L1 active. Screener 0 candidates (theme key mismatch). 52 bot inits (code changes). 20 errors, 9 warnings. FOREIGN KEY error 1x. Theme mismatch CRITICAL for tomorrow.
-- **2026-02-25 20:57 KST**: 5 holdings +2.0%. 1 buy (HD조선). Hansem trailing L1.
+- **2026-03-03 12:58 KST**: Mon. PID 1560800 (14h), 0.1%CPU/137MB. Dashboard PID 100599 (4d), 0.6%CPU/149MB. 3 holdings (HD조선-3.1%, 이오텍+3.7%, HPSP-1.6%). Realized today: +140,900 (4 sells, all profit). Theme: CCTV&DVR(66.1)+반도체장비(65.2)+LED+홈쇼핑+SI. Screener 8 candidates, 4 bought. Techwing: partial 1+2+trailing L2, excellent. Hanamaicron trailing L1. screening_log empty. Dashboard KIS init 42x/7h.
+- **2026-02-26 14:24 KST**: Thu. Screener 0 candidates (theme key mismatch). CRITICAL.
+- **2026-02-25 20:57 KST**: 5 holdings +2.0%. 1 buy (HD조선).
 - **2026-02-23 11:01 KST**: 5 holdings +2.2%. Partial sell bug discovered.

@@ -298,7 +298,7 @@ def crawl_naver_theme_stocks(theme_url: str) -> list[dict]:
             # 등락률
             change_rate = _safe_float(cols[2].get_text(strip=True))
             
-            if stock_code:
+            if stock_code and re.match(r'^\d{6}$', stock_code):
                 stocks.append({
                     "code": stock_code,
                     "name": stock_name,
@@ -341,7 +341,11 @@ def crawl_krx_themes() -> list[dict]:
     try:
         from pykrx import stock
 
-        tickers = stock.get_index_ticker_list(market='테마')
+        try:
+            tickers = stock.get_index_ticker_list(market='테마')
+        except (KeyError, TypeError, ValueError) as e:
+            logger.warning(f"KRX 테마지수 티커 조회 실패 (pykrx API 변경 가능): {e}")
+            return themes
 
         if not tickers:
             logger.warning("KRX 테마지수 티커 조회 결과 0개")

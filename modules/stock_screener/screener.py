@@ -47,7 +47,7 @@ def screen_stocks_in_theme(
     stock_codes: list[str],
     max_stocks: int = MAX_STOCKS_PER_THEME,
     kis_api: Optional["KISApi"] = None
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
     특정 테마 내 종목 스크리닝
     
@@ -83,6 +83,7 @@ def screen_stocks_in_theme(
         should_close = False
     
     candidates = []
+    screening_logs = []
 
     # 필터별 거부 통계
     filter_stats = {
@@ -114,6 +115,7 @@ def screen_stocks_in_theme(
                 # 필터 적용
                 filtered = apply_all_filters(stock_info)
 
+                reject_reasons = []
                 if filtered.get("all_passed"):
                     candidates.append(filtered)
                     filter_stats["passed"] += 1
@@ -121,12 +123,28 @@ def screen_stocks_in_theme(
                     # 어떤 필터에서 거부되었는지 추적
                     if not filtered.get("supply_passed"):
                         filter_stats["supply_fail"] += 1
+                        reject_reasons.append("supply")
                     if not filtered.get("technical_passed"):
                         filter_stats["technical_fail"] += 1
+                        reject_reasons.append("technical")
                     if not filtered.get("fundamental_passed"):
                         filter_stats["fundamental_fail"] += 1
+                        reject_reasons.append("fundamental")
                     if not filtered.get("liquidity_passed"):
                         filter_stats["liquidity_fail"] += 1
+                        reject_reasons.append("liquidity")
+
+                # screening_log 데이터 축적
+                screening_logs.append({
+                    "date": now_kst().date().isoformat(),
+                    "stock_code": code,
+                    "stock_name": stock_info.get("name", ""),
+                    "theme": theme_name,
+                    "stage": "filter",
+                    "passed": filtered.get("all_passed", False),
+                    "score": filtered.get("final_score"),
+                    "reject_reason": ",".join(reject_reasons) if not filtered.get("all_passed") else None,
+                })
 
             except Exception as e:
                 logger.warning(f"[{code}] 스크리닝 중 오류: {e}")
@@ -158,8 +176,8 @@ def screen_stocks_in_theme(
     finally:
         if should_close:
             kis_api.close()
-    
-    return candidates
+
+    return candidates, screening_logs
 
 
 def screen_all_themes(
@@ -167,7 +185,7 @@ def screen_all_themes(
     theme_stocks: dict[str, list[str]],
     max_per_theme: int = MAX_STOCKS_PER_THEME,
     max_total: int = MAX_TOTAL_CANDIDATES
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
     모든 테마에 대해 종목 스크리닝
     
@@ -185,25 +203,30 @@ def screen_all_themes(
     logger.info(f"🔄 전체 테마 스크리닝 시작 ({len(themes)}개 테마)")
     
     all_candidates = []
+    all_screening_logs = []
     kis_api = KISApi()
-    
+
     try:
         for theme in themes:
             theme_name = theme.get("name", "Unknown")
             stocks = theme_stocks.get(theme_name, [])
-            
+
             if not stocks:
                 logger.warning(f"[{theme_name}] 종목 목록이 없습니다")
                 continue
-            
-            candidates = screen_stocks_in_theme(
-                theme=theme,
-                stock_codes=stocks,
-                max_stocks=max_per_theme,
-                kis_api=kis_api
-            )
-            
-            all_candidates.extend(candidates)
+
+            try:
+                candidates, screening_logs = screen_stocks_in_theme(
+                    theme=theme,
+                    stock_codes=stocks,
+                    max_stocks=max_per_theme,
+                    kis_api=kis_api
+                )
+                all_candidates.extend(candidates)
+                all_screening_logs.extend(screening_logs)
+            except Exception as e:
+                logger.error(f"[{theme_name}] 테마 스크리닝 실패, 건너뜀: {e}")
+                continue
         
         # 전체 점수 순 정렬
         all_candidates.sort(key=lambda x: x.get("final_score", 0), reverse=True)
@@ -224,8 +247,8 @@ def screen_all_themes(
         
     finally:
         kis_api.close()
-    
-    return unique_candidates
+
+    return unique_candidates, all_screening_logs
 
 
 def screen_with_mock_data(
@@ -427,6 +450,7 @@ def run_daily_screening(
     for t in themes:
         logger.info(f"  - {t.get('name')} ({t.get('total_score', t.get('score', 0)):.1f}점)")
     
+    screening_logs = []
     try:
         if use_mock:
             # 모의 데이터로 스크리닝 (테스트용)
@@ -449,7 +473,7 @@ def run_daily_screening(
                     # URL이 없으면 빈 리스트
                     theme_stocks[theme_name] = []
             
-            candidates = screen_all_themes(
+            candidates, screening_logs = screen_all_themes(
                 themes=themes,
                 theme_stocks=theme_stocks,
                 max_per_theme=max_per_theme,
@@ -460,31 +484,39 @@ def run_daily_screening(
         candidates = [c for c in candidates if c.get("final_score", 0) >= MIN_FINAL_SCORE]
         
         # DB 저장
-        if save_to_db and candidates:
+        if save_to_db:
             try:
                 from database import get_database
-                
+
                 db = get_database()
-                
-                stocks_to_save = [
-                    {
-                        "stock_code": c.get("code"),
-                        "stock_name": c.get("name"),
-                        "theme": c.get("theme"),
-                        "supply_score": c.get("supply_score"),
-                        "technical_score": c.get("technical_score"),
-                        "ai_sentiment": c.get("ai_sentiment"),
-                        "final_score": c.get("final_score"),
-                        "selected": True
-                    }
-                    for c in candidates
-                ]
-                
-                db.save_screened_stocks(stocks_to_save, now_kst().date())
+
+                if candidates:
+                    stocks_to_save = [
+                        {
+                            "stock_code": c.get("code"),
+                            "stock_name": c.get("name"),
+                            "theme": c.get("theme"),
+                            "supply_score": c.get("supply_score"),
+                            "technical_score": c.get("technical_score"),
+                            "ai_sentiment": c.get("ai_sentiment"),
+                            "final_score": c.get("final_score"),
+                            "selected": True
+                        }
+                        for c in candidates
+                    ]
+                    db.save_screened_stocks(stocks_to_save, now_kst().date())
+
+                # screening_log는 candidates 유무와 관계없이 저장
+                for log in screening_logs:
+                    try:
+                        db.save_screening_log(log)
+                    except Exception as log_err:
+                        logger.debug(f"screening_log 저장 실패: {log_err}")
+
                 db.close()
-                
-                logger.info(f"💾 스크리닝 결과 DB 저장 완료")
-                
+
+                logger.info(f"💾 스크리닝 결과 DB 저장 완료 (screening_log {len(screening_logs)}건)")
+
             except Exception as e:
                 logger.error(f"DB 저장 실패: {e}")
         

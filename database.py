@@ -1100,7 +1100,7 @@ class Database:
         """스크리닝 로그 저장"""
         with self.get_cursor() as cursor:
             cursor.execute("""
-                INSERT OR REPLACE INTO screening_log (
+                INSERT OR IGNORE INTO screening_log (
                     date, stock_code, stock_name, theme, stage,
                     passed, score, reject_reason, details_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
