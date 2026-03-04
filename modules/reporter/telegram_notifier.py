@@ -70,6 +70,7 @@ class TelegramNotifier:
         self._listening = False
         self._rate_limit: dict[int, float] = {}  # chat_id → last command timestamp
         self._rate_limit_seconds = 5
+        self._system_ref = None  # main.py TradingSystem 참조 (pause/resume용)
 
         if self._enabled:
             logger.info("텔레그램 알림 초기화 완료")
@@ -368,10 +369,11 @@ class TelegramNotifier:
 
     def send_post_trade_report(self, results: list[dict]) -> bool:
         """
-        매매 사후 분석 결과 알림
+        매매 사후 분석 결과 알림 (정량 데이터 포함)
 
         Args:
             results: PostTradeAnalyzer.run_daily_analysis() 반환값
+                     각 항목에 post_prices(D+1~D+5 주가 리스트), sell_price 포함
 
         Returns:
             전송 성공 여부
@@ -382,16 +384,55 @@ class TelegramNotifier:
         text = f"🔍 *매매 사후 분석*\n📅 {now_kst().strftime('%Y-%m-%d')}\n\n"
 
         for r in results[:5]:
-            pnl_emoji = "🔺" if (r.get("profit_rate") or 0) >= 0 else "🔻"
+            profit_rate = r.get("profit_rate") or 0
+            pnl_emoji = "🔺" if profit_rate >= 0 else "🔻"
             score = r.get("timing_score", 5)
             score_bar = "⭐" * min(score // 2, 5)
 
             text += (
                 f"{pnl_emoji} *{r.get('stock_name', '')}* ({r.get('stock_code', '')})\n"
-                f"  수익률: {r.get('profit_rate', 0):+.1f}% | 사유: {r.get('sell_reason', '')}\n"
-                f"  타이밍: {score}/10 {score_bar}\n"
-                f"  평가: {r.get('overall', 'N/A')}\n"
-                f"  교훈: {r.get('lesson', 'N/A')}\n\n"
+                f"  수익률: {profit_rate:+.1f}% | 사유: {r.get('sell_reason', '')}\n"
+            )
+
+            # 정량 데이터: 매도 후 주가 추이
+            prices = r.get("post_prices") or []
+            sell_price = r.get("sell_price") or 0
+
+            if prices and sell_price > 0:
+                # D+5 종가 (마지막 데이터)
+                last = prices[-1]
+                d5_close = last.get("close_price", 0)
+                d5_change = last.get("change_from_sell", 0)
+
+                # D+1~D+5 중 최고가/최저가
+                max_high = max((p.get("high_price", 0) for p in prices), default=0)
+                min_low = min((p.get("low_price", 0) for p in prices if p.get("low_price", 0) > 0), default=0)
+                max_high_chg = ((max_high - sell_price) / sell_price * 100) if max_high > 0 else 0
+                min_low_chg = ((min_low - sell_price) / sell_price * 100) if min_low > 0 else 0
+
+                # 방향 판단
+                if d5_change > 2:
+                    trend = "↗️ 상승"
+                elif d5_change < -2:
+                    trend = "↘️ 하락"
+                else:
+                    trend = "➡️ 횡보"
+
+                text += f"  매도가: {sell_price:,.0f}원 → D+{last['days_after_sell']}: {d5_close:,.0f}원 ({d5_change:+.1f}%) {trend}\n"
+                text += f"  D+5 최고: {max_high:,.0f}원 ({max_high_chg:+.1f}%) | 최저: {min_low:,.0f}원 ({min_low_chg:+.1f}%)\n"
+
+                # 일별 추이 요약 (D+1, D+3, D+5 또는 있는 데이터만)
+                trail_parts = []
+                for p in prices:
+                    day = p["days_after_sell"]
+                    chg = p.get("change_from_sell", 0)
+                    trail_parts.append(f"D+{day} {chg:+.1f}%")
+                text += f"  추이: {' → '.join(trail_parts)}\n"
+
+            lesson_safe = (r.get('lesson', 'N/A') or 'N/A').replace('_', '\\_').replace('`', "'")
+            text += (
+                f"  타이밍: {score}/10 {score_bar} | 평가: {r.get('overall', 'N/A')}\n"
+                f"  교훈: {lesson_safe}\n\n"
             )
 
         if len(results) > 5:
@@ -669,10 +710,22 @@ class TelegramNotifier:
                         if cmd == "/portfolio":
                             logger.info(f"📱 /portfolio 명령어 수신 (chat_id={chat_id})")
                             await self._handle_portfolio_command(chat_id)
+                        elif cmd == "/pause":
+                            logger.info(f"📱 /pause 명령어 수신 (chat_id={chat_id})")
+                            self._handle_pause_command(chat_id)
+                        elif cmd == "/resume":
+                            logger.info(f"📱 /resume 명령어 수신 (chat_id={chat_id})")
+                            self._handle_resume_command(chat_id)
+                        elif cmd == "/status":
+                            logger.info(f"📱 /status 명령어 수신 (chat_id={chat_id})")
+                            self._handle_status_command(chat_id)
                         elif cmd in ("/help", "/start"):
                             self._send_to_chat(chat_id,
                                 "📋 사용 가능한 명령어\n\n"
                                 "/portfolio - 보유 종목 실시간 수익률\n"
+                                "/pause - 매매 일시정지 (모니터링/데이터수집 유지)\n"
+                                "/resume - 매매 재개\n"
+                                "/status - 시스템 상태 확인\n"
                                 "/help - 명령어 목록"
                             )
 
@@ -686,6 +739,66 @@ class TelegramNotifier:
                     await asyncio.sleep(5)
 
         logger.info("📱 텔레그램 명령어 리스너 종료")
+
+    def _handle_pause_command(self, chat_id: int) -> None:
+        """/pause 명령어 처리 — 매매 일시정지"""
+        if not self._system_ref:
+            self._send_to_chat(chat_id, "시스템 참조 없음")
+            return
+        if self._system_ref.trading_paused:
+            self._send_to_chat(chat_id, "⏸️ 이미 일시정지 상태입니다.\n/resume 으로 재개")
+            return
+        self._system_ref.trading_paused = True
+        logger.info("⏸️ 매매 일시정지 활성화 (텔레그램 명령)")
+        self._send_to_chat(chat_id,
+            "⏸️ 매매 일시정지 활성화\n\n"
+            "중단 항목:\n"
+            "  • 08:30 테마 분석\n"
+            "  • 09:05 종목 스크리닝\n"
+            "  • 09:25 자동 매수\n\n"
+            "유지 항목:\n"
+            "  • 보유 종목 모니터링 (손절/트레일링)\n"
+            "  • 17:05 일별 테마 수집\n"
+            "  • 일일 리포트/사후 분석\n\n"
+            "/resume 으로 매매 재개"
+        )
+
+    def _handle_resume_command(self, chat_id: int) -> None:
+        """/resume 명령어 처리 — 매매 재개"""
+        if not self._system_ref:
+            self._send_to_chat(chat_id, "시스템 참조 없음")
+            return
+        if not self._system_ref.trading_paused:
+            self._send_to_chat(chat_id, "▶️ 이미 정상 운영 중입니다.")
+            return
+        self._system_ref.trading_paused = False
+        logger.info("▶️ 매매 재개 (텔레그램 명령)")
+        self._send_to_chat(chat_id, "▶️ 매매 재개 완료!\n\n다음 스케줄부터 정상 매매합니다.")
+
+    def _handle_status_command(self, chat_id: int) -> None:
+        """/status 명령어 처리 — 시스템 상태 확인"""
+        status = "⏸️ 일시정지" if (self._system_ref and self._system_ref.trading_paused) else "▶️ 정상 운영"
+        positions = 0
+        try:
+            from database import Database
+            db = Database()
+            db.connect()
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM portfolio WHERE status='holding'")
+                positions = cursor.fetchone()[0]
+            finally:
+                db.close()
+        except Exception:
+            pass
+        self._send_to_chat(chat_id,
+            f"📊 시스템 상태\n\n"
+            f"상태: {status}\n"
+            f"보유 종목: {positions}개\n"
+            f"시각: {now_kst().strftime('%H:%M KST')}\n\n"
+            f"/pause - 매매 정지\n"
+            f"/resume - 매매 재개"
+        )
 
     async def _handle_portfolio_command(self, chat_id: int) -> None:
         """

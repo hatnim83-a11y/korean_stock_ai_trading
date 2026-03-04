@@ -230,10 +230,12 @@ class PostTradeAnalyzer:
                     "stock_name": stock_name,
                     "stock_code": stock_code,
                     "profit_rate": review.get("profit_rate", 0),
+                    "sell_price": sell_price,
                     "sell_reason": review.get("sell_reason", ""),
                     "timing_score": ai_result.get("timing_score", 5),
                     "lesson": lesson,
                     "overall": ai_result.get("overall_assessment", "Neutral"),
+                    "post_prices": prices,
                 })
                 logger.info(
                     f"[PostTradeAnalyzer] 분석 완료: {stock_name} "
