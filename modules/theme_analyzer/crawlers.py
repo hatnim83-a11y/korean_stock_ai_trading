@@ -42,11 +42,16 @@ from logger import logger
 # ===== 상수 정의 =====
 # 크롤링 시 사용할 User-Agent (브라우저처럼 보이게)
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
     "Referer": "https://www.google.com/"
 }
 
@@ -400,76 +405,84 @@ def crawl_krx_themes() -> list[dict]:
 
 def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
     """
-    특정 테마의 최근 N일 뉴스 언급 횟수 조회
-    
-    네이버 뉴스 검색을 통해 테마 관련 뉴스 개수를 파악합니다.
-    
+    특정 테마의 최근 N일 뉴스 언급 횟수 조회 (네이버 Open API)
+
     Args:
         theme_name: 테마명 (예: "2차전지")
         days: 조회할 일수 (기본 3일)
-    
+
     Returns:
         뉴스 언급 횟수
-        
-    Example:
-        >>> count = crawl_theme_news_count("2차전지", days=3)
-        >>> print(count)
-        127
     """
+    from config import settings
+
+    client_id = settings.NAVER_CLIENT_ID
+    client_secret = settings.NAVER_CLIENT_SECRET
+
+    if not client_id or not client_secret:
+        logger.warning(f"[{theme_name}] 네이버 API 키 미설정 — 스크래핑 fallback")
+        return _crawl_theme_news_count_scrape(theme_name, days)
+
     try:
-        # 네이버 뉴스 검색 URL
-        # 날짜 필터: ds (시작일), de (종료일)
+        search_query = f"{theme_name} 주식"
+        url = "https://openapi.naver.com/v1/search/news.json"
+        headers = {
+            "X-Naver-Client-Id": client_id,
+            "X-Naver-Client-Secret": client_secret,
+        }
+        params = {
+            "query": search_query,
+            "display": 1,
+            "sort": "date",
+        }
+
+        response = httpx.get(url, headers=headers, params=params, timeout=10.0)
+        response.raise_for_status()
+
+        data = response.json()
+        count = data.get("total", 0)
+        logger.debug(f"[{theme_name}] 뉴스 {count}건 (API)")
+        return count
+
+    except Exception as e:
+        logger.warning(f"[{theme_name}] 뉴스 API 조회 실패: {e}")
+        return 0
+
+
+def _crawl_theme_news_count_scrape(theme_name: str, days: int = 3) -> int:
+    """네이버 API 키 없을 때 스크래핑 fallback"""
+    try:
         today = now_kst()
         start_date = (today - timedelta(days=days)).strftime("%Y.%m.%d")
         end_date = today.strftime("%Y.%m.%d")
-        
-        # 증권/주식 관련 키워드 추가
+
         search_query = f"{theme_name} 주식"
-        
         url = "https://search.naver.com/search.naver"
         params = {
             "where": "news",
             "query": search_query,
             "sm": "tab_opt",
-            "sort": "1",  # 최신순
+            "sort": "1",
             "ds": start_date,
             "de": end_date,
             "nso": f"so:dd,p:from{start_date.replace('.', '')}to{end_date.replace('.', '')}"
         }
-        
+
+        news_headers = {**DEFAULT_HEADERS, "Referer": "https://www.naver.com/"}
         response = httpx.get(
-            url,
-            params=params,
-            headers=DEFAULT_HEADERS,
-            timeout=10.0,
-            follow_redirects=True
+            url, params=params, headers=news_headers,
+            timeout=10.0, follow_redirects=True
         )
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, "lxml")
-        
-        # 검색 결과 수 추출
-        # "뉴스 약 1,234건" 형태로 표시됨
-        result_info = soup.find("div", class_="title_desc")
-        if result_info:
-            text = result_info.get_text()
-            # 숫자 추출
-            import re
-            numbers = re.findall(r"[\d,]+", text)
-            if numbers:
-                count = _safe_int(numbers[0])
-                logger.debug(f"[{theme_name}] 뉴스 {count}건")
-                return count
-        
-        # 뉴스 아이템 수로 대략 추정 (검색 결과가 없는 경우)
+
         news_items = soup.select(".news_area, .bx, .list_news li")
         count = len(news_items)
-        
-        logger.debug(f"[{theme_name}] 뉴스 약 {count}건 (추정)")
+        logger.debug(f"[{theme_name}] 뉴스 약 {count}건 (스크래핑)")
         return count
-        
+
     except Exception as e:
-        logger.warning(f"[{theme_name}] 뉴스 카운트 조회 실패: {e}")
+        logger.warning(f"[{theme_name}] 뉴스 스크래핑 실패: {e}")
         return 0
 
 
@@ -870,15 +883,24 @@ def crawl_all_themes() -> list[dict]:
         theme_name = predef["name"]
         aliases = predef.get("naver_aliases", [])
 
-        # 이미 수집된 테마면 스킵 (정규화된 이름 기준 정확 매칭)
+        # 이미 수집된 테마면 category/keywords만 보강하고 스킵
         already_collected = theme_name in collected_names
+        matched_alias = None
         if not already_collected and aliases:
             for alias in aliases:
-                if alias in collected_names or normalize_theme_name(alias) in collected_names:
+                if alias in collected_names:
                     already_collected = True
+                    matched_alias = alias
                     break
         if already_collected:
-            logger.debug(f"[{theme_name}] 이미 수집됨 - 스킵")
+            # 기존 테마에 category/keywords 보강 (네이버 원본에는 없으므로)
+            match_name = matched_alias or theme_name
+            for t in all_themes:
+                if t["name"] == match_name:
+                    t["category"] = predef.get("category", "기타")
+                    t["keywords"] = predef.get("keywords", [])
+                    break
+            logger.debug(f"[{theme_name}] 이미 수집됨 - category 보강")
             continue
 
         # 네이버에서 검색하여 실제 데이터 가져오기 (별칭 포함)

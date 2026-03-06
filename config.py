@@ -123,6 +123,16 @@ class Settings(BaseSettings):
         description="텔레그램 채팅 ID"
     )
     
+    # ===== Naver Open API (뉴스 검색) =====
+    NAVER_CLIENT_ID: str = Field(
+        default="",
+        description="네이버 Open API Client ID"
+    )
+    NAVER_CLIENT_SECRET: str = Field(
+        default="",
+        description="네이버 Open API Client Secret"
+    )
+
     # ===== DART API (공시 정보) =====
     DART_API_KEY: str = Field(
         default="",

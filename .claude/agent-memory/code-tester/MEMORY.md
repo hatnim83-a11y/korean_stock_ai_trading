@@ -85,5 +85,22 @@
 - WAL 모드 DB 복사: `.db`, `.db-wal`, `.db-shm` 3파일 항상 확인
 - datetime.utcnow() in JWT create_token: jose exp은 UTC 기준으로 올바름 (now_kst 교체 금지)
 
+### pause/resume 기능 (2026-03-04 초기, 2026-03-06 최종 확인)
+- `trading_paused` bool 플래그: asyncio 단일 스레드 → GIL 하에서 bool 대입은 원자적, 스레드 안전
+- `_system_ref` 설정 순서: `start()` 내 scheduler.start() → `_system_ref = self` → listener task 순서 OK
+- **수정 완료 (2026-03-06)**: `_handle_status_command` → `Database()` 별도 인스턴스 사용 확인
+- **수정 완료 (2026-03-06)**: SQL `status='holding'` 사용 확인 (이전 'active' 버그 수정됨)
+- `/pause`/`/resume`/`/status` 핸들러가 sync `def` → `start_command_listener` 내 `await` 없이 직접 호출 (정상)
+
+### 종목 목록 보충 로직 (2026-03-06, main.py line 334-352)
+- `crawl_all_themes()` 반환 키: `name`, `url`, `stock_count`, `avg_change_rate` 등 — `stocks` 키 없음
+- `matched.get("stocks", [])` → 항상 `[]` 반환, 로그에 "0종목 보충" 표시 (기능 무관, 오해 소지)
+- `run_daily_screening`은 `theme.get("url")`에서 직접 `crawl_naver_theme_stocks(url)` 호출
+  → screener는 `stocks` 키를 사용하지 않으므로 기능 정상
+- `asyncio.to_thread(crawl_all_themes)` 올바름 (동기 함수 확인됨, Python 3.10)
+- import path `from modules.theme_analyzer import crawl_all_themes` → `__init__.py`에 export 확인됨
+- 조건 `if not any(t.get("url") or t.get("stocks") for t in self.today_themes)`: `stocks` 조건 불필요 (항상 없음)
+  → 실질적으로 `if not any(t.get("url") for t in ...)` 와 동일
+
 ### 상세 히스토리
 - 파일: `.claude/agent-memory/code-tester/review-history.md`

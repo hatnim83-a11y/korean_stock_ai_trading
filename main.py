@@ -129,6 +129,7 @@ class TradingSystem:
         self._observer_task = None                  # 관찰 비동기 태스크
         self._listener_task = None                  # 텔레그램 명령어 리스너 태스크
         self._last_theme_rotation_date: Optional[date] = None  # 7일 고정 로테이션
+        self.trading_paused = False  # 텔레그램 /pause로 매매 일시정지
 
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -197,7 +198,8 @@ class TradingSystem:
         # 스케줄러 시작
         self.scheduler.start()
 
-        # 텔레그램 명령어 리스너 시작
+        # 텔레그램 명령어 리스너 시작 (시스템 참조 연결)
+        self.notifier._system_ref = self
         self._listener_task = asyncio.create_task(self.notifier.start_command_listener())
 
         logger.info("\n✅ 시스템 시작 완료")
@@ -308,22 +310,46 @@ class TradingSystem:
         Returns:
             테마 분석 결과
         """
+        if self.trading_paused:
+            logger.info("⏸️ 매매 일시정지 중 — 테마 분석 스킵")
+            self.notifier.send_message("⏸️ 08:30 테마 분석 스킵 (매매 일시정지 중)\n/resume 으로 재개")
+            return {"success": True, "paused": True}
+
         logger.info("=" * 70)
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
 
-        # 기존 테마가 있고, 이번 주 화요일에 이미 선정했으면 재사용
-        # (화요일 휴장 시 수요일이 첫 거래일 → 그 주 첫 거래일에 재선정)
+        # 기존 테마가 있고, 이번 주에 이미 선정했으면 재사용
+        # (DB 복원 테마는 url이 없을 수 있으므로 url 체크 제거)
         if self.today_themes and self._last_theme_rotation_date:
             today = now_kst().date()
             last_iso = self._last_theme_rotation_date.isocalendar()
             today_iso = today.isocalendar()
             same_week = (last_iso[1] == today_iso[1] and last_iso[0] == today_iso[0])
-            themes_have_url = all(t.get("url") for t in self.today_themes)
-            if same_week and themes_have_url:
+            if same_week:
                 logger.info(
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
                 )
+
+                # DB 복원 테마에 종목 목록이 없으면 크롤링으로 보충
+                if not any(t.get("url") for t in self.today_themes):
+                    logger.info("   종목 URL 없음 → 크롤링으로 보충")
+                    try:
+                        from modules.theme_analyzer import crawl_all_themes
+                        all_crawled = await asyncio.to_thread(crawl_all_themes)
+                        crawled_map = {t["name"]: t for t in all_crawled}
+                        for t in self.today_themes:
+                            t_name = t.get("theme", t.get("name", ""))
+                            if t_name in crawled_map:
+                                matched = crawled_map[t_name]
+                                t["url"] = matched.get("url", "")
+                                t["stock_count"] = matched.get("stock_count", 0)
+                                logger.info(f"   ✓ [{t_name}] url 보충 완료 ({t['stock_count']}종목)")
+                            else:
+                                logger.warning(f"   ✗ [{t_name}] 크롤링 결과에 미발견")
+                    except Exception as e:
+                        logger.error(f"   종목 URL 보충 실패: {e}")
+
                 for t in self.today_themes:
                     t_name = t.get("theme", t.get("name", ""))
                     t_score = t.get("score", 0)
@@ -339,7 +365,8 @@ class TradingSystem:
                 for i, t in enumerate(self.today_themes, 1):
                     t_name = t.get("theme", t.get("name", ""))
                     t_score = t.get("score", 0)
-                    theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점) 📌유지")
+                    stock_cnt = len(t.get("stocks", []))
+                    theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점, {stock_cnt}종목) 📌유지")
                 self.notifier.send_message(
                     f"📊 08:30 테마 분석\n\n"
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)\n"
@@ -476,7 +503,9 @@ class TradingSystem:
             if is_emergency:
                 msg += f"⚡ 긴급 테마 변경! (사유: {reason})\n\n"
             elif had_previous:
-                msg += f"🔄 화요일 — 주간 테마 재선정\n\n"
+                day_names = ["월", "화", "수", "목", "금", "토", "일"]
+                today_day = day_names[now_kst().weekday()]
+                msg += f"🔄 {today_day}요일 — 주간 테마 재선정\n\n"
             else:
                 msg += f"🎯 신규 테마 선정: {len(themes)}개\n\n"
 
@@ -549,6 +578,11 @@ class TradingSystem:
         Returns:
             스크리닝 결과
         """
+        if self.trading_paused:
+            logger.info("⏸️ 매매 일시정지 중 — 종목 스크리닝 스킵")
+            self.notifier.send_message("⏸️ 09:05 스크리닝 스킵 (일시정지 중)")
+            return {"success": True, "paused": True}
+
         logger.info("=" * 70)
         logger.info("🔍 종목 스크리닝 시작 (09:05, 장 시작 후)")
         logger.info("=" * 70)
@@ -716,6 +750,11 @@ class TradingSystem:
         Returns:
             실행 결과
         """
+        if self.trading_paused:
+            logger.info("⏸️ 매매 일시정지 중 — 매수 스킵")
+            self.notifier.send_message("⏸️ 09:25 매수 스킵 (일시정지 중)")
+            return {"success": True, "paused": True}
+
         logger.info("=" * 70)
         logger.info("💰 빈 슬롯 매수 실행 (09:25)")
         logger.info("=" * 70)

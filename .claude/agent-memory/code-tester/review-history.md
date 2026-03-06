@@ -8,6 +8,7 @@
 - telegram_notifier.py + main.py: 실현 손익 기능 추가 (2026-02-23) — 주의 1건(float 포맷), 참고 1건, 배포 가능
 - main.py + kis_api.py: 상세 매수 리포트 기능 추가 (2026-02-24) — 주의 1건(market order price=0), 참고 2건, 배포 가능
 - 보안 취약점 개선 (2026-02-24) — 주의 2건, 참고 2건, 배포 가능
+- analyzer.py + telegram_notifier.py: post_trade 정량 데이터 추가 (2026-03-04) — 주의 1건(Markdown 특수문자), 참고 2건, 배포 가능
 - web/ 대시보드 신규 (2026-02-24) — 주의 5건, 참고 4건, 수정 후 배포
 - kis_websocket.py + dashboard_service.py (2026-02-25) — 참고 2건, 배포 가능
 - portfolio_monitor_v2.py: buy_date 폴백 + _restore_trailing_state 추가 (2026-02-26) — 주의 2건, 참고 1건, 수정 후 배포
@@ -19,6 +20,7 @@
 - 테마 파이프라인 리뷰 (2026-02-27) — 심각 1건(url 키 누락), 주의 1건, 배포 보류
 - 테마 로테이션 월요일 기반 전환 (2026-02-27) — 주의 1건(ISO week 연말 edge case), 참고 2건, 배포 가능
 - datetime 버그 수정 + 휴장일 체크 추가 (2026-03-02) — 주의 3건, 참고 3건, 배포 가능
+- main.py + crawlers.py + telegram_notifier.py: 종목 목록 보충 + pause 기능 + 헤더 업데이트 (2026-03-06) — 주의 1건(stocks 키 없음→로그 오표시), 참고 1건, 배포 가능
 
 ## 주요 구조적 버그 (수정 완료)
 1. partial_X_executed 재시작 후 초기화 → 이중 매도: DB position_state에 partial 상태 저장으로 수정됨
