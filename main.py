@@ -296,6 +296,7 @@ class TradingSystem:
         self.scheduler.on_post_trade_analysis = self.run_post_trade_analysis  # 17:00 사후 분석
         self.scheduler.on_daily_theme_collection = self.run_daily_theme_collection  # 17:05 일별 테마 수집
         self.scheduler.on_weekly_trade_review = self.run_weekly_trade_review  # 금 17:30 주간 복기
+        self.scheduler.on_daily_health_check = self.run_daily_health_check  # 16:10 헬스체크
 
     # ===== 08:30 테마 분석 (장 시작 전) =====
 
@@ -763,7 +764,7 @@ class TradingSystem:
         if self._observer_task and not self._observer_task.done():
             logger.info("⏳ 관찰 완료 대기 중...")
             try:
-                await asyncio.wait_for(self._observer_task, timeout=30)
+                await asyncio.wait_for(self._observer_task, timeout=settings.MORNING_OBSERVATION_MINUTES * 60)
             except asyncio.TimeoutError:
                 logger.warning("관찰 타임아웃 - 가용 데이터로 진행")
 
@@ -1286,12 +1287,18 @@ class TradingSystem:
         logger.info("장 마감 정리")
 
         # 미체결 주문 취소
-        self.trading_engine.cancel_all_pending()
+        try:
+            self.trading_engine.cancel_all_pending()
+        except Exception as e:
+            logger.error(f"미체결 취소 실패: {e}")
 
         # 포트폴리오 현황 출력
-        if self.monitor:
-            self.monitor.display_status()
-            self.monitor._update_db_prices()  # 최신 가격 DB 반영 후 스냅샷
+        try:
+            if self.monitor:
+                self.monitor.display_status()
+                self.monitor._update_db_prices()
+        except Exception as e:
+            logger.error(f"포지션 상태 갱신 실패: {e}")
 
         # 일일 스냅샷 저장
         self._save_daily_snapshot()
@@ -1395,24 +1402,27 @@ class TradingSystem:
             balance = self.trading_engine.get_balance()
             positions = balance.get("positions", [])
 
-            # 성과 지표
-            calc = PerformanceCalculator()
-            metrics = {
-                "sharpe_ratio": 0,
-                "mdd": 0,
-                "win_rate": 0,
-                "total_return": 0
-            }
-
-            # 전체 매도 기록 조회 (실현 손익)
+            # 전체 매도 기록 및 스냅샷 조회
             db = Database()
             db.connect()
             try:
                 realized_trades = db.get_all_sell_trades()
-                # 전략별 성과 집계 (trade_reviews 기반)
+                snapshots = db.get_daily_snapshots(days=90)
                 self._aggregate_strategy_stats(db)
             finally:
                 db.close()
+
+            # 성과 지표 계산
+            calc = PerformanceCalculator()
+            portfolio_values = [
+                {"date": s["date"], "value": s.get("total_capital", settings.TOTAL_CAPITAL)}
+                for s in reversed(snapshots)
+            ] if snapshots else []
+            metrics = calc.calculate_all_metrics(
+                trades=realized_trades,
+                portfolio_values=portfolio_values,
+                initial_capital=settings.TOTAL_CAPITAL
+            )
 
             # 리포트 전송
             self.notifier.send_daily_report(
@@ -1597,6 +1607,141 @@ class TradingSystem:
         except Exception as e:
             logger.error(f"전략별 성과 집계 실패: {e}")
     
+    # ===== 16:10 일일 시스템 헬스체크 =====
+
+    async def run_daily_health_check(self) -> None:
+        """일일 시스템 상태 점검 및 텔레그램 보고 (16:10)"""
+        logger.info("=" * 60)
+        logger.info("🏥 일일 시스템 헬스체크 (16:10)")
+        logger.info("=" * 60)
+
+        try:
+            issues = []
+            info_lines = []
+            today_str = str(now_kst().date())
+
+            # 1. 프로세스 상태
+            import os
+            pid = os.getpid()
+            info_lines.append(f"PID: {pid}")
+
+            # 2. DB 상태
+            db = Database()
+            db.connect()
+            try:
+                # 보유 포지션
+                holdings = db.get_portfolio(status="holding")
+                info_lines.append(f"보유종목: {len(holdings)}개")
+                for h in holdings:
+                    prate = h.get("profit_rate", 0) or 0
+                    info_lines.append(f"  {h['stock_name']} {prate:+.1f}%")
+
+                # 오늘 매매
+                today_trades = db.get_trades(now_kst().date())
+                buys = [t for t in today_trades if t.get("action") == "buy"]
+                sells = [t for t in today_trades if t.get("action") == "sell"]
+                info_lines.append(f"오늘 매매: 매수 {len(buys)}건, 매도 {len(sells)}건")
+
+                # 실현 손익
+                if sells:
+                    realized = sum(t.get("profit_amount", 0) or 0 for t in sells)
+                    info_lines.append(f"실현 손익: {realized:+,.0f}원")
+
+                # 테마 데이터 수집 확인 (전일분 — 당일 17:05는 아직 미실행)
+                cursor = db.conn.cursor()
+                yesterday_str = str((now_kst() - timedelta(days=1)).date())
+                cursor.execute(
+                    "SELECT COUNT(*) FROM themes WHERE date = ?", (yesterday_str,)
+                )
+                theme_count = cursor.fetchone()[0]
+                if theme_count > 0:
+                    info_lines.append(f"테마 수집(전일): {theme_count}개 저장됨")
+                else:
+                    # 월요일이면 금요일 확인
+                    if now_kst().weekday() == 0:
+                        info_lines.append("테마 수집: 주말 미실행 (정상)")
+                    else:
+                        issues.append(f"테마 수집 미확인 ({yesterday_str})")
+
+                # 스냅샷 확인
+                cursor.execute(
+                    "SELECT COUNT(*) FROM daily_snapshots WHERE date = ?", (today_str,)
+                )
+                snap = cursor.fetchone()[0]
+                if snap == 0:
+                    issues.append("일일 스냅샷 미저장")
+
+                # screening_log 확인
+                cursor.execute(
+                    "SELECT COUNT(*) FROM screening_log WHERE date = ?", (today_str,)
+                )
+                screen_count = cursor.fetchone()[0]
+                info_lines.append(f"스크리닝 로그: {screen_count}건")
+
+            finally:
+                db.close()
+
+            # 3. API 연결 상태
+            # KIS API
+            try:
+                bal = self.trading_engine.get_balance()
+                if bal:
+                    cash = bal.get("cash", 0)
+                    info_lines.append(f"KIS API: 정상 (가용현금: {cash:,.0f}원)")
+                else:
+                    issues.append("KIS API: 응답 없음")
+            except Exception as e:
+                issues.append(f"KIS API: {str(e)[:40]}")
+
+            # Telegram (이미 보내고 있으면 정상)
+            info_lines.append("Telegram: 정상 (이 메시지 수신 시)")
+
+            # 4. pause 상태
+            if self.trading_paused:
+                info_lines.append("매매 상태: ⏸️ 일시정지")
+            else:
+                info_lines.append("매매 상태: ▶️ 활성")
+
+            # 5. 테마 정보
+            if self.today_themes:
+                theme_names = [t.get("theme", t.get("name", "?")) for t in self.today_themes]
+                info_lines.append(f"활성 테마: {', '.join(theme_names)}")
+            else:
+                issues.append("활성 테마 없음")
+
+            # 6. 스케줄러 상태
+            if self.scheduler.is_running:
+                jobs = self.scheduler.scheduler.get_jobs()
+                info_lines.append(f"스케줄러: 정상 ({len(jobs)}개 작업)")
+            else:
+                issues.append("스케줄러 중지됨")
+
+            # 보고서 작성
+            status = "⚠️ 이상 발견" if issues else "✅ 정상"
+            msg = f"🏥 *일일 헬스체크* ({now_kst().strftime('%m/%d %H:%M')})\n\n"
+            msg += f"상태: {status}\n\n"
+
+            msg += "📊 *시스템 정보*\n"
+            for line in info_lines:
+                msg += f"  {line}\n"
+
+            if issues:
+                msg += f"\n⚠️ *이상 항목* ({len(issues)}건)\n"
+                for issue in issues:
+                    msg += f"  • {issue}\n"
+            else:
+                msg += "\n모든 항목 정상 운영 중"
+
+            self.notifier.send_message(msg)
+            logger.info(f"헬스체크 완료: {status} ({len(issues)}건 이상)")
+
+        except Exception as e:
+            logger.error(f"헬스체크 실패: {e}")
+            try:
+                self.notifier.send_message(f"🏥 헬스체크 실패: {e}")
+            except Exception:
+                pass
+
     # ===== 수동 실행 =====
 
     async def run_manual_analysis(self) -> dict:

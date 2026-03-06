@@ -94,6 +94,7 @@ class TradingScheduler:
         self.on_post_trade_analysis: Optional[Callable] = None  # 17:00 매매 사후 분석
         self.on_daily_theme_collection: Optional[Callable] = None  # 17:05 일별 테마 수집
         self.on_weekly_trade_review: Optional[Callable] = None  # 금 17:30 주간 복기
+        self.on_daily_health_check: Optional[Callable] = None  # 16:10 일일 헬스체크
         
         # 이벤트 리스너
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
@@ -186,7 +187,16 @@ class TradingScheduler:
             replace_existing=True
         )
 
-        # 8. 매매 사후 분석 (KST 17:00)
+        # 8. 일일 헬스체크 (KST 16:10)
+        self.scheduler.add_job(
+            self._run_daily_health_check,
+            CronTrigger(hour=16, minute=10, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='daily_health_check',
+            name='일일 헬스체크',
+            replace_existing=True
+        )
+
+        # 9. 매매 사후 분석 (KST 17:00)
         self.scheduler.add_job(
             self._run_post_trade_analysis,
             CronTrigger(hour=17, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
@@ -386,6 +396,18 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"일별 테마 수집 실패: {e}")
             self._send_error_notification("일별 테마 수집", str(e))
+
+    @_skip_on_holiday
+    async def _run_daily_health_check(self) -> None:
+        """16:10 - 일일 시스템 헬스체크"""
+        try:
+            if self.on_daily_health_check:
+                await self.on_daily_health_check()
+            else:
+                logger.warning("일일 헬스체크 콜백 미등록")
+        except Exception as e:
+            logger.error(f"일일 헬스체크 실패: {e}")
+            self._send_error_notification("일일 헬스체크", str(e))
 
     @_skip_on_holiday
     async def _run_weekly_trade_review(self) -> None:
