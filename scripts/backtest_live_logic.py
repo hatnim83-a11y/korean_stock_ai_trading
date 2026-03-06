@@ -184,6 +184,13 @@ class BacktestConfig:
     enable_trailing_after_partial: bool = False
     trailing_after_partial_pct: float = 0.05  # 고점 대비 5%
 
+    # 터틀 트레이딩 옵션
+    turtle_exit: bool = False  # 터틀 청산 (10일 저가 이탈 + 2xATR 손절)
+    no_max_hold: bool = False  # 보유기간 제한 해제
+    pure_turtle: bool = False  # 순수 터틀 (20일 돌파 진입 + ATR 사이징)
+    atr_stop_multiplier: float = 2.0  # ATR 손절 배수
+    turtle_risk_pct: float = 0.01  # 순수 터틀 1유닛 = 자본 1% / ATR
+
     # 기타
     commission: float = 0.00015  # 수수료 0.015%
     slippage: float = 0.001  # 슬리피지 0.1%
@@ -264,6 +271,10 @@ class LiveLogicBacktester:
 
         # 거래량 비율
         df['Volume_Ratio'] = df['Volume'] / df['Volume'].rolling(20).mean()
+
+        # 돌파/이탈 기준 (터틀 트레이딩용)
+        df['High_20'] = df['High'].rolling(20).max()
+        df['Low_10'] = df['Low'].rolling(10).min()
 
         # 수익률
         df['Return_5D'] = df['Close'].pct_change(5) * 100
@@ -433,7 +444,17 @@ class LiveLogicBacktester:
                 continue
 
             # 손절/익절 가격
-            stop_loss = price * (1 + self.config.stop_loss_pct)
+            if self.config.turtle_exit:
+                # 터틀 모드: ATR 기반 손절
+                df = self.price_data.get(stock["code"])
+                if df is not None:
+                    df_until = df[df.index <= pd.Timestamp(date)]
+                    atr_val = float(df_until.iloc[-1]['ATR']) if len(df_until) > 0 and not pd.isna(df_until.iloc[-1]['ATR']) else price * 0.03
+                else:
+                    atr_val = price * 0.03
+                stop_loss = price - self.config.atr_stop_multiplier * atr_val
+            else:
+                stop_loss = price * (1 + self.config.stop_loss_pct)
             take_profit = price * (1 + self.config.take_profit_pct)
 
             position = Position(
@@ -452,6 +473,101 @@ class LiveLogicBacktester:
             self.cash -= actual_amount
 
             logger.debug(f"  📈 매수: {stock['name']} {shares}주 @ {price:,.0f}")
+
+    def execute_pure_turtle_entry(self, date: datetime):
+        """순수 터틀 진입: 20일 고가 돌파 종목 매수 (ATR 사이징)"""
+        if len(self.positions) >= self.config.max_positions:
+            return
+
+        all_symbols = set()
+        for info in THEME_STOCKS.values():
+            all_symbols.update(info["stocks"])
+
+        # 종목명 매핑
+        name_map = {}
+        theme_map = {}
+        for theme, info in THEME_STOCKS.items():
+            for i, sym in enumerate(info["stocks"]):
+                if i < len(info["names"]):
+                    name_map[sym] = info["names"][i]
+                theme_map[sym] = theme
+
+        candidates = []
+        for symbol in sorted(all_symbols):
+            if symbol not in self.price_data:
+                continue
+            if any(p.code == symbol for p in self.positions):
+                continue
+
+            df = self.price_data[symbol]
+            df_until = df[df.index <= pd.Timestamp(date)]
+            if len(df_until) < 21:
+                continue
+
+            latest = df_until.iloc[-1]
+            prev = df_until.iloc[-2]
+
+            close = float(latest['Close'])
+            high_20_prev = float(prev['High_20']) if not pd.isna(prev['High_20']) else None
+            atr = float(latest['ATR']) if not pd.isna(latest['ATR']) else None
+
+            if high_20_prev is None or atr is None or atr <= 0:
+                continue
+
+            # 20일 고가 돌파: 오늘 종가 > 어제까지의 20일 최고가
+            if close > high_20_prev:
+                candidates.append({
+                    "code": symbol,
+                    "name": name_map.get(symbol, symbol),
+                    "theme": theme_map.get(symbol, ""),
+                    "price": close,
+                    "atr": atr,
+                })
+
+        # ATR 기반 포지션 사이징으로 진입
+        for stock in candidates:
+            if len(self.positions) >= self.config.max_positions:
+                break
+
+            price = stock["price"] * (1 + self.config.slippage)
+            atr = stock["atr"]
+
+            # ATR 기반 사이징 (총 자산 기준, 최소 슬롯 배분 보장)
+            total_equity = self.cash + sum(
+                float(self.price_data[p.code][self.price_data[p.code].index <= pd.Timestamp(date)].iloc[-1]['Close']) * p.remaining_shares
+                for p in self.positions if p.code in self.price_data and not self.price_data[p.code][self.price_data[p.code].index <= pd.Timestamp(date)].empty
+            )
+            slots = self.config.max_positions - len(self.positions)
+            max_per_slot = total_equity / max(slots, 1) * 0.95
+            unit_value = total_equity * self.config.turtle_risk_pct / atr
+            # ATR 사이즈가 너무 작으면 슬롯 균등배분으로 보완
+            invest_amount = min(max(unit_value, total_equity * 0.05), max_per_slot)
+            shares = int(invest_amount / price)
+            if shares <= 0:
+                continue
+
+            commission = price * shares * self.config.commission
+            actual_amount = price * shares + commission
+            if actual_amount > self.cash:
+                continue
+
+            # ATR 기반 손절
+            stop_loss = price - self.config.atr_stop_multiplier * atr
+
+            position = Position(
+                code=stock["code"],
+                name=stock["name"],
+                theme=stock["theme"],
+                entry_date=date,
+                entry_price=price,
+                shares=shares,
+                weight=0,
+                stop_loss=stop_loss,
+                take_profit=price * 2,  # 사용 안함
+            )
+            self.positions.append(position)
+            self.cash -= actual_amount
+            logger.debug(f"  📈 터틀매수: {stock['name']} {shares}주 @ {price:,.0f} (ATR={atr:.0f})")
 
     def check_exits(self, date: datetime):
         """청산 조건 체크"""
@@ -482,6 +598,30 @@ class LiveLogicBacktester:
 
             exit_reason = None
             exit_price = current_price
+
+            # ===== 터틀 청산 모드 =====
+            if self.config.turtle_exit:
+                low = float(df_until.iloc[-1]['Low'])
+                # 10일 저가 이탈 청산 (전일 기준 Low_10 사용)
+                if len(df_until) >= 2:
+                    prev_low_10 = df_until.iloc[-2]['Low_10']
+                    if not pd.isna(prev_low_10) and current_price <= float(prev_low_10):
+                        exit_reason = "터틀10일이탈"
+                        exit_price = float(prev_low_10)
+
+                # 2xATR 손절
+                if not exit_reason and low <= pos.stop_loss:
+                    exit_reason = "ATR손절"
+                    exit_price = pos.stop_loss
+
+                # 보유기간 제한 (no_max_hold가 아닐 때만)
+                if not exit_reason and not self.config.no_max_hold:
+                    if holding_days >= self.config.max_holding_days:
+                        exit_reason = "보유기간만료"
+
+                if exit_reason:
+                    positions_to_close.append((pos, exit_price, exit_reason, holding_days))
+                continue  # 터틀 모드면 아래 기존 청산 로직 스킵
 
             # ===== 이익 추종 전략 (Let Profits Run) =====
             if self.config.enable_profit_trailing:
@@ -676,8 +816,12 @@ class LiveLogicBacktester:
             # 청산 조건 체크 (시장 상황과 무관하게 항상 실행)
             self.check_exits(date_dt)
 
-            # 신규 진입 (포지션 여유 있을 때)
-            if len(self.positions) < self.config.max_positions:
+            # 신규 진입
+            if self.config.pure_turtle:
+                # 순수 터틀: 20일 고가 돌파 진입
+                self.execute_pure_turtle_entry(date_dt)
+            elif len(self.positions) < self.config.max_positions:
+                # 테마 기반 진입
                 all_candidates = []
 
                 for theme in current_themes:
@@ -797,8 +941,10 @@ class LiveLogicBacktester:
         print("-" * 60)
         print(f"총 거래 수:    {len(self.trades):>15}회")
         print(f"승률:          {win_rate:>14.1f}%")
+        profit_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
         print(f"평균 수익:     {avg_win:>14.2f}%")
         print(f"평균 손실:     {avg_loss:>14.2f}%")
+        print(f"손익비:        {profit_loss_ratio:>14.2f}")
         print(f"평균 보유일:   {avg_holding:>14.1f}일")
 
         # 청산 사유별 통계
@@ -877,11 +1023,15 @@ def main():
     parser = argparse.ArgumentParser(description="실전 로직 백테스트")
     parser.add_argument("--old-strategy", action="store_true", help="기존 전략 (고정 익절)")
     parser.add_argument("--compare", action="store_true", help="기존 vs 이익추종 비교 실행")
-    parser.add_argument("--test-stoploss", action="store_true", help="손절률 비교 테스트 (-7% vs -5%)")
+    parser.add_argument("--test-stoploss", action="store_true", help="손절률 비교 테스트 (-7%% vs -5%%)")
     parser.add_argument("--test-rotation", action="store_true", help="테마 로테이션 주기 테스트 (14일 vs 7일)")
     parser.add_argument("--test-holding", action="store_true", help="보유기간 비교 테스트 (14일/20일/25일/30일)")
     parser.add_argument("--test-themes", action="store_true", help="테마 수 비교 테스트 (2/3/4/5개)")
     parser.add_argument("--test-stocks", action="store_true", help="테마당 종목 수 비교 테스트 (2/3/4/5개)")
+    parser.add_argument("--compare-turtle", action="store_true", help="4전략 비교: 기존 최적화 vs 터틀청산 vs 터틀무제한 vs 순수터틀")
+    parser.add_argument("--turtle-exit", action="store_true", help="터틀 청산 단독 실행")
+    parser.add_argument("--pure-turtle", action="store_true", help="순수 터틀 단독 실행")
+    parser.add_argument("--no-max-hold", action="store_true", help="보유기간 제한 해제")
     args = parser.parse_args()
 
     # ============================================================
@@ -1474,13 +1624,243 @@ def main():
             improvement = returns[best_stocks] - returns[3]
             print(f"   3개 대비 {improvement:+.2f}% {'개선' if improvement > 0 else '하락'}")
 
+    # ============================================================
+    # 4전략 비교: 기존 최적화 vs 터틀청산 vs 터틀무제한 vs 순수터틀
+    # ============================================================
+    elif args.compare_turtle:
+        print("\n" + "=" * 90)
+        print("  4전략 비교 백테스트: 기존 최적화 vs 터틀청산 vs 터틀무제한 vs 순수터틀")
+        print("=" * 90)
+
+        strategies = {
+            "A_기존최적화": BacktestConfig(
+                **base_config,
+                **profit_trailing_config,
+            ),
+            "B_테마+터틀청산": BacktestConfig(
+                **base_config,
+                enable_profit_trailing=False,
+                enable_fixed_take_profit=False,
+                enable_partial_profit=False,
+                turtle_exit=True,
+                no_max_hold=False,
+                max_holding_days=14,
+            ),
+            "C_테마+터틀무제한": BacktestConfig(
+                **base_config,
+                enable_profit_trailing=False,
+                enable_fixed_take_profit=False,
+                enable_partial_profit=False,
+                turtle_exit=True,
+                no_max_hold=True,
+            ),
+            "D_순수터틀": BacktestConfig(
+                **base_config,
+                enable_profit_trailing=False,
+                enable_fixed_take_profit=False,
+                enable_partial_profit=False,
+                turtle_exit=True,
+                no_max_hold=True,
+                pure_turtle=True,
+            ),
+        }
+
+        results = {}
+        initial = base_config["initial_capital"]
+
+        # 데이터를 한번만 로드하고 공유
+        shared_data = None
+
+        for idx, (name, config) in enumerate(strategies.items(), 1):
+            print(f"\n{'=' * 70}")
+            print(f"  [{idx}/4] {name}")
+            print("=" * 70)
+
+            bt = LiveLogicBacktester(config)
+
+            if shared_data is None:
+                bt.load_data()
+                shared_data = bt.price_data
+            else:
+                bt.price_data = shared_data
+                logger.info(f"  (캐시된 데이터 사용: {len(shared_data)}개 종목)")
+
+            # run 대신 내부 로직 직접 실행 (데이터 로드 스킵)
+            sample_df = list(bt.price_data.values())[0]
+            trading_days = sample_df.index.tolist()
+
+            last_rotation = None
+            current_themes = []
+
+            for i, date in enumerate(trading_days):
+                date_dt = date.to_pydatetime()
+
+                # 테마 로테이션
+                if not config.pure_turtle:
+                    if last_rotation is None or (date_dt - last_rotation).days >= config.theme_rotation_days:
+                        bt.theme_scores = bt.calculate_theme_scores(date_dt)
+                        sorted_themes = sorted(bt.theme_scores.items(), key=lambda x: x[1], reverse=True)
+                        current_themes = [t[0] for t in sorted_themes[:config.top_themes]]
+                        last_rotation = date_dt
+
+                # 청산
+                bt.check_exits(date_dt)
+
+                # 진입
+                if config.pure_turtle:
+                    bt.execute_pure_turtle_entry(date_dt)
+                elif len(bt.positions) < config.max_positions:
+                    all_candidates = []
+                    for theme in current_themes:
+                        stocks = bt.select_stocks(theme, date_dt)
+                        all_candidates.extend(stocks)
+                    all_candidates.sort(key=lambda x: x["score"], reverse=True)
+                    all_candidates = bt.calculate_weights(all_candidates[:config.max_positions])
+                    if all_candidates:
+                        bt.execute_entry(all_candidates, date_dt)
+
+                # 자산 기록
+                equity = bt.calculate_equity(date_dt)
+                bt.equity_curve.append({"date": date_dt, "equity": equity, "positions": len(bt.positions)})
+                if i > 0:
+                    prev_eq = bt.equity_curve[-2]["equity"]
+                    bt.daily_returns.append((equity - prev_eq) / prev_eq * 100)
+
+            # 최종 청산
+            final_date = trading_days[-1].to_pydatetime()
+            for pos in list(bt.positions):
+                if pos.code in bt.price_data:
+                    df = bt.price_data[pos.code]
+                    exit_price = float(df.iloc[-1]['Close'])
+                    pnl = (exit_price - pos.entry_price) * pos.remaining_shares
+                    pnl_pct = pnl / (pos.entry_price * pos.shares) * 100
+                    bt.trades.append(Trade(
+                        code=pos.code, name=pos.name, theme=pos.theme,
+                        entry_date=pos.entry_date, exit_date=final_date,
+                        entry_price=pos.entry_price, exit_price=exit_price,
+                        shares=pos.shares, pnl=pnl, pnl_pct=pnl_pct,
+                        exit_reason="백테스트종료",
+                        holding_days=(final_date - pos.entry_date).days,
+                    ))
+                    bt.cash += exit_price * pos.remaining_shares
+            bt.positions = []
+
+            # 결과 수집
+            final_eq = bt.equity_curve[-1]["equity"] if bt.equity_curve else initial
+            total_ret = (final_eq - initial) / initial * 100
+
+            years = (datetime.strptime(config.end_date, "%Y-%m-%d") - datetime.strptime(config.start_date, "%Y-%m-%d")).days / 365
+            cagr = ((final_eq / initial) ** (1 / years) - 1) * 100 if years > 0 else 0
+
+            equity_s = pd.Series([e["equity"] for e in bt.equity_curve])
+            mdd = ((equity_s - equity_s.cummax()) / equity_s.cummax() * 100).min()
+
+            if bt.daily_returns:
+                avg_r = np.mean(bt.daily_returns)
+                std_r = np.std(bt.daily_returns)
+                sharpe = (avg_r * 252) / (std_r * np.sqrt(252)) if std_r > 0 else 0
+            else:
+                sharpe = 0
+
+            wins = [t for t in bt.trades if t.pnl > 0]
+            losses = [t for t in bt.trades if t.pnl <= 0]
+            win_rate = len(wins) / len(bt.trades) * 100 if bt.trades else 0
+            avg_win = np.mean([t.pnl_pct for t in wins]) if wins else 0
+            avg_loss = np.mean([t.pnl_pct for t in losses]) if losses else 0
+            plr = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+            avg_hold = np.mean([t.holding_days for t in bt.trades]) if bt.trades else 0
+
+            results[name] = {
+                'total_return': total_ret, 'cagr': cagr, 'mdd': mdd, 'sharpe': sharpe,
+                'win_rate': win_rate, 'plr': plr, 'avg_hold': avg_hold,
+                'trades': len(bt.trades), 'avg_win': avg_win, 'avg_loss': avg_loss,
+            }
+
+            # 청산 사유별 통계
+            reasons = {}
+            for t in bt.trades:
+                reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+            reason_str = ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1]))
+
+            print(f"  수익률: {total_ret:+.2f}% | CAGR: {cagr:.1f}% | MDD: {mdd:.2f}% | Sharpe: {sharpe:.2f}")
+            print(f"  거래: {len(bt.trades)}회 | 승률: {win_rate:.1f}% | 손익비: {plr:.2f} | 평균보유: {avg_hold:.1f}일")
+            print(f"  청산사유: {reason_str}")
+
+        # ===== 최종 비교 테이블 =====
+        print("\n" + "=" * 110)
+        print("  4전략 최종 비교")
+        print("=" * 110)
+
+        header = f"{'지표':<12}"
+        for name in strategies:
+            label = name.split("_", 1)[1]
+            header += f" {label:>22}"
+        print(header)
+        print("-" * 110)
+
+        rows = [
+            ("수익률", "total_return", "%", ".2f"),
+            ("CAGR", "cagr", "%", ".1f"),
+            ("MDD", "mdd", "%", ".2f"),
+            ("Sharpe", "sharpe", "", ".2f"),
+            ("승률", "win_rate", "%", ".1f"),
+            ("손익비", "plr", "", ".2f"),
+            ("평균보유일", "avg_hold", "일", ".1f"),
+            ("거래수", "trades", "회", "d"),
+            ("평균수익", "avg_win", "%", ".2f"),
+            ("평균손실", "avg_loss", "%", ".2f"),
+        ]
+
+        for label, key, unit, fmt in rows:
+            line = f"{label:<12}"
+            for name in strategies:
+                val = results[name][key]
+                if fmt == "d":
+                    line += f" {int(val):>20}{unit:>2}"
+                else:
+                    line += f" {val:>20{fmt}}{unit:>2}"
+            print(line)
+
+        print("=" * 110)
+
+        # 최고 성과
+        best = max(results.items(), key=lambda x: x[1]['total_return'])
+        best_label = best[0].split("_", 1)[1]
+        print(f"\n  최고 수익률: {best_label} ({best[1]['total_return']:+.2f}%)")
+
+        # 리스크 대비 최고
+        best_sharpe = max(results.items(), key=lambda x: x[1]['sharpe'])
+        best_s_label = best_sharpe[0].split("_", 1)[1]
+        print(f"  최고 Sharpe: {best_s_label} ({best_sharpe[1]['sharpe']:.2f})")
+
     else:
         # ============================================================
         # 단일 실행 모드
         # ============================================================
-        if args.old_strategy:
-            # 기존 전략 (레거시 - 비교용)
-            print("📊 기존 전략 (분할익절 + 트레일링)")
+        if args.pure_turtle:
+            print("  순수 터틀 (20일 돌파 + ATR사이징 + 10일저가 청산)")
+            config = BacktestConfig(
+                **base_config,
+                enable_profit_trailing=False,
+                enable_fixed_take_profit=False,
+                enable_partial_profit=False,
+                turtle_exit=True,
+                no_max_hold=True,
+                pure_turtle=True,
+            )
+        elif args.turtle_exit:
+            no_hold = args.no_max_hold
+            print(f"  테마+터틀청산 (10일저가 + 2xATR, 보유제한={'없음' if no_hold else '14일'})")
+            config = BacktestConfig(
+                **base_config,
+                enable_profit_trailing=False,
+                enable_fixed_take_profit=False,
+                enable_partial_profit=False,
+                turtle_exit=True,
+                no_max_hold=no_hold,
+            )
+        elif args.old_strategy:
+            print("  기존 전략 (분할익절 + 트레일링)")
             config = BacktestConfig(
                 **base_config,
                 enable_profit_trailing=False,
@@ -1494,8 +1874,7 @@ def main():
                 max_holding_days=10,
             )
         else:
-            # 이익 추종 전략 (기본값 - 최적화 완료)
-            print("📊 이익 추종 전략 (단계별 트레일링)")
+            print("  이익 추종 전략 (단계별 트레일링)")
             print("   손절: -7%, 트레일링 L1(5%)/L2(3%)/L3(2%)")
             config = BacktestConfig(
                 **base_config,
