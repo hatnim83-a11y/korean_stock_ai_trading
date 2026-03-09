@@ -322,11 +322,12 @@ class TradingSystem:
 
         # 기존 테마가 있고, 선정일로부터 7일 이내면 재사용
         # (화~월 5영업일 사이클: 화요일 선정 → 다음 화요일 전까지 유지)
-        # ISO week 비교는 월요일이 새 주 시작이라 화~월 사이클과 불일치하므로 날짜 차이로 판단
+        # 단, 화요일은 주간 재선정일이므로 항상 재분석 실행
         if self.today_themes and self._last_theme_rotation_date:
             today = now_kst().date()
             days_since_rotation = (today - self._last_theme_rotation_date).days
-            same_week = (days_since_rotation < 7)
+            is_tuesday = (today.weekday() == 1)
+            same_week = (days_since_rotation < 7) and not is_tuesday
             if same_week:
                 logger.info(
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
@@ -1256,11 +1257,11 @@ class TradingSystem:
             theme_info = self.theme_rotator.get_main_theme_info()
             if theme_info:
                 logger.info(f"   현재 테마: {theme_info['theme_name']}")
-                last_iso = self._last_theme_rotation_date.isocalendar() if self._last_theme_rotation_date else (0, 0, 0)
-                today_iso = now_kst().date().isocalendar()
+                today_check = now_kst().date()
                 is_review_day = (self._last_theme_rotation_date is None or
-                    (last_iso[0], last_iso[1]) != (today_iso[0], today_iso[1]))
-                review_status = "이번 주 재평가 예정" if is_review_day else f"보유 {theme_info['days_held']}일"
+                    today_check.weekday() == 1 or
+                    (today_check - self._last_theme_rotation_date).days >= 7)
+                review_status = "오늘 재평가 예정" if is_review_day else f"보유 {theme_info['days_held']}일"
                 logger.info(f"   상태: {review_status}")
                 logger.info(f"   점수 변화: {theme_info['score_change_rate']:+.1%}")
 
