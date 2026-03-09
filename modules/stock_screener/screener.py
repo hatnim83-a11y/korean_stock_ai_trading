@@ -546,9 +546,9 @@ if __name__ == "__main__":
     
     # 테스트 테마
     test_themes = [
-        {"name": "2차전지", "total_score": 87.5, "grade": "S"},
-        {"name": "AI반도체", "total_score": 82.3, "grade": "A"},
-        {"name": "K-방산", "total_score": 79.1, "grade": "A"},
+        {"name": "2차전지", "total_score": 62.0, "grade": "S"},
+        {"name": "AI반도체", "total_score": 55.0, "grade": "A"},
+        {"name": "K-방산", "total_score": 50.0, "grade": "A"},
     ]
     
     print("\n테스트 테마:")

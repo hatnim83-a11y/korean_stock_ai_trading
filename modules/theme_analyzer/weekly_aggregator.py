@@ -165,12 +165,12 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
 
 
 def _grade(score: float) -> str:
-    if score >= 80:
+    if score >= 58:
         return "S"
-    elif score >= 65:
+    elif score >= 48:
         return "A"
-    elif score >= 50:
+    elif score >= 38:
         return "B"
-    elif score >= 40:
+    elif score >= 30:
         return "C"
     return "D"

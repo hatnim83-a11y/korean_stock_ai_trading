@@ -386,6 +386,7 @@ class TradingSystem:
                 crawl_all_themes,
                 score_themes,
                 select_top_themes,
+                select_themes_with_retention,
                 aggregate_weekly_scores,
             )
 
@@ -425,8 +426,16 @@ class TradingSystem:
                         scored_themes[0]['score']
                     )
 
-            # 4. 상위 테마 선정 (config에서 읽기)
-            themes = select_top_themes(scored_themes, count=settings.TOP_THEME_COUNT)
+            # 4. 상위 테마 선정 (화요일: 유지+교체, 그 외: 전체 신규)
+            if is_tuesday and self._previous_themes:
+                logger.info(f"\n🔄 Step 3: 기존 테마 유지 판별 ({len(self._previous_themes)}개 검토)")
+                themes = select_themes_with_retention(
+                    scored_themes,
+                    previous_themes=self._previous_themes,
+                    count=settings.TOP_THEME_COUNT,
+                )
+            else:
+                themes = select_top_themes(scored_themes, count=settings.TOP_THEME_COUNT)
             self.today_themes = themes  # 09:05 스크리닝에서 사용
             self._last_theme_rotation_date = now_kst().date()  # 로테이션 날짜 기록
             logger.info(f"   선정 테마: {len(themes)}개")
@@ -1481,10 +1490,15 @@ class TradingSystem:
                             ai_val = ai_map[name].get("score", 0)
                             theme["ai_sentiment"] = ai_val
                             theme["ai_score"] = calculate_ai_sentiment_score(ai_val)
-                            # 총점 재계산
+                            # 총점 재계산 (과열 감점 + BASE_SCORE 반영)
+                            from modules.theme_analyzer.scorer import BASE_SCORE
                             theme["total_score"] = round(
-                                theme.get("momentum", 0) + theme.get("news_score", 0) +
-                                theme["ai_score"] + theme.get("bonus_score", 0) + 15.0, 2
+                                theme.get("momentum", 0)
+                                + theme.get("overheat_penalty", 0)
+                                + theme.get("news_score", 0)
+                                + theme["ai_score"]
+                                + theme.get("bonus_score", 0)
+                                + BASE_SCORE, 2
                             )
                             theme["score"] = theme["total_score"]
                     # 재정렬

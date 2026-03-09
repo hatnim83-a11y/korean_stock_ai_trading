@@ -365,8 +365,8 @@ async function loadPortfolio() {
   if (themeData && themeData.current_themes && themeData.current_themes.length) {
     grid.innerHTML = themeData.current_themes.map(t => {
       const score = Number(t.score);
-      const grade = score >= 80 ? 'S' : score >= 65 ? 'A' : score >= 50 ? 'B' : score >= 40 ? 'C' : 'D';
-      const gradeColor = score >= 80 ? 'var(--green)' : score >= 65 ? 'var(--cyan)' : score >= 50 ? 'var(--yellow)' : 'var(--text2)';
+      const grade = score >= 58 ? 'S' : score >= 48 ? 'A' : score >= 38 ? 'B' : score >= 30 ? 'C' : 'D';
+      const gradeColor = score >= 58 ? 'var(--green)' : score >= 48 ? 'var(--cyan)' : score >= 38 ? 'var(--yellow)' : 'var(--text2)';
       let meta = `Momentum: ${Number(t.momentum||0).toFixed(1)}`;
       if (t.supply_ratio) meta += ` | Supply: ${Number(t.supply_ratio).toFixed(0)}%`;
       if (t.news_count) meta += ` | News: ${t.news_count}`;

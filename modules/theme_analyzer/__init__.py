@@ -58,6 +58,7 @@ from .ai_analyzer import (
 # 테마 선정
 from .selector import (
     select_top_themes,
+    select_themes_with_retention,
     format_theme_report,
     run_daily_theme_analysis,
     run_daily_theme_analysis_sync,
@@ -100,6 +101,7 @@ __all__ = [
     "analyze_themes_sync",
     # 테마 선정
     "select_top_themes",
+    "select_themes_with_retention",
     "format_theme_report",
     "run_daily_theme_analysis",
     "run_daily_theme_analysis_sync",

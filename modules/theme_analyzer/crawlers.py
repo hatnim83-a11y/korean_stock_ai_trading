@@ -628,6 +628,54 @@ def normalize_theme_name(name: str) -> str:
     return THEME_NAME_MAP.get(name, name)
 
 
+# ===== 테마 카테고리 자동 분류 =====
+
+# 키워드 → 카테고리 매핑 (우선순위 순서: 먼저 매칭되면 해당 카테고리 사용)
+_CATEGORY_KEYWORDS = [
+    # (카테고리, [키워드 리스트])
+    ("반도체", ["반도체", "HBM", "CXL", "MLCC", "뉴로모픽", "유리 기판", "소캠", "SOCAMM", "퓨리오사"]),
+    ("2차전지/에너지", ["2차전지", "전고체", "나트륨이온", "태양광", "풍력", "ESS", "원자력", "원전",
+                    "SMR", "수소", "SOFC", "연료전지", "전선", "LPG", "도시가스", "에너지",
+                    "페로브스카이트"]),
+    ("바이오", ["바이오", "제약", "의료", "보톡스", "보툴리눔", "마이코플라스마", "마이크로바이옴",
+              "제대혈", "코로나", "백신", "헬스케어", "구제역", "돼지열병", "폐렴"]),
+    ("IT/SW", ["AI", "게임", "로봇", "휴머노이드", "3D 프린터", "메타버스", "클라우드", "블록체인",
+              "STO", "토큰", "스테이블코인", "NFT", "핀테크", "SI(", "재택근무", "스마트",
+              "LED", "CCTV", "전자파", "냉각", "액침", "피지컬", "영상콘텐츠", "지역화폐",
+              "자율주행", "통신", "5G", "6G", "사물인터넷", "IoT", "빅데이터"]),
+    ("방위/우주", ["방위", "방산", "전쟁", "테러", "우주", "스페이스X", "SpaceX", "항공기부품",
+                "드론", "인공위성", "누리호"]),
+    ("소비재", ["엔터", "음식료", "패션", "의류", "홈쇼핑", "광고", "캐릭터", "주류", "교육",
+              "스포츠", "올림픽", "월드컵", "여름", "겨울", "출산", "면세", "화장품", "렌터카",
+              "야놀자", "엔젤"]),
+    ("산업재", ["조선", "해운", "건설", "철강", "화학", "자동차부품", "골판지", "아스콘", "페인트",
+              "제지", "윤활유", "사료", "수산", "육계", "콩", "대두", "보험", "금융", "증권",
+              "은행", "리츠", "REITs", "SPAC"]),
+]
+
+
+def classify_theme_category(theme_name: str) -> str:
+    """
+    테마명에서 카테고리 자동 분류
+
+    키워드 매칭으로 분류하며, 매칭 실패 시 '기타' 반환.
+
+    Args:
+        theme_name: 테마명
+
+    Returns:
+        카테고리 문자열
+    """
+    if not theme_name:
+        return "기타"
+    name_upper = theme_name.upper()
+    for category, keywords in _CATEGORY_KEYWORDS:
+        for kw in keywords:
+            if kw.upper() in name_upper:
+                return category
+    return "기타"
+
+
 # ===== 자체 정의 테마 목록 =====
 
 def get_predefined_themes() -> list[dict]:
@@ -957,16 +1005,25 @@ def crawl_all_themes() -> list[dict]:
 
     logger.info(f"📊 주요 테마 {enriched_count}개 데이터 보강 완료")
 
-    # 테마명 정규화 + 중복 제거 (정규화된 이름 기준, 첫 번째 것 유지)
+    # 테마명 정규화 + 카테고리 자동 분류 + 중복 제거
     seen = set()
     unique_themes = []
     for theme in all_themes:
         theme["name"] = normalize_theme_name(theme["name"])
+        # 카테고리가 없거나 '기타'이면 자동 분류 시도
+        if theme.get("category", "기타") == "기타":
+            theme["category"] = classify_theme_category(theme["name"])
         if theme["name"] not in seen:
             seen.add(theme["name"])
             unique_themes.append(theme)
 
-    logger.info(f"✅ 전체 테마 {len(unique_themes)}개 수집 완료")
+    # 분류 통계 로깅
+    cat_counts = {}
+    for t in unique_themes:
+        cat = t.get("category", "기타")
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    cat_stats = ", ".join(f"{k}:{v}" for k, v in sorted(cat_counts.items(), key=lambda x: -x[1]))
+    logger.info(f"✅ 전체 테마 {len(unique_themes)}개 수집 완료 (카테고리: {cat_stats})")
 
     return unique_themes
 
