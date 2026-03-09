@@ -320,13 +320,13 @@ class TradingSystem:
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
 
-        # 기존 테마가 있고, 이번 주에 이미 선정했으면 재사용
-        # (DB 복원 테마는 url이 없을 수 있으므로 url 체크 제거)
+        # 기존 테마가 있고, 선정일로부터 7일 이내면 재사용
+        # (화~월 5영업일 사이클: 화요일 선정 → 다음 화요일 전까지 유지)
+        # ISO week 비교는 월요일이 새 주 시작이라 화~월 사이클과 불일치하므로 날짜 차이로 판단
         if self.today_themes and self._last_theme_rotation_date:
             today = now_kst().date()
-            last_iso = self._last_theme_rotation_date.isocalendar()
-            today_iso = today.isocalendar()
-            same_week = (last_iso[1] == today_iso[1] and last_iso[0] == today_iso[0])
+            days_since_rotation = (today - self._last_theme_rotation_date).days
+            same_week = (days_since_rotation < 7)
             if same_week:
                 logger.info(
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
