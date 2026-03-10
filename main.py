@@ -338,17 +338,35 @@ class TradingSystem:
                     logger.info("   종목 URL 없음 → 크롤링으로 보충")
                     try:
                         from modules.theme_analyzer import crawl_all_themes
+                        from modules.theme_analyzer.crawlers import search_naver_theme
+                        from modules.stock_screener.screener import _search_naver_upjong
+
                         all_crawled = await asyncio.to_thread(crawl_all_themes)
                         crawled_map = {t["name"]: t for t in all_crawled}
                         for t in self.today_themes:
                             t_name = t.get("theme", t.get("name", ""))
                             if t_name in crawled_map:
                                 matched = crawled_map[t_name]
-                                t["url"] = matched.get("url", "")
+                                t["url"] = matched.get("url") or ""
                                 t["stock_count"] = matched.get("stock_count", 0)
-                                logger.info(f"   ✓ [{t_name}] url 보충 완료 ({t['stock_count']}종목)")
+                                if t.get("url"):
+                                    logger.info(f"   ✓ [{t_name}] url 보충 완료 ({t['stock_count']}종목)")
+                                    continue
+                                logger.warning(f"   [{t_name}] 크롤링 결과에 URL 없음 → 폴백 시도")
+                            # 폴백 1: 네이버 테마 개별 검색
+                            naver_result = await asyncio.to_thread(search_naver_theme, t_name)
+                            if naver_result and naver_result.get("url"):
+                                t["url"] = naver_result["url"]
+                                t["stock_count"] = naver_result.get("stock_count", 0)
+                                logger.info(f"   ✓ [{t_name}] 네이버 검색으로 url 보충 ({t['stock_count']}종목)")
                             else:
-                                logger.warning(f"   ✗ [{t_name}] 크롤링 결과에 미발견")
+                                # 폴백 2: 네이버 업종 검색
+                                upjong_url = await asyncio.to_thread(_search_naver_upjong, t_name)
+                                if upjong_url:
+                                    t["url"] = upjong_url
+                                    logger.info(f"   ✓ [{t_name}] 업종 검색으로 url 보충")
+                                else:
+                                    logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 (09:05 스크리닝에서 재시도)")
                     except Exception as e:
                         logger.error(f"   종목 URL 보충 실패: {e}")
 
@@ -444,6 +462,9 @@ class TradingSystem:
             if is_tuesday and themes and not any(t.get("url") for t in themes):
                 logger.info("\n📦 Step 4: 종목 URL 크롤링 보충")
                 try:
+                    from modules.theme_analyzer.crawlers import search_naver_theme
+                    from modules.stock_screener.screener import _search_naver_upjong
+
                     all_crawled = await asyncio.to_thread(crawl_all_themes)
                     crawled_map = {t["name"]: t for t in all_crawled}
                     supplemented = 0
@@ -456,10 +477,24 @@ class TradingSystem:
                             if t.get("url"):
                                 supplemented += 1
                                 logger.info(f"   ✓ [{t_name}] url 보충 완료 ({t['stock_count']}종목)")
-                            else:
-                                logger.warning(f"   ✗ [{t_name}] 크롤링 결과에 URL 없음")
+                                continue
+                            logger.warning(f"   [{t_name}] 크롤링 결과에 URL 없음 → 폴백 시도")
+                        # 폴백 1: 네이버 테마 개별 검색
+                        naver_result = await asyncio.to_thread(search_naver_theme, t_name)
+                        if naver_result and naver_result.get("url"):
+                            t["url"] = naver_result["url"]
+                            t["stock_count"] = naver_result.get("stock_count", 0)
+                            supplemented += 1
+                            logger.info(f"   ✓ [{t_name}] 네이버 검색으로 url 보충 ({t['stock_count']}종목)")
                         else:
-                            logger.warning(f"   ✗ [{t_name}] 크롤링 결과에 미발견")
+                            # 폴백 2: 네이버 업종 검색
+                            upjong_url = await asyncio.to_thread(_search_naver_upjong, t_name)
+                            if upjong_url:
+                                t["url"] = upjong_url
+                                supplemented += 1
+                                logger.info(f"   ✓ [{t_name}] 업종 검색으로 url 보충")
+                            else:
+                                logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 (09:05 스크리닝에서 재시도)")
                     logger.info(f"   URL 보충: {supplemented}/{len(themes)}개 테마")
                 except Exception as e:
                     logger.error(f"   종목 URL 보충 실패: {e}")
