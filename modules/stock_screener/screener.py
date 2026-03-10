@@ -41,6 +41,92 @@ MAX_STOCKS_PER_THEME = 10  # 테마당 최대 선정 종목 수
 MAX_TOTAL_CANDIDATES = 30  # 전체 최대 후보 종목 수
 MIN_FINAL_SCORE = 50.0  # 최소 최종 점수
 
+# 테마명 → 네이버 업종명 매핑 (테마 페이지에 없는 경우 업종 폴백용)
+_THEME_TO_UPJONG_ALIAS = {
+    # 산업재
+    "해운": ["해운사", "항공화물운송과물류"],
+    "물류": ["항공화물운송과물류", "도로와철도운송"],
+    "운송": ["도로와철도운송", "항공화물운송과물류", "해운사"],
+    "조선": ["조선"],
+    "건설": ["건설", "건축자재", "건축제품"],
+    "철강": ["철강", "비철금속"],
+    "화학": ["화학"],
+    "기계": ["기계"],
+    # 방위/우주
+    "방위산업": ["우주항공과국방"],
+    "방위산업/전쟁 및 테러": ["우주항공과국방"],
+    "K-방산": ["우주항공과국방"],
+    "항공기부품": ["우주항공과국방", "항공사"],
+    # IT/반도체
+    "반도체": ["반도체와반도체장비"],
+    "AI반도체": ["반도체와반도체장비"],
+    "디스플레이": ["디스플레이장비및부품", "디스플레이패널"],
+    "소프트웨어": ["소프트웨어"],
+    "클라우드": ["소프트웨어", "IT서비스"],
+    # 엔터/게임
+    "게임": ["게임엔터테인먼트"],
+    "엔터테인먼트": ["방송과엔터테인먼트", "게임엔터테인먼트"],
+    # 바이오
+    "바이오": ["생물공학", "제약", "생명과학도구및서비스"],
+    "제약": ["제약", "생물공학"],
+    # 에너지
+    "LPG": ["가스유틸리티"],
+    "LPG(액화석유가스)": ["가스유틸리티"],
+    "가스": ["가스유틸리티", "석유와가스"],
+    "태양광에너지": ["에너지장비및서비스", "전기유틸리티"],
+    "풍력에너지": ["에너지장비및서비스", "전기유틸리티"],
+    # 소비재
+    "자동차": ["자동차", "자동차부품"],
+    "자동차부품": ["자동차부품"],
+    "음식료": ["식품", "음료"],
+    "화장품": ["화장품"],
+    "패션/의류": ["섬유,의류,신발,호화품"],
+}
+
+
+def _search_naver_upjong(theme_name: str) -> str:
+    """네이버 금융 업종 페이지에서 테마명과 유사한 업종을 검색하여 URL 반환."""
+    import requests
+    from bs4 import BeautifulSoup
+    from modules.theme_analyzer.crawlers import normalize_theme_name
+
+    normalized = normalize_theme_name(theme_name)
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(
+            "https://finance.naver.com/sise/sise_group.naver?type=upjong",
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        upjong_map = {}
+        for a in soup.select('a[href*="sise_group_detail"]'):
+            name = a.get_text(strip=True)
+            href = a["href"]
+            if not href.startswith("http"):
+                href = "https://finance.naver.com" + href
+            upjong_map[name] = href
+
+        # 1) 직접 매핑 확인
+        aliases = _THEME_TO_UPJONG_ALIAS.get(normalized, [])
+        for alias in aliases:
+            if alias in upjong_map:
+                logger.info(f"  [{theme_name}] 업종 매핑: {alias}")
+                return upjong_map[alias]
+
+        # 2) 테마명이 업종명에 포함되는지 검색
+        for upjong_name, href in upjong_map.items():
+            if normalized in upjong_name or upjong_name in normalized:
+                logger.info(f"  [{theme_name}] 업종 유사 매칭: {upjong_name}")
+                return href
+
+        return ""
+    except Exception as e:
+        logger.warning(f"  [{theme_name}] 업종 검색 실패: {e}")
+        return ""
+
 
 def screen_stocks_in_theme(
     theme: dict,
@@ -458,19 +544,38 @@ def run_daily_screening(
         else:
             # 실제 API로 스크리닝
             # 테마별 종목 수집 (네이버 크롤링)
-            from modules.theme_analyzer.crawlers import crawl_naver_theme_stocks
-            
+            from modules.theme_analyzer.crawlers import (
+                crawl_naver_theme_stocks,
+                search_naver_theme,
+            )
+
             theme_stocks = {}
             for theme in themes:
                 theme_name = theme.get("name")
                 theme_url = theme.get("url")
-                
+
+                # 1차: URL이 있으면 바로 사용
+                if not theme_url:
+                    # 2차 폴백: 네이버 테마 검색
+                    naver_result = search_naver_theme(theme_name)
+                    if naver_result and naver_result.get("url"):
+                        theme_url = naver_result["url"]
+                        # 원본 dict에 캐시 (같은 장중 재호출 시 재검색 방지)
+                        theme["url"] = theme_url
+                        logger.info(f"[{theme_name}] 네이버 테마 검색으로 URL 획득")
+                    else:
+                        # 3차 폴백: 네이버 업종에서 유사명 검색
+                        theme_url = _search_naver_upjong(theme_name)
+                        if theme_url:
+                            theme["url"] = theme_url
+                            logger.info(f"[{theme_name}] 네이버 업종에서 URL 획득")
+
                 if theme_url:
                     stocks = crawl_naver_theme_stocks(theme_url)
                     stock_codes = [s.get("code") for s in stocks if s.get("code")]
                     theme_stocks[theme_name] = stock_codes[:20]  # 테마당 20개 제한
                 else:
-                    # URL이 없으면 빈 리스트
+                    # 모든 폴백 실패
                     theme_stocks[theme_name] = []
             
             candidates, screening_logs = screen_all_themes(

@@ -440,6 +440,30 @@ class TradingSystem:
             self._last_theme_rotation_date = now_kst().date()  # 로테이션 날짜 기록
             logger.info(f"   선정 테마: {len(themes)}개")
 
+            # 4-1. 화요일 DB 집계 테마는 URL이 없으므로 크롤링으로 보충
+            if is_tuesday and themes and not any(t.get("url") for t in themes):
+                logger.info("\n📦 Step 4: 종목 URL 크롤링 보충")
+                try:
+                    all_crawled = await asyncio.to_thread(crawl_all_themes)
+                    crawled_map = {t["name"]: t for t in all_crawled}
+                    supplemented = 0
+                    for t in themes:
+                        t_name = t.get("theme", t.get("name", ""))
+                        if t_name in crawled_map:
+                            matched = crawled_map[t_name]
+                            t["url"] = matched.get("url") or ""
+                            t["stock_count"] = matched.get("stock_count", 0)
+                            if t.get("url"):
+                                supplemented += 1
+                                logger.info(f"   ✓ [{t_name}] url 보충 완료 ({t['stock_count']}종목)")
+                            else:
+                                logger.warning(f"   ✗ [{t_name}] 크롤링 결과에 URL 없음")
+                        else:
+                            logger.warning(f"   ✗ [{t_name}] 크롤링 결과에 미발견")
+                    logger.info(f"   URL 보충: {supplemented}/{len(themes)}개 테마")
+                except Exception as e:
+                    logger.error(f"   종목 URL 보충 실패: {e}")
+
             # 5. DB 저장 (대시보드 테마 탭용)
             try:
                 themes_to_save = [
