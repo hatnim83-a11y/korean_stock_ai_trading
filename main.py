@@ -513,8 +513,8 @@ class TradingSystem:
                     }
                     for t in themes
                 ]
-                self.db.save_theme_scores(themes_to_save, now_kst().date())
-                logger.info(f"   DB 저장 완료: {len(themes_to_save)}개 테마")
+                self.db.save_theme_scores(themes_to_save, now_kst().date(), selected=True)
+                logger.info(f"   DB 저장 완료: {len(themes_to_save)}개 테마 (selected=True)")
             except Exception as e:
                 logger.error(f"   테마 DB 저장 실패: {e}")
 
@@ -1579,8 +1579,8 @@ class TradingSystem:
                 }
                 for t in scored_themes
             ]
-            self.db.save_theme_scores(themes_to_save, now_kst().date())
-            logger.info(f"   DB 저장 완료: {len(themes_to_save)}개 테마 ({now_kst().date()})")
+            self.db.save_theme_scores(themes_to_save, now_kst().date(), selected=False)
+            logger.info(f"   DB 저장 완료: {len(themes_to_save)}개 테마 ({now_kst().date()}, 일별수집)")
 
         except Exception as e:
             logger.error(f"일별 테마 수집 실패: {e}")

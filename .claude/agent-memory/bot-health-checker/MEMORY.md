@@ -20,58 +20,38 @@
 - 1-minute cooldown on token issuance per app key
 
 ## DB Schema (updated 2026-03-04)
-- portfolio: id, date, stock_code, stock_name, theme, weight, shares, buy_price, current_price, stop_loss, take_profit, profit_rate, profit_amount, status (holding/closed), created_at, updated_at + v8 columns
-- trades: id, date, time, stock_code, stock_name, action (buy/sell), shares, price, amount, reason, profit_rate, profit_amount, order_id, created_at + v8 columns
+- portfolio, trades, themes, trade_reviews, position_state, screening_log, daily_snapshots, strategy_stats
 - themes: id, date, theme_name, score, momentum, supply_ratio, news_count, ai_sentiment, created_at + category(v10)
-- trade_reviews: id, trade_id, stock_code, stock_name, buy_date, **sell_date**, buy_price, sell_price, shares, hold_days, profit_rate, profit_amount, sell_reason, strategy_type, trailing_level, max_profit_during_hold, theme, ai_review, lesson_learned, created_at (NO 'date' column - use sell_date)
-- position_state: stock_code (PK), current_price, highest_price, trailing_active, trailing_level, trailing_stop_price, max_profit_rate, partial_1/2/3_executed, remaining_shares, last_updated
-- **IMPORTANT**: trades.profit_rate unit is inconsistent! Old (id<=20): ratio. New (id>=21): percent.
+- screening_log: id, date, stock_code, stock_name, theme, stage, passed, score, reject_reason, details_json, created_at
 
-## Stop Loss Calculation
-- ATR-based dynamic, clamped to MIN=-12%, MAX=-5% (see `calculators.py`)
+## Known Issues (as of 2026-03-10)
+- **CRITICAL (fixed in code but affected today)**: 화요일 Step 4 URL 보충 -- commit 4b49bac 배포가 08:30 이후 → 구 코드(0245c33)에 Step 4 없어 스크리닝 0건. 서비스 14:07 재시작으로 수정 반영 완료. 다음 화요일부터 정상 예상.
+- **WARNING: screener URL 폴백**: search_naver_theme + _search_naver_upjong이 해운/게임/조선/반도체/구제역 등에 모두 실패. 네이버 테마 페이지에서 해당 테마 검색 가능 여부 별도 확인 필요.
+- **WARNING: Dashboard 24/7 SSE polling**: 5s interval portfolio query 24/7. ~17,280 queries/day.
+- **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError. Falls back to Naver-only.
+- **WARNING: 8개 predefined 테마 네이버 미발견**: K-방산, 바이오, 로봇, 수소, 조선, 엔터테인먼트, 음식료, 철강 -- 17:05 크롤링 시 "기본값 사용" 경고.
+- **INFO: Telegram unreachable from GCP VM**: Persistent since 03-04.
+- **INFO: Log file date uses UTC**: 08:00-08:59 KST logs → previous day's file.
+- **INFO: 2/27 themes data missing**: weekly_aggregator effectively uses 5 days instead of 6.
 
-## Known Issues (as of 2026-03-09)
-- **WARNING: Dashboard 24/7 SSE polling**: 5-sec interval portfolio query even on weekends/nights. Source: dashboard SSE endpoint. Creates ~17,280 queries/day + KISApi init each time. CPU: 1h26m over ~3 days.
-- **WARNING: portfolio.highest_price/max_profit_rate not synced with position_state**: position_state tracks correctly (63500, 7.08%) but portfolio row has (None, 0.0). Only cosmetic if monitor reads from position_state.
-- **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError. Falls back to Naver-only data.
-- **WARNING: Theme scores low (~32-43)**: Since 03-04 switch to daily collection + weighted avg. news_count=0, ai_sentiment=0 in 03-09 data (only momentum contributes).
-- **INFO: Telegram still unreachable from GCP VM**: Persistent since 03-04.
-- **INFO: Log file date uses UTC**: 08:00-08:59 KST logs go to PREVIOUS day's file.
+## Scheduler (KST, CronTrigger timezone=Asia/Seoul, _skip_on_holiday)
+- 08:00 Theme rotation | 08:30 Theme analysis | 09:05 Screening | 09:25 Auto buy
+- 09:26 Monitor start | 15:30 Monitor stop | 15:35 Close cleanup | 16:00 Report
+- 16:10 Health check | 17:00 Post-trade | 17:05 Daily theme collection | Fri 17:30 Weekly review
 
-## Resolved Issues
-- ~~**screening_log table always empty**~~: Fixed by 2026-03-04.
-- ~~**Theme data key mismatch**~~: Fixed `da6276b`.
-- ~~**Partial sell not saved to DB**~~: Fixed `5a336fe`.
-- ~~**Dashboard manual sell full close instead of partial**~~: Fixed `4f43344`.
-
-## Scheduler (KST, all CronTrigger with timezone=Asia/Seoul, all have _skip_on_holiday)
-- 08:00 Theme rotation check | 08:30 Theme analysis | 09:05 Screening | 09:25 Auto buy
-- 09:26 Monitoring start | 15:30 Monitoring stop | 15:35 Close cleanup | 16:00 Daily report
-- 16:10 Daily health check | 17:00 Post-trade analysis | 17:05 Daily theme collection | Fri 17:30 Weekly trade review
-- NOTE: day_of_week='mon-fri' on all jobs, but _skip_on_holiday only checks holidays lib (not KRX closures)
-- NOTE: 08:30 theme analysis runs EVERY weekday (not just Tue). On non-Tue, it still selects themes from existing DB data.
+## Theme System Architecture
+- **08:30 화요일**: aggregate_weekly_scores(6영업일 가중평균) → select_themes_with_retention → Step 4 URL 보충(crawl_all_themes) → DB 저장
+- **08:30 비화요일**: DB 복원 테마 재사용 or crawl_all_themes → score_themes → select_top_themes
+- **09:05**: screener가 theme URL로 종목 수집 → 없으면 search_naver_theme → _search_naver_upjong 폴백
+- **17:05**: crawl_all_themes(206개) → score_themes(상위30) → AI 분석(20) → DB 저장(30개)
+- **Key insight**: 화요일 08:30 집계 데이터에는 URL이 없으므로 Step 4 보충이 필수
 
 ## Trading Parameters (.env)
-- TOTAL_CAPITAL: 4,406,493 KRW, MAX_POSITIONS: 5, per_slot: cash/slots
-- DEFAULT_STOP_LOSS: -8% (actual ATR-based: -5%~-12%)
+- TOTAL_CAPITAL: 4,406,493 KRW, MAX_POSITIONS: 5
 - Trailing: L1(+8%, -5%), L2(+15%, -3%), L3(+25%, -2%)
 - Theme rotation: 7 days
 
-## Health Check Patterns
-- Process: PID from trading_system.pid, then `ps -p PID`
-- API: KIS=200, Claude=405 = REACHABLE; Telegram=000 = UNREACHABLE
-- Market hours (KST): 09:00-15:30; Server UTC; KST = UTC+9
-- Service restart during market hours: auto-resume via `_resume_monitoring_if_needed`
-- Dashboard SSE is a separate logging stream - `journalctl -u trading_dashboard` to see its logs
-- System logs from previous days: `zcat logs/system_YYYY-MM-DD.*.log.gz`
-
-## Theme Data Accumulation Pattern
-- 08:30 KST: Crawl + score themes, select top 5 for today's trading (saves to themes table)
-- 17:05 KST: Daily theme collection (30 themes with full scoring: momentum + news + AI sentiment)
-- Weekly aggregation for Tue reselection uses last 6 business days weighted average
-- 03-02/03-03: Only 5 themes (before 17:05 schedule existed). 03-04+: 30-35 themes/day.
-
 ## Recent Health Checks
-- **2026-03-09 10:55 KST**: Mon. BEARISH (KOSPI -7.28%, KOSDAQ -5.78%). 1 holding (Pearl Abyss 263750, buy 59300, +2.19%). 5 candidates -> 4 gap-filtered -> 1 bought. No errors. Dashboard SSE 24/7 polling confirmed. Theme data 6 biz days accumulated for Tue reselection. Service uptime 2d+.
-- **2026-03-04 15:36 KST**: Tue. ALL 4 positions stopped out. P&L: -350,000.
-- **2026-03-03 12:58 KST**: Mon. 3 holdings. +140,900 realized. Techwing trailing L2.
+- **2026-03-10 23:10 KST**: Tue theme check. 08:30 weekly agg OK (101 themes). Step 4 URL not executed (old code). Screening 0 candidates. 17:05 collection OK (34 themes). DB accumulation normal since 03-04.
+- **2026-03-09 10:55 KST**: Mon. 1 holding (Pearl Abyss). 5 candidates -> 1 bought. No errors.
+- **2026-03-04 15:36 KST**: Tue. ALL 4 stopped out. P&L: -350K.

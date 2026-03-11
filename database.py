@@ -171,6 +171,7 @@ class Database:
             (8, "신규 인덱스 추가", self._migrate_v8),
             (9, "post_trade_prices 테이블", self._migrate_v9),
             (10, "themes에 category 컬럼 추가", self._migrate_v10),
+            (11, "themes에 selected 컬럼 추가", self._migrate_v11),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -399,6 +400,14 @@ class Database:
             except Exception:
                 pass  # 이미 존재하면 무시
 
+    def _migrate_v11(self) -> None:
+        """themes 테이블에 selected 컬럼 추가 (주간 선정 vs 일별 수집 구분)"""
+        with self.get_cursor() as cursor:
+            try:
+                cursor.execute("ALTER TABLE themes ADD COLUMN selected BOOLEAN DEFAULT 0")
+            except Exception:
+                pass  # 이미 존재하면 무시
+
     def init_tables(self) -> None:
         """
         모든 테이블 생성
@@ -534,21 +543,54 @@ class Database:
 
     # ===== 테마 관련 메서드 =====
 
-    def save_theme_scores(self, themes: list[dict], target_date: date) -> None:
+    def save_theme_scores(self, themes: list[dict], target_date: date, selected: bool = False) -> None:
         """
         테마 점수 저장
 
         Args:
             themes: 테마 리스트 [{'theme': '2차전지', 'score': 87.5, 'category': '신성장', ...}, ...]
             target_date: 날짜
+            selected: True=주간 선정 테마, False=일별 수집 데이터
         """
         with self.get_cursor() as cursor:
+            # 주간 선정 저장 시 기존 selected 플래그 초기화 (같은 날짜)
+            if selected:
+                cursor.execute(
+                    "UPDATE themes SET selected = 0 WHERE date = ? AND selected = 1",
+                    (target_date,)
+                )
+
             for theme in themes:
+                if not selected:
+                    # 일별 수집: 기존 selected=1 행은 보호 (점수만 업데이트)
+                    cursor.execute(
+                        "SELECT selected FROM themes WHERE date = ? AND theme_name = ?",
+                        (target_date, theme['theme'])
+                    )
+                    existing = cursor.fetchone()
+                    if existing and existing[0] == 1:
+                        # selected=1 행은 점수만 업데이트, selected 플래그 유지
+                        cursor.execute("""
+                            UPDATE themes SET score = ?, momentum = ?, supply_ratio = ?,
+                                news_count = ?, ai_sentiment = ?, category = ?
+                            WHERE date = ? AND theme_name = ?
+                        """, (
+                            theme['score'],
+                            theme.get('momentum', 0),
+                            theme.get('supply_ratio', 0),
+                            theme.get('news_count', 0),
+                            theme.get('ai_sentiment', 0),
+                            theme.get('category', '기타'),
+                            target_date,
+                            theme['theme'],
+                        ))
+                        continue
+
                 cursor.execute("""
                     INSERT OR REPLACE INTO themes (
                         date, theme_name, score, momentum, supply_ratio,
-                        news_count, ai_sentiment, category
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        news_count, ai_sentiment, category, selected
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     target_date,
                     theme['theme'],
@@ -558,13 +600,14 @@ class Database:
                     theme.get('news_count', 0),
                     theme.get('ai_sentiment', 0),
                     theme.get('category', '기타'),
+                    1 if selected else 0,
                 ))
 
-        logger.info(f"{len(themes)}개 테마 점수 저장 완료 ({target_date})")
+        logger.info(f"{len(themes)}개 테마 점수 저장 완료 ({target_date}, selected={selected})")
 
     def get_top_themes(self, target_date: date, count: int = 5) -> list[dict]:
         """
-        상위 테마 조회
+        상위 테마 조회 (주간 선정 테마 우선)
 
         Args:
             target_date: 조회할 날짜
@@ -574,25 +617,47 @@ class Database:
             테마 리스트 (점수 순)
         """
         with self.get_cursor() as cursor:
+            # 먼저 selected=1인 주간 선정 테마 조회
             cursor.execute("""
                 SELECT * FROM themes
-                WHERE date = ?
+                WHERE date = ? AND selected = 1
                 ORDER BY score DESC
                 LIMIT ?
             """, (target_date, count))
-
             rows = cursor.fetchall()
+
+            # selected 테마가 없으면 (v11 이전 데이터) 기존 방식 폴백
+            if not rows:
+                cursor.execute("""
+                    SELECT * FROM themes
+                    WHERE date = ?
+                    ORDER BY score DESC
+                    LIMIT ?
+                """, (target_date, count))
+                rows = cursor.fetchall()
+
             return [dict(row) for row in rows]
 
     def get_last_theme_analysis_date(self) -> Optional[date]:
         """
-        마지막 테마 분석 날짜 조회 (서비스 재시작 시 7일 로테이션 복원용)
+        마지막 테마 선정 날짜 조회 (서비스 재시작 시 7일 로테이션 복원용)
+
+        selected=1인 주간 선정 테마의 최신 날짜를 반환.
+        v11 이전 데이터(selected 컬럼 없거나 모두 0)인 경우 전체 MAX(date) 폴백.
 
         Returns:
-            마지막 분석 날짜 또는 None
+            마지막 선정 날짜 또는 None
         """
         try:
             with self.get_cursor() as cursor:
+                # 주간 선정 테마(selected=1)의 최신 날짜 우선
+                cursor.execute("SELECT MAX(date) as last_date FROM themes WHERE selected = 1")
+                row = cursor.fetchone()
+                if row and row["last_date"]:
+                    from datetime import datetime as dt
+                    return dt.strptime(row["last_date"], "%Y-%m-%d").date()
+
+                # 폴백: v11 이전 데이터
                 cursor.execute("SELECT MAX(date) as last_date FROM themes")
                 row = cursor.fetchone()
                 if row and row["last_date"]:

@@ -21,6 +21,7 @@
 - 테마 로테이션 월요일 기반 전환 (2026-02-27) — 주의 1건(ISO week 연말 edge case), 참고 2건, 배포 가능
 - datetime 버그 수정 + 휴장일 체크 추가 (2026-03-02) — 주의 3건, 참고 3건, 배포 가능
 - main.py + crawlers.py + telegram_notifier.py: 종목 목록 보충 + pause 기능 + 헤더 업데이트 (2026-03-06) — 주의 1건(stocks 키 없음→로그 오표시), 참고 1건, 배포 가능
+- screener.py: _THEME_TO_UPJONG_ALIAS + _search_naver_upjong + run_daily_screening 폴백 추가 (2026-03-10) — 주의 3건(change_rate 오파싱/side-effect/하드코딩), 참고 1건, 수정 후 배포
 
 ## 주요 구조적 버그 (수정 완료)
 1. partial_X_executed 재시작 후 초기화 → 이중 매도: DB position_state에 partial 상태 저장으로 수정됨
