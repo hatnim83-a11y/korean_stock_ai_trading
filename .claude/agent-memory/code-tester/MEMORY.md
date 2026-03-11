@@ -84,6 +84,23 @@
 - 잔존 설계 주의: init_tables DDL에 selected 컬럼 없음 (_migrate_v11 이전 호출 불가 구조라 무해)
 - 잔존 설계 주의: 주간 재선정 시 같은 날짜만 selected=1 초기화 → 이전 주 selected=1 행 누적 (기능 무관)
 
+### 테마 파이프라인 하드코딩 목록 (2026-03-11 v11 리뷰)
+- `screener.py:576` `stock_codes[:20]` — 크롤링 풀 크기, config 없음 (MAX_STOCKS_PER_THEME=10과 별개)
+- `main.py:427` `raw_themes[:20]` — 비화요일 점수화 개수, config 없음
+- `main.py:1533` `raw_themes[:30]` / `1541` `scored_themes[:20]` — 17:05 일별수집 대상, config 없음
+- `scorer.py:119-122` `OVERHEAT_THRESHOLD=8.0/OVERHEAT_MAX=15.0/PENALTY_MAX=15.0` — 함수 로컬 상수
+- `selector.py:43,46` `MIN_SELECTION_SCORE=30.0/RETENTION_SCORE=38.0` — 모듈 상수 (config 없음)
+
+### aggregate_weekly_scores 결과 키 구조 (v11 확정)
+- 포함: name, theme, total_score, score, momentum, momentum_score, news_count, ai_sentiment, category, days_found, daily_scores, selection_reason, grade
+- 미포함: url, stock_count, avg_change_rate, news_score, bonus_score, overheat_penalty
+- AI 재계산 식이 이 결과에 적용되면 news_score/bonus_score/overheat_penalty = 0 -> 주의
+- 실제로는 17:05 score_themes 결과에만 AI 재계산 적용됨 (화요일 08:30은 DB 집계 점수 사용)
+
+### scorer.py time import
+- `from datetime import time` -> datetime.time 클래스, time(9,0)으로 사용 (표준 time 모듈 아님)
+- now_kst().time() vs time(9,0) 비교: 올바른 사용
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`
