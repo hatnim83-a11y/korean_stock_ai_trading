@@ -236,12 +236,23 @@ async def get_performance_data(days: int = 90) -> dict:
         calc = PerformanceCalculator()
         sharpe = calc.calculate_sharpe_ratio([r / 100 for r in daily_returns])
 
+        # MDD: 조회 기간의 total_capital 시리즈에서 동적 계산
+        capitals = [s.get("total_capital") or 0 for s in snapshots]
+        peak = capitals[0]
+        mdd = 0.0
+        for c in capitals:
+            if c > peak:
+                peak = c
+            dd = (c - peak) / peak * 100 if peak > 0 else 0
+            if dd < mdd:
+                mdd = dd
+
         return {
             "dates": dates,
             "cumulative_returns": cumulative_returns,
             "daily_returns": daily_returns,
             "sharpe_ratio": sharpe,
-            "mdd": latest.get("mdd") or 0,
+            "mdd": round(mdd, 2),
             "win_rate": latest.get("win_rate") or 0,
             "win_count": latest.get("win_count_cumulative") or 0,
             "loss_count": latest.get("loss_count_cumulative") or 0,

@@ -1414,7 +1414,7 @@ class TradingSystem:
 
             # MDD: 전일 peak 가져와서 비교
             previous = db.get_daily_snapshots(days=1)
-            prev_peak = previous[0].get("peak_value", capital) if previous else capital
+            prev_peak = previous[0].get("peak_value", current_total) if previous else current_total
             peak_value = max(prev_peak, current_total)
             mdd = ((current_total - peak_value) / peak_value * 100) if peak_value > 0 else 0
 
