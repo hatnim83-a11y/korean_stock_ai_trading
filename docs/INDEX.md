@@ -18,7 +18,10 @@
 ## 전략 & 백테스트
 | 문서 | 설명 | 언제 보는가 |
 |------|------|------------|
-| `docs/BACKTEST_RESULTS.md` | 백테스트 결과 정리 | 전략 변경/최적화 시 |
+| `docs/BACKTEST_RESULTS.md` | 전략 백테스트 결과 종합 (테마·52주·파라미터) | 전략 변경/최적화 시 |
+| `docs/phase2-4-roadmap.md` | 테마 점수 시스템 고도화 로드맵 (Phase 1~5) | 전략 개선 계획 수립 시 |
+| `docs/backtest_turtle_results.md` | 한국 주식 터틀 전략 백테스트 | 터틀 전략 비교 참고 |
+| `docs/backtest_us_turtle_results.md` | 미국 주식 터틀 전략 백테스트 | 해외 전략 비교 참고 |
 
 ## 버그 & 이슈
 | 문서 | 설명 | 언제 보는가 |
@@ -31,5 +34,16 @@
 | `docs/work-plans/active/` | 진행 중인 작업의 3문서 (PLAN/CONTEXT/CHECKLIST) |
 | `docs/work-plans/completed/` | 완료된 작업 아카이브 |
 
+### 진행 중 작업
+- `active/theme-analysis-pipeline/` — 테마 분석 파이프라인 강화 (뉴스텍스트·종목매핑·화요일 실시간보강)
+- `active/api-fallback-bugfix/` — API 폴백 버그 수정
+
 ### 완료된 작업
+- `20260312_dashboard-readonly-telegram-sell/` — 읽기전용 대시보드 + 텔레그램 매도
+- `20260306_turtle-comparison-backtest/` — 한국 터틀 전략 백테스트
+- `20260306_us-turtle-backtest/` — 미국 터틀 전략 백테스트
+- `20260303_theme-selection-improvement/` — 테마 선정 정규화·매칭 개선
+- `20260303_post-trade-analyzer/` — 매매 사후 분석기
+- `20260303_fix-5-issues/` — 5개 버그 일괄 수정
+- `20260303_datetime-holiday-fix/` — datetime·공휴일 처리
 - `20260226_db-migration-v8/` — DB 스키마 v8 마이그레이션
