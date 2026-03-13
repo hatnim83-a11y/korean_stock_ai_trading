@@ -385,7 +385,7 @@ class TradingSystem:
                 for i, t in enumerate(self.today_themes, 1):
                     t_name = t.get("theme", t.get("name", ""))
                     t_score = t.get("score", 0)
-                    stock_cnt = len(t.get("stocks", []))
+                    stock_cnt = t.get("stock_count", 0) or len(t.get("stocks", []))
                     theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점, {stock_cnt}종목) 📌유지")
                 self.notifier.send_message(
                     f"📊 08:30 테마 분석\n\n"

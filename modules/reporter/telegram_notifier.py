@@ -72,6 +72,12 @@ class TelegramNotifier:
         self._rate_limit_seconds = 5
         self._system_ref = None  # main.py TradingSystem 참조 (pause/resume용)
 
+        # 매도 명령어 pending 상태
+        self._pending_sell: Optional[dict] = None   # {"stock_code", "quantity", "stock_name"}
+        self._pending_sell_all: bool = False
+        self._pending_sell_expires: float = 0
+        self._confirm_timeout_sec = 30
+
         if self._enabled:
             logger.info("텔레그램 알림 초기화 완료")
         else:
@@ -492,12 +498,12 @@ class TelegramNotifier:
         # 상위/하위 종목
         sorted_positions = sorted(
             portfolio,
-            key=lambda x: x.get("profit_rate", 0),
+            key=lambda x: x.get("profit_rate") or 0,
             reverse=True
         )
 
         best_3 = sorted_positions[:3]
-        worst_3 = [p for p in reversed(sorted_positions[-3:]) if p.get("profit_rate", 0) < 0]
+        worst_3 = [p for p in reversed(sorted_positions[-3:]) if (p.get("profit_rate") or 0) < 0]
 
         text = f"""📊 *일일 성과 리포트*
 📅 {now_kst().strftime('%Y-%m-%d')}
@@ -567,13 +573,13 @@ class TelegramNotifier:
 
         text += "\n🔥 *Best 3*\n"
         for i, p in enumerate(best_3, 1):
-            pct = p.get("profit_rate", 0)
+            pct = p.get("profit_rate") or 0
             text += f"  {i}. {p.get('stock_name', '')}: {pct:+.1f}%\n"
 
         if worst_3:
             text += "\n😰 *Worst 3*\n"
             for i, p in enumerate(worst_3, 1):
-                pct = p.get("profit_rate", 0)
+                pct = p.get("profit_rate") or 0
                 text += f"  {i}. {p.get('stock_name', '')}: {pct:+.1f}%\n"
 
         text += f"""
@@ -693,9 +699,10 @@ class TelegramNotifier:
                         text = message.get("text", "")
                         chat_id = message.get("chat", {}).get("id")
 
-                        cmd = text.strip().lower()
                         if not chat_id:
                             continue
+                        raw_text = text.strip()
+                        cmd = raw_text.split()[0].lower() if raw_text else ""
 
                         # 인가되지 않은 사용자 차단
                         if not self._is_authorized(chat_id):
@@ -719,11 +726,27 @@ class TelegramNotifier:
                         elif cmd == "/status":
                             logger.info(f"📱 /status 명령어 수신 (chat_id={chat_id})")
                             self._handle_status_command(chat_id)
+                        elif cmd == "/sell" and raw_text.lower() != "/sellall":
+                            logger.info(f"📱 /sell 명령어 수신 (chat_id={chat_id})")
+                            await self._handle_sell_command(chat_id, raw_text)
+                        elif cmd == "/sellall":
+                            logger.info(f"📱 /sellall 명령어 수신 (chat_id={chat_id})")
+                            await self._handle_sell_all_command(chat_id)
+                        elif cmd == "/confirm":
+                            logger.info(f"📱 /confirm 명령어 수신 (chat_id={chat_id})")
+                            await self._handle_confirm_command(chat_id)
+                        elif cmd == "/cancel":
+                            logger.info(f"📱 /cancel 명령어 수신 (chat_id={chat_id})")
+                            self._handle_cancel_command(chat_id)
                         elif cmd in ("/help", "/start"):
                             self._send_to_chat(chat_id,
                                 "📋 사용 가능한 명령어\n\n"
                                 "/portfolio - 보유 종목 실시간 수익률\n"
-                                "/pause - 매매 일시정지 (모니터링/데이터수집 유지)\n"
+                                "/sell [종목코드] [수량] - 개별 종목 매도\n"
+                                "/sellall - 전 종목 시장가 매도\n"
+                                "/confirm - 매도 확인 (30초 내)\n"
+                                "/cancel - 매도 취소\n"
+                                "/pause - 매매 일시정지\n"
                                 "/resume - 매매 재개\n"
                                 "/status - 시스템 상태 확인\n"
                                 "/help - 명령어 목록"
@@ -800,6 +823,199 @@ class TelegramNotifier:
             f"/resume - 매매 재개"
         )
 
+    # ===== 매도 명령어 핸들러 =====
+
+    async def _handle_sell_command(self, chat_id: int, text: str) -> None:
+        """/sell [종목코드] [수량] 명령어 처리"""
+        import re
+        parts = text.strip().split()
+
+        if len(parts) < 2:
+            self._send_to_chat(chat_id, "사용법: /sell [종목코드] [수량]\n예: /sell 005930 50\n수량 생략 시 전량 매도")
+            return
+
+        stock_code = parts[1]
+        if not re.match(r'^\d{6}$', stock_code):
+            self._send_to_chat(chat_id, "종목코드는 6자리 숫자여야 합니다.\n예: /sell 005930")
+            return
+
+        # DB 보유 확인
+        try:
+            from database import Database
+            db = Database()
+            db.connect()
+            try:
+                holdings = db.get_portfolio(status="holding")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"/sell DB 조회 오류: {e}")
+            self._send_to_chat(chat_id, "DB 조회 오류가 발생했습니다.")
+            return
+
+        pos = next((h for h in holdings if h["stock_code"] == stock_code), None)
+        if not pos:
+            self._send_to_chat(chat_id, f"{stock_code} 종목을 보유하고 있지 않습니다.")
+            return
+
+        stock_name = pos["stock_name"]
+        total_shares = pos.get("shares") or 0
+
+        # 수량 파싱
+        quantity = total_shares
+        if len(parts) >= 3:
+            try:
+                quantity = int(parts[2])
+            except ValueError:
+                self._send_to_chat(chat_id, "수량은 숫자로 입력해주세요.\n예: /sell 005930 50")
+                return
+
+        if quantity <= 0:
+            self._send_to_chat(chat_id, "수량은 1 이상이어야 합니다.")
+            return
+
+        if quantity > total_shares:
+            self._send_to_chat(chat_id, f"보유 수량({total_shares}주)보다 많습니다.")
+            return
+
+        # pending 저장 (30초 TTL)
+        self._pending_sell = {
+            "stock_code": stock_code,
+            "quantity": quantity,
+            "stock_name": stock_name,
+        }
+        self._pending_sell_all = False
+        self._pending_sell_expires = time.monotonic() + self._confirm_timeout_sec
+
+        qty_text = f"{quantity}주" if quantity < total_shares else f"전량({total_shares}주)"
+        self._send_to_chat(chat_id,
+            f"🔔 매도 확인 요청\n\n"
+            f"{stock_name}({stock_code}) {qty_text} 시장가 매도\n\n"
+            f"{self._confirm_timeout_sec}초 내 /confirm 입력 시 실행\n"
+            f"/cancel 로 취소"
+        )
+
+    async def _handle_sell_all_command(self, chat_id: int) -> None:
+        """/sellall 명령어 처리"""
+        try:
+            from database import Database
+            db = Database()
+            db.connect()
+            try:
+                holdings = db.get_portfolio(status="holding")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"/sellall DB 조회 오류: {e}")
+            self._send_to_chat(chat_id, "DB 조회 오류가 발생했습니다.")
+            return
+
+        if not holdings:
+            self._send_to_chat(chat_id, "보유 종목이 없습니다.")
+            return
+
+        # pending 저장 (30초 TTL)
+        self._pending_sell = None
+        self._pending_sell_all = True
+        self._pending_sell_expires = time.monotonic() + self._confirm_timeout_sec
+
+        lines = []
+        for h in holdings:
+            lines.append(f"  - {h['stock_name']} {h.get('shares', 0)}주")
+
+        self._send_to_chat(chat_id,
+            f"⚠️ 전 종목 매도 확인\n\n"
+            f"보유 {len(holdings)}종목 전량 시장가 매도\n"
+            + "\n".join(lines) + "\n\n"
+            f"{self._confirm_timeout_sec}초 내 /confirm 입력 시 실행\n"
+            f"/cancel 로 취소"
+        )
+
+    async def _handle_confirm_command(self, chat_id: int) -> None:
+        """/confirm 명령어 처리"""
+        has_pending = self._pending_sell is not None or self._pending_sell_all
+
+        if not has_pending:
+            self._send_to_chat(chat_id, "대기 중인 매도 주문이 없습니다.\n/sell 또는 /sellall 을 먼저 입력하세요.")
+            return
+
+        if time.monotonic() > self._pending_sell_expires:
+            self._pending_sell = None
+            self._pending_sell_all = False
+            self._send_to_chat(chat_id, "⏰ 확인 시간이 만료되었습니다.\n다시 /sell 또는 /sellall 을 입력해주세요.")
+            return
+
+        try:
+            from web.dashboard_service import execute_sell, execute_sell_all
+
+            if self._pending_sell_all:
+                self._pending_sell_all = False
+                self._pending_sell_expires = 0
+                self._send_to_chat(chat_id, "⏳ 전 종목 매도 실행 중...")
+                result = await execute_sell_all(reason="텔레그램 수동 매도")
+
+                if result.get("success"):
+                    lines = []
+                    for r in result.get("results", []):
+                        stock_name = r.get("stock_name", "")
+                        success = "✅" if r.get("success") else "❌"
+                        lines.append(f"  {success} {stock_name}")
+                    self._send_to_chat(chat_id,
+                        f"✅ 전 종목 매도 완료\n\n"
+                        + "\n".join(lines)
+                    )
+                else:
+                    fail_count = result.get("fail_count", 0)
+                    lines = []
+                    for r in result.get("results", []):
+                        stock_name = r.get("stock_name", "")
+                        success = "✅" if r.get("success") else "❌"
+                        lines.append(f"  {success} {stock_name}")
+                    self._send_to_chat(chat_id,
+                        f"⚠️ 매도 부분 실패 ({fail_count}건 실패)\n\n"
+                        + "\n".join(lines)
+                    )
+
+            elif self._pending_sell:
+                sell_info = self._pending_sell
+                self._pending_sell = None
+                self._pending_sell_expires = 0
+
+                self._send_to_chat(chat_id, f"⏳ {sell_info['stock_name']} 매도 실행 중...")
+                result = await execute_sell(
+                    sell_info["stock_code"],
+                    sell_info["quantity"],
+                    reason="텔레그램 수동 매도"
+                )
+
+                if result.get("success"):
+                    price = result.get("price", 0)
+                    msg = f"✅ 매도 완료\n\n{sell_info['stock_name']}({sell_info['stock_code']}) {sell_info['quantity']}주"
+                    if price > 0:
+                        msg += f"\n체결가: {price:,}원"
+                    self._send_to_chat(chat_id, msg)
+                else:
+                    error_msg = result.get("message", "알 수 없는 오류")
+                    self._send_to_chat(chat_id, f"❌ 매도 실패: {error_msg}")
+
+        except Exception as e:
+            logger.error(f"/confirm 처리 오류: {e}", exc_info=True)
+            self._send_to_chat(chat_id, f"⚠️ 매도 처리 중 오류 발생: {e}")
+            self._pending_sell = None
+            self._pending_sell_all = False
+
+    def _handle_cancel_command(self, chat_id: int) -> None:
+        """/cancel 명령어 처리"""
+        had_pending = self._pending_sell is not None or self._pending_sell_all
+        self._pending_sell = None
+        self._pending_sell_all = False
+        self._pending_sell_expires = 0
+
+        if had_pending:
+            self._send_to_chat(chat_id, "🚫 매도 주문이 취소되었습니다.")
+        else:
+            self._send_to_chat(chat_id, "대기 중인 매도 주문이 없습니다.")
+
     async def _handle_portfolio_command(self, chat_id: int) -> None:
         """
         /portfolio 명령어 처리 — 보유 종목 실시간 수익률 응답
@@ -846,7 +1062,11 @@ class TelegramNotifier:
 
                 # 실시간 가격 조회 (이벤트 루프 블로킹 방지)
                 price_info = await asyncio.to_thread(kis.get_current_price, stock_code)
-                current_price = price_info.get('price', buy_price) if price_info else buy_price
+                if price_info:
+                    current_price = price_info.get('price', buy_price)
+                else:
+                    # API 실패 시 DB에 저장된 current_price 폴백
+                    current_price = int(h.get('current_price') or buy_price)
 
                 invest = shares * buy_price
                 eval_amount = shares * current_price

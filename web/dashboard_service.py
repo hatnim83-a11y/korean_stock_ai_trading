@@ -108,7 +108,11 @@ async def get_portfolio_data() -> dict:
         buy_price = int(h.get("buy_price") or 0)
 
         price_info = await asyncio.to_thread(get_cached_price, kis, stock_code)
-        current_price = price_info.get("price", buy_price) if price_info else buy_price
+        if price_info:
+            current_price = price_info.get("price", buy_price)
+        else:
+            # API 실패 시 DB에 저장된 current_price 폴백
+            current_price = int(h.get("current_price") or buy_price)
 
         invest = shares * buy_price
         eval_amount = shares * current_price
@@ -371,7 +375,7 @@ async def get_system_status() -> dict:
 
 # ===== 매도 액션 =====
 
-async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
+async def execute_sell(stock_code: str, quantity: Optional[int] = None, reason: str = "수동 매도") -> dict:
     """개별 종목 매도"""
     stock_code = validate_stock_code(stock_code)
     order_api = _get_order_api()
@@ -398,7 +402,7 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
         remaining = total_shares - quantity
         if remaining <= 0:
             # 전량 매도: 포지션 청산 + position_state 삭제
-            db.close_position(stock_code, "대시보드 수동 매도")
+            db.close_position(stock_code, reason)
             try:
                 db.delete_position_state(stock_code)
             except Exception:
@@ -440,7 +444,7 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
             "shares": quantity,
             "price": sell_price,
             "amount": sell_price * quantity,
-            "reason": "대시보드 수동 매도",
+            "reason": reason,
             "buy_price": buy_price if buy_price > 0 else None,
             "filled_price": sell_price if sell_price > 0 else None,
             "profit_rate": profit_rate,
@@ -450,7 +454,7 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None) -> dict:
     return result
 
 
-async def execute_sell_all() -> dict:
+async def execute_sell_all(reason: str = "수동 매도") -> dict:
     """전 종목 시장가 매도"""
     db = _get_db()
     holdings = db.get_portfolio(status="holding")
@@ -460,7 +464,7 @@ async def execute_sell_all() -> dict:
 
     results = []
     for h in holdings:
-        r = await execute_sell(h["stock_code"], h.get("shares") or 0)
+        r = await execute_sell(h["stock_code"], h.get("shares") or 0, reason=reason)
         results.append({"stock_code": h["stock_code"], "stock_name": h["stock_name"], **r})
 
     all_success = all(r.get("success") for r in results)

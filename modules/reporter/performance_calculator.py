@@ -302,8 +302,8 @@ class PerformanceCalculator:
         losses = []
         
         for trade in closed_trades:
-            profit_rate = trade.get("profit_rate", 0)
-            
+            profit_rate = trade.get("profit_rate") or 0
+
             if profit_rate > 0:
                 wins.append(profit_rate)
             elif profit_rate < 0:

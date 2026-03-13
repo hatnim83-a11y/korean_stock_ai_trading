@@ -25,6 +25,7 @@ screener.py - 종합 스크리닝 파이프라인
 """
 
 import asyncio
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -186,11 +187,19 @@ def screen_stocks_in_theme(
         for code in stock_codes:
             filter_stats["total"] += 1
             try:
-                # 종목 종합 정보 조회
-                stock_info = kis_api.get_stock_full_info(code)
+                # 종목 종합 정보 조회 (최대 3회 retry, 지수 백오프)
+                stock_info = None
+                for attempt in range(3):
+                    stock_info = kis_api.get_stock_full_info(code)
+                    if stock_info:
+                        break
+                    if attempt < 2:
+                        wait = 2 ** attempt  # 1초, 2초
+                        logger.info(f"[{code}] 조회 실패, {wait}초 후 재시도 ({attempt+1}/3)")
+                        time.sleep(wait)
 
                 if not stock_info:
-                    logger.warning(f"[{code}] 종목 정보 조회 실패")
+                    logger.warning(f"[{code}] 종목 정보 조회 실패 (3회 재시도 후)")
                     filter_stats["info_fail"] += 1
                     continue
 

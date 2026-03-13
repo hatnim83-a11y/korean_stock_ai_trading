@@ -101,6 +101,21 @@
 - `from datetime import time` -> datetime.time 클래스, time(9,0)으로 사용 (표준 time 모듈 아님)
 - now_kst().time() vs time(9,0) 비교: 올바른 사용
 
+### 텔레그램 수동 매도 기능 (2026-03-12, 2026-03-13 검증)
+- `/sell`, `/sellall`, `/confirm`, `/cancel` 핸들러: `telegram_notifier.py` 추가
+- `execute_sell(reason=)` / `execute_sell_all(reason=)`: `dashboard_service.py` reason 파라미터 추가
+- `_pending_sell_all = False` 초기화: line 952에서 await 전에 배치됨 (수정 완료, 2026-03-13 확인)
+- `_pending_sell = None` 초기화: line 981에서 await 전에 배치됨 (두 경로 모두 정상)
+- 미사용 import: `telegram_notifier.py`의 `datetime`/`date` (기능 무관)
+- 30초 TTL: `_confirm_timeout_sec = 30` 인스턴스 변수로 관리됨 (상수 추출 불필요)
+
+### profit_rate None 방어 패턴 주의사항 (2026-03-13)
+- `p.get("profit_rate") or 0` 는 정렬/표시용으로는 올바름
+- `p.get("profit_rate") or 0 < 0` 는 연산자 우선순위 버그: `or`가 `<`보다 낮아 `(profit_rate) or (0 < 0)` 로 파싱됨
+- 올바른 형태: `(p.get("profit_rate") or 0) < 0`
+- 버그 발생 위치: `report_generator.py:328` (any() 조건), `telegram_notifier.py:506` (리스트컴프리헨션 필터)
+- 수정 완료: 2026-03-13
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`

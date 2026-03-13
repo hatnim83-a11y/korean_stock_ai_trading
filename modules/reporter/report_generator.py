@@ -87,7 +87,7 @@ class ReportGenerator:
         # 수익/손실 상위 종목
         sorted_by_profit = sorted(
             portfolio,
-            key=lambda x: x.get("profit_rate", 0),
+            key=lambda x: x.get("profit_rate") or 0,
             reverse=True
         )
         
@@ -196,7 +196,7 @@ class ReportGenerator:
                 "-" * 40
             ])
             for i, p in enumerate(best_3, 1):
-                pct = p.get("profit_rate", 0)
+                pct = p.get("profit_rate") or 0
                 lines.append(f"  {i}. {p.get('stock_name', '')}: {pct:+.2f}%")
             lines.append("")
 
@@ -206,7 +206,7 @@ class ReportGenerator:
                 "-" * 40
             ])
             for i, p in enumerate(reversed(worst_3), 1):
-                pct = p.get("profit_rate", 0)
+                pct = p.get("profit_rate") or 0
                 lines.append(f"  {i}. {p.get('stock_name', '')}: {pct:+.2f}%")
             lines.append("")
 
@@ -319,16 +319,16 @@ class ReportGenerator:
         if best_3:
             lines.append("🔥 *Best 3*")
             for i, p in enumerate(best_3, 1):
-                pct = p.get("profit_rate", 0)
+                pct = p.get("profit_rate") or 0
                 emoji = "🚀" if pct > 5 else "📈"
                 lines.append(f"  {emoji} {p.get('stock_name', '')}: {pct:+.1f}%")
             lines.append("")
 
         # Worst 3
-        if worst_3 and any(p.get("profit_rate", 0) < 0 for p in worst_3):
+        if worst_3 and any((p.get("profit_rate") or 0) < 0 for p in worst_3):
             lines.append("😰 *Worst 3*")
             for i, p in enumerate(reversed(worst_3), 1):
-                pct = p.get("profit_rate", 0)
+                pct = p.get("profit_rate") or 0
                 if pct < 0:
                     lines.append(f"  📉 {p.get('stock_name', '')}: {pct:+.1f}%")
             lines.append("")
@@ -497,7 +497,7 @@ class ReportGenerator:
             shares = p.get("shares", 0)
             buy_price = p.get("buy_price", 0)
             current_price = p.get("current_price", buy_price)
-            profit_rate = p.get("profit_rate", 0)
+            profit_rate = p.get("profit_rate") or 0
             stop_loss = p.get("stop_loss", 0)
             
             cost = shares * buy_price

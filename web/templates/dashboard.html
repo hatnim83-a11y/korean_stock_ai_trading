@@ -108,23 +108,6 @@ tr:hover td { background:#16162a; }
 .sys-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 .error-log { background:#1a0a0a; border:1px solid #2a1515; border-radius:8px; padding:12px; font-family:monospace; font-size:0.75rem; max-height:300px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; color:var(--red); }
 
-/* ===== 액션 ===== */
-.action-box { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:24px; margin-bottom:16px; }
-.action-box h3 { margin-bottom:12px; color:var(--text); }
-.btn { padding:10px 24px; border:none; border-radius:8px; font-weight:600; cursor:pointer; transition:opacity .2s; font-size:0.9rem; }
-.btn:hover { opacity:0.85; }
-.btn-danger { background:var(--red); color:#fff; }
-.btn-primary { background:var(--cyan); color:#0a0a0f; }
-.btn:disabled { opacity:0.4; cursor:not-allowed; }
-.sell-form { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.sell-form input, .sell-form select { padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; }
-.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; justify-content:center; align-items:center; }
-.modal-overlay.show { display:flex; }
-.modal { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:32px; text-align:center; max-width:400px; }
-.modal h3 { margin-bottom:12px; }
-.modal .countdown { font-size:2rem; color:var(--red); font-weight:700; margin:16px 0; }
-.modal .btns { display:flex; gap:12px; justify-content:center; margin-top:16px; }
-
 /* ===== 필터 ===== */
 .filters { display:flex; gap:12px; margin-bottom:16px; align-items:center; flex-wrap:wrap; }
 .filters select, .filters input { padding:6px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.8rem; }
@@ -157,7 +140,6 @@ tr:hover td { background:#16162a; }
   <div class="tab" data-tab="performance">Performance</div>
   <div class="tab" data-tab="news">News</div>
   <div class="tab" data-tab="system">System</div>
-  <div class="tab" data-tab="actions">Actions</div>
 </div>
 
 <!-- 컨텐츠 -->
@@ -249,36 +231,7 @@ tr:hover td { background:#16162a; }
     </div>
   </div>
 
-  <!-- ========== Actions ========== -->
-  <div class="panel" id="panel-actions">
-    <div class="action-box">
-      <h3>전 종목 시장가 매도</h3>
-      <p style="color:var(--text2);font-size:0.85rem;margin-bottom:16px">보유 중인 모든 종목을 시장가로 즉시 매도합니다.</p>
-      <button class="btn btn-danger" id="btn-sell-all">SELL ALL</button>
-    </div>
-    <div class="action-box">
-      <h3>개별 종목 매도</h3>
-      <div class="sell-form">
-        <select id="sell-stock-select"><option value="">종목 선택</option></select>
-        <input type="number" id="sell-qty" placeholder="수량 (빈칸=전량)" min="1">
-        <button class="btn btn-primary" id="btn-sell-one">SELL</button>
-      </div>
-    </div>
-  </div>
 
-</div>
-
-<!-- 확인 모달 -->
-<div class="modal-overlay" id="confirm-modal">
-  <div class="modal">
-    <h3 id="modal-title">매도 확인</h3>
-    <p id="modal-desc" style="color:var(--text2);font-size:0.9rem"></p>
-    <div class="countdown" id="modal-countdown">3</div>
-    <div class="btns">
-      <button class="btn" style="background:#333;color:#ccc" id="modal-cancel">취소</button>
-      <button class="btn btn-danger" id="modal-confirm" disabled>확인</button>
-    </div>
-  </div>
 </div>
 
 <script>
@@ -353,11 +306,6 @@ async function loadPortfolio() {
       <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.7rem;color:var(--text2)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
     </tr>`).join('');
   }
-
-  // 매도 셀렉트 업데이트
-  const sel = document.getElementById('sell-stock-select');
-  sel.innerHTML = '<option value="">종목 선택</option>' +
-    holdingsData.map(h => `<option value="${h.stock_code}">${h.stock_name} (${h.shares}주)</option>`).join('');
 
   // 포트폴리오 하단 테마 로드
   const themeData = await api('/themes?days=7');
@@ -478,74 +426,6 @@ async function loadSystem() {
   const logEl = document.getElementById('error-log');
   logEl.textContent = d.recent_errors.length ? d.recent_errors.join('\n') : '에러 없음';
 }
-
-// ===== Actions =====
-let pendingAction = null;
-let countdownTimer = null;
-
-document.getElementById('btn-sell-all').addEventListener('click', () => {
-  showConfirm('전 종목 매도', '보유 중인 모든 종목을 시장가로 매도합니다.', async () => {
-    const res = await fetch('/api/v1/actions/sell-all', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})
-    });
-    const data = await res.json();
-    alert(JSON.stringify(data, null, 2));
-    loadPortfolio();
-  });
-});
-
-document.getElementById('btn-sell-one').addEventListener('click', () => {
-  const code = document.getElementById('sell-stock-select').value;
-  if (!code) { alert('종목을 선택하세요'); return; }
-  const qty = document.getElementById('sell-qty').value || null;
-  const name = document.getElementById('sell-stock-select').selectedOptions[0].text;
-  showConfirm(`${name} 매도`, `${name}을(를) ${qty ? qty+'주' : '전량'} 시장가 매도합니다.`, async () => {
-    const body = {stock_code: code, confirm: true};
-    if (qty) body.quantity = parseInt(qty);
-    const res = await fetch('/api/v1/actions/sell', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
-    });
-    const data = await res.json();
-    alert(JSON.stringify(data, null, 2));
-    loadPortfolio();
-  });
-});
-
-function showConfirm(title, desc, onConfirm) {
-  const modal = document.getElementById('confirm-modal');
-  document.getElementById('modal-title').textContent = title;
-  document.getElementById('modal-desc').textContent = desc;
-  const confirmBtn = document.getElementById('modal-confirm');
-  const countdownEl = document.getElementById('modal-countdown');
-  confirmBtn.disabled = true;
-  modal.classList.add('show');
-
-  let sec = 3;
-  countdownEl.textContent = sec;
-  countdownTimer = setInterval(() => {
-    sec--;
-    countdownEl.textContent = sec;
-    if (sec <= 0) {
-      clearInterval(countdownTimer);
-      confirmBtn.disabled = false;
-      countdownEl.textContent = 'OK';
-    }
-  }, 1000);
-
-  pendingAction = onConfirm;
-}
-
-document.getElementById('modal-cancel').addEventListener('click', () => {
-  document.getElementById('confirm-modal').classList.remove('show');
-  clearInterval(countdownTimer);
-  pendingAction = null;
-});
-document.getElementById('modal-confirm').addEventListener('click', () => {
-  document.getElementById('confirm-modal').classList.remove('show');
-  clearInterval(countdownTimer);
-  if (pendingAction) pendingAction();
-  pendingAction = null;
-});
 
 // ===== 탭 로드 =====
 function loadTab(tab) {
