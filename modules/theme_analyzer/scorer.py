@@ -509,10 +509,14 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
     # KIS API 인스턴스 (테마 종목 가격 조회용)
     kis = _get_kis_api()
 
-    # 뉴스 건수 수집 (상위 테마 대상)
-    news_counts = {}
+    # 종목 매핑 (URL 있는 테마에 stocks 추가 → KIS API 모멘텀 활성화)
     if include_news:
-        news_counts = _collect_news_counts(themes)
+        _enrich_theme_stocks(themes)
+
+    # 뉴스 건수+텍스트 수집 (상위 테마 대상)
+    news_data = {}  # {theme_name: {"count": int, "text": str}}
+    if include_news:
+        news_data = _collect_news_data(themes)
 
     for theme in themes:
         theme_name = theme.get("name", theme.get("theme", ""))
@@ -525,7 +529,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
         momentum_score = ((clamped + 10) / 20) * MAX_MOMENTUM_SCORE
 
         # 2. 뉴스 점수 (최대 15점)
-        news_count = news_counts.get(theme_name, theme.get("news_count", 0) or 0)
+        theme_news = news_data.get(theme_name, {})
+        news_count = theme_news.get("count", 0) if theme_news else (theme.get("news_count", 0) or 0)
+        news_text = theme_news.get("text", "") if theme_news else ""
         news_score = calculate_news_score(news_count) if news_count > 0 else 0.0
 
         # 3. AI 감성 점수 (최대 10점) — 이미 theme에 있으면 재사용
@@ -586,6 +592,7 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
             "supply_score": 0,
             "news_score": round(news_score, 2),
             "news_count": news_count,
+            "news": news_text,  # AI 감성분석용 뉴스 텍스트
             "ai_score": round(ai_score, 2),
             "ai_sentiment": round(ai_sentiment, 2) if ai_sentiment else 0,
             "overheat_penalty": round(overheat, 2),
@@ -609,27 +616,70 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
     return scored_themes
 
 
-def _collect_news_counts(themes: list[dict]) -> dict[str, int]:
-    """상위 30개 테마의 뉴스 건수 일괄 수집"""
+def _collect_news_data(themes: list[dict]) -> dict[str, dict]:
+    """
+    상위 30개 테마의 뉴스 건수 + 텍스트 일괄 수집
+
+    Returns:
+        {theme_name: {"count": int, "text": str}}
+    """
     try:
-        from modules.theme_analyzer.crawlers import crawl_theme_news_count
+        from modules.theme_analyzer.crawlers import crawl_theme_news, _random_delay
     except ImportError:
-        logger.warning("[scorer] crawl_theme_news_count 임포트 실패")
+        logger.warning("[scorer] crawl_theme_news 임포트 실패")
         return {}
 
-    counts = {}
+    results = {}
     for theme in themes[:30]:
         theme_name = theme.get("name", theme.get("theme", ""))
         if not theme_name:
             continue
         try:
-            count = crawl_theme_news_count(theme_name, days=3)
-            if count and count > 0:
-                counts[theme_name] = count
+            data = crawl_theme_news(theme_name, days=3)
+            if data and data.get("count", 0) > 0:
+                results[theme_name] = data
+            _random_delay()
         except Exception as e:
             logger.debug(f"[scorer] 뉴스 수집 실패 ({theme_name}): {e}")
-    logger.info(f"📰 뉴스 건수 수집: {len(counts)}개 테마")
-    return counts
+    logger.info(f"📰 뉴스 수집: {len(results)}개 테마 (텍스트 포함)")
+    return results
+
+
+def _enrich_theme_stocks(themes: list[dict], max_stocks: int = 3) -> None:
+    """
+    URL 있는 테마에 종목코드 리스트 추가 (in-place)
+
+    상위 15개 테마의 URL에서 crawl_naver_theme_stocks()로 종목 코드를 추출하여
+    theme["stocks"] = [code1, code2, ...] 세팅. 실패 시 빈 리스트.
+
+    Args:
+        themes: 점수화 대상 테마 리스트
+        max_stocks: 테마당 최대 종목 수
+    """
+    try:
+        from modules.theme_analyzer.crawlers import crawl_naver_theme_stocks, _random_delay
+    except ImportError:
+        logger.warning("[scorer] crawl_naver_theme_stocks 임포트 실패")
+        return
+
+    enriched = 0
+    for theme in themes[:15]:
+        url = theme.get("url", "")
+        if not url:
+            theme.setdefault("stocks", [])
+            continue
+        try:
+            stocks = crawl_naver_theme_stocks(url)
+            theme["stocks"] = [s["code"] for s in stocks[:max_stocks]]
+            if theme["stocks"]:
+                enriched += 1
+                logger.debug(f"[{theme.get('name', '')}] 종목 매핑: {theme['stocks']}")
+            _random_delay()
+        except Exception as e:
+            theme["stocks"] = []
+            logger.debug(f"[scorer] 종목 매핑 실패 ({theme.get('name', '')}): {e}")
+
+    logger.info(f"🔗 종목 매핑: {enriched}/{min(len(themes), 15)}개 테마")
 
 
 # ===== 직접 실행 시 테스트 =====

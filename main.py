@@ -416,6 +416,8 @@ class TradingSystem:
                 scored_themes = aggregate_weekly_scores(self.db, base_date=today - timedelta(days=1))
                 if scored_themes:
                     logger.info(f"   가중 집계 완료: {len(scored_themes)}개 테마")
+                    # 실시간 보강: 상위 15개 테마의 모멘텀 + 뉴스 + AI 보정
+                    scored_themes = await self._enrich_tuesday_themes(scored_themes)
                 else:
                     logger.warning("   가중 집계 데이터 없음 → 실시간 크롤링 폴백")
                     is_tuesday = False  # 폴백
@@ -499,7 +501,7 @@ class TradingSystem:
                 except Exception as e:
                     logger.error(f"   종목 URL 보충 실패: {e}")
 
-            # 5. DB 저장 (대시보드 테마 탭용)
+            # 5. DB 저장 (대시보드 테마 탭용, url 포함)
             try:
                 themes_to_save = [
                     {
@@ -510,6 +512,7 @@ class TradingSystem:
                         "news_count": t.get("news_count", 0),
                         "ai_sentiment": t.get("ai_sentiment", 0),
                         "category": t.get("category", "기타"),
+                        "url": t.get("url", ""),
                     }
                     for t in themes
                 ]
@@ -1511,6 +1514,121 @@ class TradingSystem:
 
     # ===== 17:05 일별 테마 데이터 수집 =====
 
+    async def _enrich_tuesday_themes(self, scored_themes: list[dict]) -> list[dict]:
+        """
+        화요일 08:30 실시간 보강: DB 가중평균에 실시간 모멘텀·뉴스·AI를 반영
+
+        상위 15개 테마에 대해:
+        1. URL 확보 (DB → 크롤링 보충)
+        2. 종목 매핑 → KIS API 5일 수익률
+        3. 뉴스 수집 → AI 감성분석
+        4. DB 점수와 차이가 크면 조건부 보정
+
+        실패 시 원본 scored_themes 그대로 반환 (폴백 안전).
+        """
+        try:
+            from modules.theme_analyzer.crawlers import (
+                crawl_naver_theme_stocks, crawl_theme_news, search_naver_theme, _random_delay
+            )
+            from modules.theme_analyzer.scorer import _get_kis_api, _calculate_theme_momentum
+            from modules.theme_analyzer.ai_analyzer import analyze_themes_sync
+            from modules.theme_analyzer.scorer import calculate_ai_sentiment_score
+
+            top_15 = scored_themes[:15]
+            logger.info(f"\n🔄 Step 1-B: 화요일 실시간 보강 ({len(top_15)}개 테마)")
+
+            # 1. URL 없는 테마 보충
+            for t in top_15:
+                if not t.get("url"):
+                    result = await asyncio.to_thread(
+                        search_naver_theme, t.get("theme", t.get("name", ""))
+                    )
+                    if result and result.get("url"):
+                        t["url"] = result["url"]
+
+            # 2. 종목 매핑 + KIS API 모멘텀
+            kis = _get_kis_api()
+            momentum_updates = 0
+            for t in top_15:
+                url = t.get("url", "")
+                if not url:
+                    continue
+                try:
+                    stocks = await asyncio.to_thread(crawl_naver_theme_stocks, url)
+                    t["stocks"] = [s["code"] for s in stocks[:3]]
+                    if t["stocks"]:
+                        realtime_momentum = await asyncio.to_thread(
+                            _calculate_theme_momentum, t, kis
+                        )
+                        db_momentum = t.get("momentum", 0) or 0
+                        momentum_delta = realtime_momentum - db_momentum
+                        if abs(momentum_delta) > 3.0:
+                            adjustment = momentum_delta * 1.5
+                            t["total_score"] = round(t.get("total_score", 0) + adjustment, 2)
+                            t["score"] = t["total_score"]
+                            t["momentum_realtime"] = round(realtime_momentum, 2)
+                            momentum_updates += 1
+                            logger.info(
+                                f"   [{t.get('theme', '')}] 모멘텀 보정: "
+                                f"DB {db_momentum:+.1f} → 실시간 {realtime_momentum:+.1f} "
+                                f"(delta {momentum_delta:+.1f}, 점수 {adjustment:+.1f})"
+                            )
+                except Exception as e:
+                    logger.debug(f"   [{t.get('theme', '')}] 종목 매핑/모멘텀 실패: {e}")
+
+            # 3. 뉴스 수집 + AI 감성분석
+            ai_updates = 0
+            for t in top_15:
+                t_name = t.get("theme", t.get("name", ""))
+                try:
+                    news_data = await asyncio.to_thread(crawl_theme_news, t_name)
+                    if news_data and news_data.get("text"):
+                        t["news"] = news_data["text"]
+                        t["news_count"] = news_data.get("count", t.get("news_count", 0))
+                except Exception as e:
+                    logger.debug(f"   [{t_name}] 뉴스 수집 실패: {e}")
+
+            # AI 일괄 분석 (news 텍스트가 있는 테마만)
+            themes_for_ai = [t for t in top_15 if t.get("news") and len(t["news"]) >= 50]
+            if themes_for_ai:
+                try:
+                    ai_results = await asyncio.to_thread(analyze_themes_sync, themes_for_ai)
+                    if ai_results:
+                        ai_map = {r["theme_name"]: r for r in ai_results if r and "theme_name" in r}
+                        for t in top_15:
+                            t_name = t.get("theme", t.get("name", ""))
+                            if t_name in ai_map:
+                                realtime_ai = ai_map[t_name].get("score", 0)
+                                db_ai = t.get("ai_sentiment", 0) or 0
+                                ai_delta = realtime_ai - db_ai
+                                if abs(ai_delta) > 2.0:
+                                    ai_score_new = calculate_ai_sentiment_score(realtime_ai)
+                                    ai_score_old = calculate_ai_sentiment_score(db_ai) if db_ai else 0
+                                    adjustment = ai_score_new - ai_score_old
+                                    t["total_score"] = round(t.get("total_score", 0) + adjustment, 2)
+                                    t["score"] = t["total_score"]
+                                    t["ai_sentiment"] = realtime_ai
+                                    t["ai_score"] = ai_score_new
+                                    ai_updates += 1
+                                    logger.info(
+                                        f"   [{t_name}] AI 보정: "
+                                        f"DB {db_ai:.1f} → 실시간 {realtime_ai:.1f} "
+                                        f"(점수 {adjustment:+.1f})"
+                                    )
+                except Exception as e:
+                    logger.warning(f"   AI 분석 실패 (폴백): {e}")
+
+            # 재정렬
+            scored_themes.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+            logger.info(
+                f"   실시간 보강 완료: 모멘텀 {momentum_updates}건, AI {ai_updates}건 보정"
+            )
+
+        except Exception as e:
+            logger.warning(f"   화요일 실시간 보강 실패 (DB 가중평균 유지): {e}")
+
+        return scored_themes
+
     async def run_daily_theme_collection(self) -> None:
         """일별 테마 데이터 수집 (17:05, 장 마감 후)
 
@@ -1566,7 +1684,7 @@ class TradingSystem:
             except Exception as ai_err:
                 logger.warning(f"   AI 감성 분석 스킵: {ai_err}")
 
-            # 4. DB 저장
+            # 4. DB 저장 (url 포함)
             themes_to_save = [
                 {
                     "theme": t.get("theme", t.get("name", "")),
@@ -1576,6 +1694,7 @@ class TradingSystem:
                     "news_count": t.get("news_count", 0),
                     "ai_sentiment": t.get("ai_sentiment", 0),
                     "category": t.get("category", "기타"),
+                    "url": t.get("url", ""),
                 }
                 for t in scored_themes
             ]

@@ -22,8 +22,10 @@ crawlers.py - 테마 데이터 크롤링 모듈
 """
 
 import json
+import re
 import time
 import random
+from html import unescape
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 from config import now_kst
@@ -401,7 +403,80 @@ def crawl_krx_themes() -> list[dict]:
     return themes
 
 
-# ===== 뉴스 언급 빈도 크롤링 =====
+# ===== 뉴스 HTML 클렌징 =====
+
+def _clean_news_html(raw: str) -> str:
+    """HTML 태그 및 엔티티 제거 (unescape 먼저 → 태그 제거)"""
+    text = unescape(raw)
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()
+
+
+# ===== 뉴스 텍스트 + 건수 수집 =====
+
+def crawl_theme_news(theme_name: str, days: int = 3, max_items: int = 5) -> dict:
+    """
+    뉴스 건수 + 텍스트 수집 (AI 감성분석용)
+
+    네이버 Open API display=max_items로 제목+본문 수집.
+    API 키 없으면 스크래핑 폴백.
+
+    Args:
+        theme_name: 테마명
+        days: 조회 일수 (스크래핑 폴백에서만 사용, API 경로는 날짜 필터 없음)
+        max_items: 수집할 뉴스 수 (기본 5)
+
+    Returns:
+        {"count": int, "text": str}
+    """
+    from config import settings
+
+    client_id = settings.NAVER_CLIENT_ID
+    client_secret = settings.NAVER_CLIENT_SECRET
+
+    if not client_id or not client_secret:
+        logger.warning(f"[{theme_name}] 네이버 API 키 미설정 — 스크래핑 fallback")
+        count = _crawl_theme_news_count_scrape(theme_name, days)
+        return {"count": count, "text": ""}
+
+    try:
+        search_query = f"{theme_name} 주식"
+        url = "https://openapi.naver.com/v1/search/news.json"
+        headers = {
+            "X-Naver-Client-Id": client_id,
+            "X-Naver-Client-Secret": client_secret,
+        }
+        params = {
+            "query": search_query,
+            "display": max_items,
+            "sort": "date",
+        }
+
+        response = httpx.get(url, headers=headers, params=params, timeout=10.0)
+        response.raise_for_status()
+
+        data = response.json()
+        count = data.get("total", 0)
+        items = data.get("items", [])
+
+        # 제목 + 설명(본문 요약)을 합쳐 텍스트 생성
+        text_parts = []
+        for item in items:
+            title = _clean_news_html(item.get("title", ""))
+            desc = _clean_news_html(item.get("description", ""))
+            if title:
+                text_parts.append(f"- {title}: {desc}" if desc else f"- {title}")
+
+        news_text = "\n".join(text_parts)
+        logger.debug(f"[{theme_name}] 뉴스 {count}건, 텍스트 {len(news_text)}자 (API)")
+        return {"count": count, "text": news_text}
+
+    except Exception as e:
+        logger.warning(f"[{theme_name}] 뉴스 API 조회 실패: {e}")
+        return {"count": 0, "text": ""}
+
+
+# ===== 뉴스 언급 빈도 크롤링 (기존 호환) =====
 
 def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
     """

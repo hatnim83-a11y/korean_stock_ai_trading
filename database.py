@@ -172,6 +172,7 @@ class Database:
             (9, "post_trade_prices 테이블", self._migrate_v9),
             (10, "themes에 category 컬럼 추가", self._migrate_v10),
             (11, "themes에 selected 컬럼 추가", self._migrate_v11),
+            (12, "themes에 url 컬럼 추가", self._migrate_v12),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -408,6 +409,14 @@ class Database:
             except Exception:
                 pass  # 이미 존재하면 무시
 
+    def _migrate_v12(self) -> None:
+        """themes 테이블에 url 컬럼 추가 (화요일 실시간 보강용)"""
+        with self.get_cursor() as cursor:
+            try:
+                cursor.execute("ALTER TABLE themes ADD COLUMN url VARCHAR(200) DEFAULT ''")
+            except Exception:
+                pass  # 이미 존재하면 무시
+
     def init_tables(self) -> None:
         """
         모든 테이블 생성
@@ -572,7 +581,7 @@ class Database:
                         # selected=1 행은 점수만 업데이트, selected 플래그 유지
                         cursor.execute("""
                             UPDATE themes SET score = ?, momentum = ?, supply_ratio = ?,
-                                news_count = ?, ai_sentiment = ?, category = ?
+                                news_count = ?, ai_sentiment = ?, category = ?, url = ?
                             WHERE date = ? AND theme_name = ?
                         """, (
                             theme['score'],
@@ -581,6 +590,7 @@ class Database:
                             theme.get('news_count', 0),
                             theme.get('ai_sentiment', 0),
                             theme.get('category', '기타'),
+                            theme.get('url', ''),
                             target_date,
                             theme['theme'],
                         ))
@@ -589,8 +599,8 @@ class Database:
                 cursor.execute("""
                     INSERT OR REPLACE INTO themes (
                         date, theme_name, score, momentum, supply_ratio,
-                        news_count, ai_sentiment, category, selected
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        news_count, ai_sentiment, category, selected, url
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     target_date,
                     theme['theme'],
@@ -601,6 +611,7 @@ class Database:
                     theme.get('ai_sentiment', 0),
                     theme.get('category', '기타'),
                     1 if selected else 0,
+                    theme.get('url', ''),
                 ))
 
         logger.info(f"{len(themes)}개 테마 점수 저장 완료 ({target_date}, selected={selected})")

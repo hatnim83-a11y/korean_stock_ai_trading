@@ -75,7 +75,8 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
 
     with db.get_cursor() as cursor:
         cursor.execute(f"""
-            SELECT date, theme_name, score, momentum, news_count, ai_sentiment, category
+            SELECT date, theme_name, score, momentum, news_count, ai_sentiment, category,
+                   COALESCE(url, '') as url
             FROM themes
             WHERE date IN ({placeholders})
             ORDER BY date DESC
@@ -114,6 +115,7 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
                 "category": row.get("category", "기타"),
                 "days_found": 0,
                 "daily_scores": {},
+                "url": "",
             }
 
         td = theme_data[name]
@@ -126,6 +128,9 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
             td["ai_count"] += 1
         td["days_found"] += 1
         td["daily_scores"][row_date] = round(row.get("score", 0) or 0, 1)
+        # 가장 최근 날짜의 url 보존
+        if row.get("url") and not td["url"]:
+            td["url"] = row["url"]
 
     # 가중 평균 계산
     results = []
@@ -150,6 +155,7 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
             "category": td["category"],
             "days_found": td["days_found"],
             "daily_scores": td["daily_scores"],
+            "url": td["url"],
             "selection_reason": f"{td['days_found']}일누적",
             "grade": _grade(avg_score),
         })
