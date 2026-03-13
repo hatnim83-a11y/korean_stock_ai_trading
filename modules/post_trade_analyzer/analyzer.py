@@ -34,7 +34,9 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1500
 MAX_TOKENS_WEEKLY = 2000
 TEMPERATURE = 0.3
-MIN_DAYS_AFTER_SELL = 5
+MIN_DAYS_AFTER_SELL = 5       # 수집할 영업일 수
+MIN_CALENDAR_DAYS_WAIT = 8    # DB 쿼리 대기 캘린더일 (영업일 5일 + 주말 + 버퍼)
+MIN_PRICES_REQUIRED = 4       # AI 분석에 필요한 최소 주가 데이터 수
 
 
 class PostTradeAnalyzer:
@@ -179,7 +181,7 @@ class PostTradeAnalyzer:
             분석 완료된 결과 리스트
         """
         db = self._get_db()
-        reviews = db.get_reviews_ready_for_analysis(min_days=MIN_DAYS_AFTER_SELL)
+        reviews = db.get_reviews_ready_for_analysis(min_days=MIN_CALENDAR_DAYS_WAIT)
 
         if not reviews:
             logger.info("[PostTradeAnalyzer] 분석 대상 없음 (D+5 미달 또는 전부 분석 완료)")
@@ -214,6 +216,11 @@ class PostTradeAnalyzer:
             # 2) DB에 주가 추이 저장
             if prices:
                 db.save_post_trade_prices(review_id, prices)
+
+            # 주가 데이터 부족 시 다음 주기로 연기
+            if len(prices) < MIN_PRICES_REQUIRED:
+                logger.info(f"[PostTradeAnalyzer] {stock_name}: 주가 데이터 {len(prices)}건 < {MIN_PRICES_REQUIRED}건, 다음 주기로 연기")
+                continue
 
             # 3) AI 분석
             ai_result = self._analyze_single(review, prices)
