@@ -92,15 +92,21 @@ tr:hover td { background:#16162a; }
 
 /* ===== 테마 카드 ===== */
 .theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; margin-bottom:20px; }
+.theme-grid.active-grid { grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
 .theme-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; transition:border-color .2s; }
-.theme-card.selected { border-color:var(--green); box-shadow:0 0 8px rgba(0,255,136,0.15); }
-.theme-card.candidate { border-color:var(--border); opacity:0.85; }
+.theme-card.active { background:rgba(0,255,136,0.03); border:1px solid rgba(0,255,136,0.35); }
+.theme-card.active .name { color:var(--cyan); }
+.theme-card.active .score { color:var(--green); }
+.theme-card.candidate { border-color:var(--border); opacity:0.8; }
 .theme-card .name { font-size:1rem; font-weight:700; color:var(--cyan); margin-bottom:8px; }
 .theme-card .score { font-size:1.8rem; font-weight:700; }
 .theme-card .meta { font-size:0.75rem; color:var(--text2); margin-top:6px; }
 .theme-badge { display:inline-block; padding:2px 6px; border-radius:3px; font-size:0.6rem; font-weight:700; margin-left:6px; vertical-align:middle; }
-.theme-badge.badge-selected { background:rgba(0,255,136,0.15); color:var(--green); }
+.theme-badge.badge-active { background:rgba(0,255,136,0.2); color:var(--green); border:1px solid rgba(0,255,136,0.3); }
 .theme-badge.badge-candidate { background:rgba(136,136,136,0.15); color:var(--text2); }
+.active-header { display:flex; align-items:center; gap:8px; margin:0 0 14px; }
+.active-header h3 { margin:0; color:var(--green); }
+.active-header .next-eval { font-size:0.75rem; color:var(--text2); }
 
 /* ===== 뉴스 ===== */
 .news-item { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:8px; }
@@ -163,9 +169,12 @@ tr:hover td { background:#16162a; }
       </table>
     </div>
     <hr class="section-divider">
-    <h3 style="margin:0 0 12px;color:var(--green)">금주 선정 테마</h3>
-    <div class="theme-grid" id="selected-theme-grid"></div>
-    <h3 style="margin:16px 0 12px;color:var(--text2)">검토/조사 중 테마</h3>
+    <div class="active-header">
+      <h3>금주 투자 테마</h3>
+      <span class="next-eval" id="next-eval-date"></span>
+    </div>
+    <div class="theme-grid active-grid" id="selected-theme-grid"></div>
+    <h3 style="margin:16px 0 12px;color:var(--text2)">일별 수집 테마</h3>
     <div class="theme-grid" id="candidate-theme-grid"></div>
     <h3 style="margin:4px 0 12px">Theme History</h3>
     <div class="table-wrap">
@@ -323,15 +332,16 @@ async function loadPortfolio() {
       grid.innerHTML = '<p style="color:var(--text2)">테마 데이터 없음</p>';
       return;
     }
-    grid.innerHTML = themes.map(t => {
+    grid.innerHTML = themes.map((t, idx) => {
       const score = Number(t.score);
       const grade = score >= 58 ? 'S' : score >= 48 ? 'A' : score >= 38 ? 'B' : score >= 30 ? 'C' : 'D';
       const gradeColor = score >= 58 ? 'var(--green)' : score >= 48 ? 'var(--cyan)' : score >= 38 ? 'var(--yellow)' : 'var(--text2)';
       let meta = `Momentum: ${Number(t.momentum||0).toFixed(1)}`;
       if (t.supply_ratio) meta += ` | Supply: ${Number(t.supply_ratio).toFixed(0)}%`;
       if (t.news_count) meta += ` | News: ${t.news_count}`;
+      const rank = cardClass === 'active' ? `<span style="color:var(--green);font-size:0.75rem;margin-right:4px">#${idx+1}</span>` : '';
       return `<div class="theme-card ${cardClass}">
-        <div class="name">${t.theme_name} <span style="color:${gradeColor};font-size:0.8rem">${grade}</span><span class="theme-badge ${badgeClass}">${badgeLabel}</span></div>
+        <div class="name">${rank}${t.theme_name} <span style="color:${gradeColor};font-size:0.8rem">${grade}</span><span class="theme-badge ${badgeClass}">${badgeLabel}</span></div>
         <div class="score">${score.toFixed(1)}</div>
         <div class="meta">${meta}</div>
         <div class="meta" style="margin-top:4px;font-size:0.65rem">${t.date}</div>
@@ -340,11 +350,18 @@ async function loadPortfolio() {
   }
 
   if (themeData) {
-    // selected_themes가 있으면 2단 분리, 없으면 current_themes 폴백
-    const selectedThemes = themeData.selected_themes && themeData.selected_themes.length
+    const activeThemes = themeData.selected_themes && themeData.selected_themes.length
       ? themeData.selected_themes : themeData.current_themes;
-    renderThemeCards(selectedThemes, 'selected-theme-grid', 'selected', 'SELECTED', 'badge-selected');
+    renderThemeCards(activeThemes, 'selected-theme-grid', 'active', 'ACTIVE', 'badge-active');
     renderThemeCards(themeData.candidate_themes, 'candidate-theme-grid', 'candidate', 'REVIEW', 'badge-candidate');
+    // 다음 재평가일 표시
+    if (activeThemes && activeThemes.length) {
+      const selDate = new Date(activeThemes[0].date);
+      const nextTue = new Date(selDate);
+      nextTue.setDate(nextTue.getDate() + ((9 - nextTue.getDay()) % 7 || 7));
+      document.getElementById('next-eval-date').textContent =
+        `(${activeThemes[0].date} 선정 / 다음 재평가: ${nextTue.toISOString().slice(0,10)})`;
+    }
   } else {
     document.getElementById('selected-theme-grid').innerHTML = '<p style="color:var(--text2)">테마 데이터 없음</p>';
     document.getElementById('candidate-theme-grid').innerHTML = '';
