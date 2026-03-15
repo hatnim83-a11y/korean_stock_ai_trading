@@ -35,11 +35,17 @@
 | `docs/work-plans/completed/` | 완료된 작업 아카이브 |
 
 ### 진행 중 작업
-- `active/theme-analysis-pipeline/` — 테마 분석 파이프라인 강화 (뉴스텍스트·종목매핑·화요일 실시간보강)
-- `active/api-fallback-bugfix/` — API 폴백 버그 수정
+- (없음)
 
 ### 완료된 작업
+- `20260315_dashboard-mobile-responsive/` — 모바일 반응형 + Cloudflare Tunnel
+- `20260314_dashboard-theme-supply-fix/` — 테마 수급비율 표시 버그 수정
+- `20260313_api-fallback-bugfix/` — API 폴백 버그 수정
+- `20260313_theme-analysis-pipeline/` — 테마 분석 파이프라인 강화
 - `20260312_dashboard-readonly-telegram-sell/` — 읽기전용 대시보드 + 텔레그램 매도
+- `20260309_theme-category/` — 테마 카테고리 자동분류
+- `20260309_theme-overheat-penalty/` — 테마 과열 감점 시스템
+- `20260309_theme-retention/` — 테마 연장 로직
 - `20260306_turtle-comparison-backtest/` — 한국 터틀 전략 백테스트
 - `20260306_us-turtle-backtest/` — 미국 터틀 전략 백테스트
 - `20260303_theme-selection-improvement/` — 테마 선정 정규화·매칭 개선

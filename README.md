@@ -66,7 +66,10 @@ korean_stock_ai_trading/
 │   ├── rebalancer/            # 리밸런싱 모듈
 │   └── reporter/              # 성과 리포팅 모듈
 │
-├── backtesting/               # 백테스팅 도구
+├── web/                       # 웹 대시보드 (FastAPI)
+├── deploy/                    # 배포 설정 (systemd, env 예시)
+├── scripts/                   # 유틸리티/백테스트 스크립트
+├── docs/                      # 프로젝트 문서
 ├── data/                      # 데이터베이스 파일
 ├── logs/                      # 로그 파일
 └── tests/                     # 테스트 코드
@@ -91,7 +94,7 @@ pip install -r requirements.txt
 
 ### 3. 환경 변수 설정
 ```bash
-cp env_example.txt .env
+cp deploy/env_example.txt .env
 nano .env  # 실제 API 키 입력
 ```
 
@@ -131,7 +134,7 @@ python main.py
 
 ### 백그라운드 실행 (systemd)
 ```bash
-sudo cp trading_system.service /etc/systemd/system/
+sudo cp deploy/trading_system.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable trading_system
 sudo systemctl start trading_system
