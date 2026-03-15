@@ -303,13 +303,29 @@ async def get_themes_data(days: int = 30) -> dict:
         )
         all_themes = [dict(r) for r in cursor.fetchall()]
 
-    # 최신 날짜 테마
-    current_themes = []
-    if all_themes:
-        latest_date = all_themes[0]["date"]
-        current_themes = [t for t in all_themes if t["date"] == latest_date]
+    # selected=1: 최신 날짜의 선정 테마
+    selected_themes = []
+    all_selected = [t for t in all_themes if t.get("selected") == 1]
+    if all_selected:
+        latest_selected_date = all_selected[0]["date"]  # DESC 정렬
+        selected_themes = [t for t in all_selected if t["date"] == latest_selected_date]
 
-    return {"current_themes": current_themes, "history": all_themes}
+    # candidate: 최신 날짜의 미선정 테마 (selected=0)
+    candidate_themes = []
+    non_selected = [t for t in all_themes if t.get("selected") != 1]
+    if non_selected:
+        latest_candidate_date = non_selected[0]["date"]
+        candidate_themes = [t for t in non_selected if t["date"] == latest_candidate_date]
+
+    # 하위 호환: current_themes = selected 우선, 없으면 candidate
+    current_themes = selected_themes if selected_themes else candidate_themes
+
+    return {
+        "current_themes": current_themes,
+        "selected_themes": selected_themes,
+        "candidate_themes": candidate_themes,
+        "history": all_themes,
+    }
 
 
 # ===== 뉴스 =====

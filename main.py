@@ -501,14 +501,38 @@ class TradingSystem:
                 except Exception as e:
                     logger.error(f"   종목 URL 보충 실패: {e}")
 
-            # 5. DB 저장 (대시보드 테마 탭용, url 포함)
+            # 5. 전일 수급비율 DB 조회 (장 시작 전 — API 호출 불필요)
+            try:
+                prev_supply = {}
+                with self.db.get_cursor() as cursor:
+                    cursor.execute(
+                        "SELECT theme_name, supply_ratio FROM themes "
+                        "WHERE selected = 0 AND supply_ratio > 0 "
+                        "ORDER BY date DESC LIMIT 100"
+                    )
+                    for row in cursor.fetchall():
+                        name = row["theme_name"]
+                        if name not in prev_supply:
+                            prev_supply[name] = row["supply_ratio"]
+                matched = 0
+                for t in themes:
+                    t_name = t.get("theme", t.get("name", ""))
+                    if t_name in prev_supply:
+                        t["supply_ratio"] = prev_supply[t_name]
+                        matched += 1
+                if matched:
+                    logger.info(f"   전일 수급비율 매칭: {matched}/{len(themes)}개 테마")
+            except Exception as e:
+                logger.warning(f"   전일 수급비율 조회 실패: {e}")
+
+            # 6. DB 저장 (대시보드 테마 탭용, url 포함)
             try:
                 themes_to_save = [
                     {
                         "theme": t.get("theme", t.get("name", "")),
                         "score": t.get("score", 0),
                         "momentum": t.get("momentum_score", 0),
-                        "supply_ratio": 0,
+                        "supply_ratio": t.get("supply_ratio", 0),
                         "news_count": t.get("news_count", 0),
                         "ai_sentiment": t.get("ai_sentiment", 0),
                         "category": t.get("category", "기타"),
@@ -1684,13 +1708,33 @@ class TradingSystem:
             except Exception as ai_err:
                 logger.warning(f"   AI 감성 분석 스킵: {ai_err}")
 
-            # 4. DB 저장 (url 포함)
+            # 4. 수급비율 계산 (상위 15개, URL 있는 테마)
+            try:
+                from modules.theme_analyzer.scorer import calculate_theme_supply_ratio
+                from modules.stock_screener.kis_api import KISApi
+                kis = KISApi()
+                supply_count = 0
+                for t in scored_themes[:15]:
+                    url = t.get("url", "")
+                    if not url:
+                        continue
+                    ratio = await asyncio.to_thread(
+                        calculate_theme_supply_ratio, url, kis
+                    )
+                    t["supply_ratio"] = ratio
+                    if ratio > 0:
+                        supply_count += 1
+                logger.info(f"   수급비율 계산: {supply_count}/{min(len(scored_themes), 15)}개 테마")
+            except Exception as e:
+                logger.warning(f"   수급비율 계산 스킵: {e}")
+
+            # 5. DB 저장 (url 포함)
             themes_to_save = [
                 {
                     "theme": t.get("theme", t.get("name", "")),
                     "score": t.get("score", 0),
                     "momentum": t.get("momentum_score", 0),
-                    "supply_ratio": 0,
+                    "supply_ratio": t.get("supply_ratio", 0),
                     "news_count": t.get("news_count", 0),
                     "ai_sentiment": t.get("ai_sentiment", 0),
                     "category": t.get("category", "기타"),

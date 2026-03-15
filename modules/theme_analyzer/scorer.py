@@ -645,6 +645,77 @@ def _collect_news_data(themes: list[dict]) -> dict[str, dict]:
     return results
 
 
+def calculate_theme_supply_ratio(theme_url: str, kis) -> float:
+    """
+    테마 URL로부터 종목 목록을 크롤링하고, KIS API로 수급 데이터를 조회하여
+    외국인+기관 순매수인 종목의 비율(%)을 반환한다.
+
+    Args:
+        theme_url: 네이버 테마 상세 페이지 URL
+        kis: KIS API 인스턴스 (get_investor_trading 메서드 필요)
+
+    Returns:
+        수급 양호 종목 비율 (0.0~100.0). 조회 실패 시 0.0
+    """
+    if not theme_url or not kis:
+        return 0.0
+
+    try:
+        from modules.theme_analyzer.crawlers import crawl_naver_theme_stocks
+    except ImportError:
+        logger.warning("[scorer] crawl_naver_theme_stocks 임포트 실패")
+        return 0.0
+
+    # 종목 크롤링 (별도 로컬 변수 — theme["stocks"] 수정하지 않음)
+    try:
+        stock_list = crawl_naver_theme_stocks(theme_url)
+    except Exception as e:
+        logger.debug(f"[supply] 종목 크롤링 실패: {e}")
+        return 0.0
+
+    codes = [s["code"] for s in stock_list[:8] if s.get("code")]
+    if not codes:
+        return 0.0
+
+    valid_count = 0
+    positive_count = 0
+    consecutive_failures = 0
+
+    for code in codes:
+        # circuit breaker: 연속 5회 API 실패 시 중단
+        if consecutive_failures >= 5:
+            logger.warning(f"[supply] circuit breaker: 연속 {consecutive_failures}회 API 실패, 중단")
+            break
+
+        try:
+            investor = kis.get_investor_trading(code, days=5)
+        except Exception as e:
+            logger.debug(f"[supply] {code} 수급 조회 예외: {e}")
+            consecutive_failures += 1
+            continue
+
+        if investor is None:
+            consecutive_failures += 1
+            continue
+
+        # 성공 시 연속 실패 카운터 리셋
+        consecutive_failures = 0
+        valid_count += 1
+
+        # 외국인+기관 순매수 합계가 양수이면 수급 양호
+        foreign_net = investor.get("foreign_net", 0)
+        institution_net = investor.get("institution_net", 0)
+        if (foreign_net + institution_net) > 0:
+            positive_count += 1
+
+    if valid_count == 0:
+        return 0.0
+
+    ratio = round((positive_count / valid_count) * 100, 1)
+    logger.debug(f"[supply] 수급비율: {positive_count}/{valid_count} = {ratio}%")
+    return ratio
+
+
 def _enrich_theme_stocks(themes: list[dict], max_stocks: int = 3) -> None:
     """
     URL 있는 테마에 종목코드 리스트 추가 (in-place)

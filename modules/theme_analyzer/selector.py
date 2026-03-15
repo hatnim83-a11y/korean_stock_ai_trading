@@ -399,9 +399,9 @@ async def run_daily_theme_analysis(
                         "theme": t["name"],
                         "score": t.get("total_score", 0),
                         "momentum": t.get("momentum_score", 0),
-                        "supply_ratio": 0,
-                        "news_count": 0,
-                        "ai_sentiment": 0
+                        "supply_ratio": t.get("supply_ratio", 0),
+                        "news_count": t.get("news_count", 0),
+                        "ai_sentiment": t.get("ai_sentiment", 0),
                     }
                     for t in top_themes
                 ]
