@@ -58,7 +58,7 @@ def create_app() -> FastAPI:
             return RedirectResponse("/login?error=1", status_code=302)
         token = create_token()
         resp = RedirectResponse("/", status_code=302)
-        resp.set_cookie(COOKIE_NAME, token, httponly=True, max_age=86400, samesite="lax")
+        resp.set_cookie(COOKIE_NAME, token, httponly=True, max_age=86400, samesite="lax", secure=True)
         return resp
 
     @app.post("/api/v1/auth/logout")

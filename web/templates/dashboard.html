@@ -125,10 +125,98 @@ tr:hover td { background:#16162a; }
 .filters label { font-size:0.8rem; color:var(--text2); }
 
 /* ===== 반응형 ===== */
+
+/* --- 태블릿 이하 (768px) --- */
 @media(max-width:768px) {
-  .summary { grid-template-columns:1fr 1fr; }
-  .sys-grid { grid-template-columns:1fr; }
+  .header { padding:10px 16px; }
+  .header h1 { font-size:0.95rem; }
+  .tabs { padding:0 12px; }
+  .tab { padding:12px 16px; font-size:0.8rem; }
   .content { padding:12px; }
+  .summary { grid-template-columns:1fr 1fr; }
+  .card { padding:12px 14px; }
+  .card .value { font-size:1.1rem; }
+  .sys-grid { grid-template-columns:1fr; }
+  .theme-grid, .theme-grid.active-grid { grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
+  .chart-container { padding:12px; }
+  .filters select, .filters input { padding:10px 12px; font-size:0.85rem; }
+
+  /* 포트폴리오 테이블 → 카드뷰 */
+  #portfolio-table thead { display:none; }
+  #portfolio-table tbody tr {
+    display:grid; grid-template-columns:1fr 1fr;
+    background:var(--card); border:1px solid var(--border); border-radius:10px;
+    padding:14px; margin-bottom:10px; gap:6px 12px;
+  }
+  #portfolio-table tbody tr:hover td { background:transparent; }
+  #portfolio-table tbody td { border:none; padding:2px 0; font-size:0.8rem; }
+  #portfolio-table tbody td:nth-child(1) { grid-column:1/3; font-size:0.9rem; }
+  #portfolio-table tbody td:nth-child(2) { grid-column:1/3; color:var(--text2); font-size:0.75rem; margin-bottom:4px; }
+  #portfolio-table tbody td:nth-child(7) { font-size:1.1rem; font-weight:700; }
+  #portfolio-table tbody td:nth-child(8) { font-size:1.1rem; font-weight:700; }
+  #portfolio-table tbody td:nth-child(3)::before { content:'수량 '; color:var(--text2); font-size:0.7rem; }
+  #portfolio-table tbody td:nth-child(4)::before { content:'매수 '; color:var(--text2); font-size:0.7rem; }
+  #portfolio-table tbody td:nth-child(5)::before { content:'현재 '; color:var(--text2); font-size:0.7rem; }
+  #portfolio-table tbody td:nth-child(6)::before { content:'평가 '; color:var(--text2); font-size:0.7rem; }
+  #portfolio-table tbody td:nth-child(9)::before { content:'보유 '; color:var(--text2); font-size:0.7rem; }
+  #portfolio-table tbody td:nth-child(10)::before { content:'트레일링 '; color:var(--text2); font-size:0.7rem; }
+
+  /* Trades 테이블 → 카드뷰 */
+  #panel-trades table thead { display:none; }
+  #panel-trades table tbody tr {
+    display:grid; grid-template-columns:1fr 1fr;
+    background:var(--card); border:1px solid var(--border); border-radius:10px;
+    padding:14px; margin-bottom:10px; gap:4px 12px;
+  }
+  #panel-trades table tbody tr:hover td { background:transparent; }
+  #panel-trades table tbody td { border:none; padding:2px 0; font-size:0.8rem; }
+  #panel-trades table tbody td:nth-child(1) { font-size:0.7rem; color:var(--text2); }
+  #panel-trades table tbody td:nth-child(2) { font-size:0.7rem; color:var(--text2); text-align:right; }
+  #panel-trades table tbody td:nth-child(3) { grid-column:1/3; font-size:0.9rem; font-weight:600; }
+  #panel-trades table tbody td:nth-child(8) { font-size:1.1rem; font-weight:700; }
+  #panel-trades table tbody td:nth-child(9) { font-size:1.1rem; font-weight:700; }
+  #panel-trades table tbody td:nth-child(10) { grid-column:1/3; font-size:0.75rem; color:var(--text2); }
+  #panel-trades table tbody td:nth-child(5)::before { content:'수량 '; color:var(--text2); font-size:0.7rem; }
+  #panel-trades table tbody td:nth-child(6)::before { content:'가격 '; color:var(--text2); font-size:0.7rem; }
+  #panel-trades table tbody td:nth-child(7)::before { content:'금액 '; color:var(--text2); font-size:0.7rem; }
+
+  /* Theme History 테이블 → 카드뷰 */
+  #theme-history-body { display:block; }
+  #theme-history-body tr {
+    display:grid; grid-template-columns:1fr 1fr;
+    background:var(--card); border:1px solid var(--border); border-radius:8px;
+    padding:12px; margin-bottom:8px; gap:4px 12px;
+  }
+  #theme-history-body tr:hover td { background:transparent; }
+  #theme-history-body td { display:block; border:none; padding:2px 0; font-size:0.8rem; }
+  #theme-history-body td:nth-child(1) { font-size:0.7rem; color:var(--text2); }
+  #theme-history-body td:nth-child(2) { font-weight:600; font-size:0.9rem; text-align:right; }
+  #theme-history-body td:nth-child(3)::before { content:'점수 '; color:var(--text2); font-size:0.7rem; }
+  #theme-history-body td:nth-child(4)::before { content:'모멘텀 '; color:var(--text2); font-size:0.7rem; }
+  #theme-history-body td:nth-child(5)::before { content:'수급 '; color:var(--text2); font-size:0.7rem; }
+  #theme-history-body td:nth-child(6)::before { content:'뉴스 '; color:var(--text2); font-size:0.7rem; }
+
+  /* Theme History 부모 테이블 투명화 + thead 숨김 */
+  table:has(#theme-history-body) { background:transparent; border-radius:0; overflow:visible; }
+  table:has(#theme-history-body) thead { display:none; }
+}
+
+/* --- 모바일 세로 (480px) --- */
+@media(max-width:480px) {
+  .header h1 { font-size:0.85rem; letter-spacing:0; }
+  .header .right { gap:8px; }
+  .header .time { font-size:0.7rem; }
+  .tab { padding:12px 12px; font-size:0.78rem; }
+  .content { padding:8px; }
+  .summary { grid-template-columns:1fr; gap:8px; }
+  .card { padding:10px 12px; }
+  .card .label { font-size:0.7rem; }
+  .card .value { font-size:1rem; }
+  .theme-grid, .theme-grid.active-grid { grid-template-columns:1fr; }
+  .theme-card .score { font-size:1.4rem; }
+  .news-item { padding:10px 12px; }
+  .chart-container { padding:8px; margin-bottom:10px; }
+  .error-log { font-size:0.7rem; }
 }
 </style>
 </head>
