@@ -182,6 +182,7 @@ class PortfolioMonitorV2:
         self.take_profit_3 = settings.TAKE_PROFIT_3
         self.partial_sell_ratio_1 = settings.PARTIAL_SELL_RATIO_1
         self.partial_sell_ratio_2 = settings.PARTIAL_SELL_RATIO_2
+        self.partial_sell_ratio_3 = getattr(settings, 'PARTIAL_SELL_RATIO_3', 0.20)
 
         # 기존 트레일링 스탑
         self.enable_trailing_stop = settings.ENABLE_TRAILING_STOP
@@ -862,15 +863,16 @@ class PortfolioMonitorV2:
         profit_rate = pos.profit_rate
         executed = False
         
-        # 3차 익절 (+20%)
+        # 3차 익절 (+20%) — 20%만 매도, 나머지는 트레일링으로 청산
         if not pos.partial_3_executed and profit_rate >= self.take_profit_3:
-            sell_shares = pos.remaining_shares
-            success = await self._execute_partial_sell(pos, sell_shares, 3, profit_rate)
-            if success:
-                pos.partial_3_executed = True
-                executed = True
-                if pos.remaining_shares <= 0:
-                    self.remove_position(pos.stock_code)
+            sell_shares = int(pos.shares * self.partial_sell_ratio_3)
+            if sell_shares <= 0 and pos.remaining_shares >= 2:
+                sell_shares = 1
+            if sell_shares > 0:
+                success = await self._execute_partial_sell(pos, sell_shares, 3, profit_rate)
+                if success:
+                    pos.partial_3_executed = True
+                    executed = True
 
         # 2차 익절 (+15%)
         elif not pos.partial_2_executed and profit_rate >= self.take_profit_2:

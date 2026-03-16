@@ -19,21 +19,22 @@
 - Token sharing: `KISApi._shared_token` class variable, reused by `KISOrderApi`
 - 1-minute cooldown on token issuance per app key
 
-## DB Schema (updated 2026-03-04)
+## DB Schema (updated 2026-03-16)
 - portfolio, trades, themes, trade_reviews, position_state, screening_log, daily_snapshots, strategy_stats
-- themes: id, date, theme_name, score, momentum, supply_ratio, news_count, ai_sentiment, created_at + category(v10)
+- **trades columns**: id, date, time, stock_code, stock_name, action, shares, price, amount, reason, profit_rate, profit_amount, order_id, created_at, buy_price, filled_price, slippage, remaining_shares
+- **portfolio columns**: id, date, stock_code, stock_name, theme, weight, shares, buy_price, current_price, stop_loss, take_profit, profit_rate, profit_amount, status, created_at, updated_at, original_shares, buy_date, partial_1/2/3_executed, trailing_active, trailing_level, trailing_stop, highest_price, max_profit_rate
+- themes: id, date, theme_name, score, momentum, supply_ratio, news_count, ai_sentiment, created_at + category(v10) + selected(v11) + url(v12)
 - screening_log: id, date, stock_code, stock_name, theme, stage, passed, score, reject_reason, details_json, created_at
 - position_state: stock_code(PK), current_price, highest_price, trailing_active, trailing_level, trailing_stop_price, max_profit_rate, partial_1/2/3_executed, remaining_shares, last_updated (NO stock_name column)
 
-## Known Issues (as of 2026-03-15)
-- **WARNING: 수동 테스트 selected=1 오염**: 3/15 수동 테스트로 5개 테마가 selected=1로 DB 저장됨 (id 280-284). 서비스 재시작 시 get_last_theme_analysis_date()가 3/15를 반환하여 잘못된 테마 복원 가능. 현재 서비스는 메모리에 3/11 테마 로드 상태라 정상.
-- **WARNING: KIS API 500 에러 (장외 시간)**: 주말/장외 시간에 현재가 조회 시 500 에러 반복. 대시보드 SSE 폴링(5s)이 원인.
-- **WARNING: Dashboard 24/7 SSE polling**: 5s interval portfolio query. 오늘(일요일) 4,677회 발생. 시스템 로그 80%+ 차지.
+## Known Issues (as of 2026-03-16)
+- **RESOLVED: 수동 테스트 selected=1 오염**: 3/15 수동 테스트 DB 오염 → 해결됨 (3/15 selected=1 = 0개). 현재 3/11 테마 정상 사용 중.
+- **WARNING: KIS API 500 에러 (장외 시간)**: 주말/장외 시간에 현재가 조회 시 500 에러 반복. 대시보드 SSE 폴링이 원인.
+- **WARNING: Dashboard 24/7 SSE polling**: 장중 ~6초, 장외 30초 DB poll. 시스템 로그 대부분 차지.
 - **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError. Falls back to Naver-only.
-- **WARNING: 8개 predefined 테마 네이버 미발견**: 2차전지, K-방산, 바이오, 로봇, 수소, 금융, 철강, 화학 -- 크롤링 시 "기본값 사용" 경고.
-- **INFO: Telegram unreachable from GCP VM**: Persistent since 03-04.
+- **WARNING: 6개 predefined 테마 네이버 미발견**: AI반도체, K-방산, 바이오, 로봇, 수소, 철강.
+- **INFO: Telegram unreachable from GCP VM**: Persistent since 03-04. 로그에 발송 시도 흔적 없음.
 - **INFO: Log file date uses UTC**: 08:00-08:59 KST logs → previous day's file.
-- **INFO: 토큰 403 에러**: 장외시간 토큰 발급 시도 → 403 (정상 동작)
 
 ## Scheduler (KST, CronTrigger timezone=Asia/Seoul, _skip_on_holiday)
 - 08:00 Theme rotation | 08:30 Theme analysis | 09:05 Screening | 09:25 Auto buy
@@ -55,7 +56,8 @@
 - Theme rotation: 7 days
 
 ## Recent Health Checks
-- **2026-03-15 22:33 KST**: Sun. 3 holdings (두산에너빌리티, JYP Ent., 한국항공우주). 수동 테스트 DB 오염 발견 (3/15 selected=1). KIS 500 에러(장외 시간 정상). Dashboard polling 4,677회. 내일(월) 3/11 테마 유지 예정 (days_since=5 < 7).
-- **2026-03-10 23:10 KST**: Tue theme check. 08:30 weekly agg OK. Step 4 URL not executed (old code). 17:05 OK.
+- **2026-03-16 10:01 KST**: Mon. 5 holdings (한국항공우주, 두산에너빌리티, JYP Ent., 엠케이전자, 한국카본). 전 스케줄 정상. 신규 매수 2건, 1차 익절 1건. 트레일링L1 활성 2종목. 3/15 DB 오염 해결 확인. ERROR 0건.
+- **2026-03-15 22:33 KST**: Sun. 3 holdings. 수동 테스트 DB 오염 발견. KIS 500 에러(장외). Dashboard polling 4,677회.
+- **2026-03-10 23:10 KST**: Tue theme check. 08:30 weekly agg OK.
 - **2026-03-09 10:55 KST**: Mon. 1 holding. 5 candidates -> 1 bought.
 - **2026-03-04 15:36 KST**: Tue. ALL 4 stopped out. P&L: -350K.

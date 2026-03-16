@@ -237,8 +237,12 @@ class Settings(BaseSettings):
         description="1차 익절 시 매도 비율 (30%)"
     )
     PARTIAL_SELL_RATIO_2: float = Field(
-        default=0.30,
-        description="2차 익절 시 매도 비율 (30%)"
+        default=0.20,
+        description="2차 익절 시 매도 비율 (20%)"
+    )
+    PARTIAL_SELL_RATIO_3: float = Field(
+        default=0.20,
+        description="3차 익절 시 매도 비율 (20%)"
     )
     
     # ===== 트레일링 스탑 =====

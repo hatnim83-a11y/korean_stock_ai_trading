@@ -41,6 +41,7 @@ class HybridStrategySimulator:
         self.take_profit_3 = settings.TAKE_PROFIT_3
         self.partial_sell_ratio_1 = settings.PARTIAL_SELL_RATIO_1
         self.partial_sell_ratio_2 = settings.PARTIAL_SELL_RATIO_2
+        self.partial_sell_ratio_3 = getattr(settings, 'PARTIAL_SELL_RATIO_3', 0.20)
         self.trailing_stop_percent = settings.TRAILING_STOP_PERCENT
         self.max_hold_days_profit = settings.MAX_HOLD_DAYS_PROFIT
         self.max_hold_days_loss = settings.MAX_HOLD_DAYS_LOSS
@@ -143,13 +144,18 @@ class HybridStrategySimulator:
                     sell_reason = "손절"
                 
                 # 2. 분할 익절 체크
-                elif not position['partial_2_executed'] and profit_rate >= self.take_profit_3:
-                    # 3차 익절 (나머지 전량)
-                    sell_shares = position['remaining_shares']
+                elif not position.get('partial_3_executed') and profit_rate >= self.take_profit_3:
+                    # 3차 익절 (20%)
+                    sell_shares = int(position['shares'] * self.partial_sell_ratio_3)
+                    if sell_shares <= 0 and position['remaining_shares'] >= 2:
+                        sell_shares = 1
+                    if sell_shares > position['remaining_shares']:
+                        sell_shares = position['remaining_shares']
+                    position['partial_3_executed'] = True
                     sell_reason = "3차 익절"
-                
+
                 elif not position['partial_2_executed'] and profit_rate >= self.take_profit_2:
-                    # 2차 익절 (30%)
+                    # 2차 익절 (20%)
                     sell_shares = int(position['shares'] * self.partial_sell_ratio_2)
                     if sell_shares > position['remaining_shares']:
                         sell_shares = position['remaining_shares']
