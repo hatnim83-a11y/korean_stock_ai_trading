@@ -571,29 +571,14 @@ class Database:
 
             for theme in themes:
                 if not selected:
-                    # 일별 수집: 기존 selected=1 행은 보호 (점수만 업데이트)
+                    # 일별 수집: 기존 selected=1 행은 절대 수정하지 않음
+                    # (주간 가중평균 점수와 일별 단일일 점수는 성격이 다르므로 덮어쓰면 안 됨)
                     cursor.execute(
                         "SELECT selected FROM themes WHERE date = ? AND theme_name = ?",
                         (target_date, theme['theme'])
                     )
                     existing = cursor.fetchone()
                     if existing and existing[0] == 1:
-                        # selected=1 행은 점수만 업데이트, selected 플래그 유지
-                        cursor.execute("""
-                            UPDATE themes SET score = ?, momentum = ?, supply_ratio = ?,
-                                news_count = ?, ai_sentiment = ?, category = ?, url = ?
-                            WHERE date = ? AND theme_name = ?
-                        """, (
-                            theme['score'],
-                            theme.get('momentum', 0),
-                            theme.get('supply_ratio', 0),
-                            theme.get('news_count', 0),
-                            theme.get('ai_sentiment', 0),
-                            theme.get('category', '기타'),
-                            theme.get('url', ''),
-                            target_date,
-                            theme['theme'],
-                        ))
                         continue
 
                 cursor.execute("""
