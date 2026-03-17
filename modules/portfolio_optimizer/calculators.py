@@ -43,6 +43,9 @@ MAX_STOP_LOSS_PCT = -0.05  # 최대 손절 -5% (너무 타이트하지 않게)
 MIN_TAKE_PROFIT_PCT = 0.08  # 최소 익절 +8%
 MAX_TAKE_PROFIT_PCT = 0.25  # 최대 익절 +25%
 
+# 시장가 주문 증거금 배수 (KIS API: 상한가 +30% 기준)
+MARKET_ORDER_MARGIN_RATIO = 1.3
+
 
 # ===== 변동성 계산 =====
 
@@ -375,24 +378,29 @@ def calculate_position_size(
     capital: float,
     weight: float,
     price: float,
-    lot_size: int = 1
+    lot_size: int = 1,
+    market_order: bool = True
 ) -> dict:
     """
     포지션 사이즈 (매수 수량) 계산
-    
+
+    KIS API 시장가 주문 시 상한가(+30%) 기준으로 증거금이 잡히므로,
+    시장가 주문일 경우 상한가 기준으로 수량을 계산합니다.
+
     Args:
         capital: 총 자본금
         weight: 투자 비중 (0-1)
         price: 매수 가격
         lot_size: 매매 단위 (기본 1주)
-    
+        market_order: 시장가 주문 여부 (기본 True)
+
     Returns:
         {
             'shares': 45,           # 매수 수량
-            'amount': 3375000,      # 투자 금액
+            'amount': 3375000,      # 투자 금액 (현재가 기준)
             'actual_weight': 0.0675 # 실제 비중
         }
-        
+
     Example:
         >>> result = calculate_position_size(10000000, 0.08, 75000)
         >>> print(f"매수 수량: {result['shares']}주, 금액: {result['amount']:,}원")
@@ -400,25 +408,36 @@ def calculate_position_size(
     """
     if price <= 0 or capital <= 0 or weight <= 0:
         return {"shares": 0, "amount": 0, "actual_weight": 0}
-    
+
     # 목표 투자 금액
     target_amount = capital * weight
-    
-    # 매수 가능 수량 (내림)
-    shares = int(target_amount / price)
-    
+
+    # 시장가 주문: 상한가(+30%) 기준으로 증거금이 잡힘
+    # KIS API는 시장가 매수 시 "상한가 × 수량"으로 주문가능금액을 차감
+    if market_order:
+        margin_price = price * MARKET_ORDER_MARGIN_RATIO  # 상한가 기준
+    else:
+        margin_price = price
+
+    # 매수 가능 수량 (증거금 기준으로 내림)
+    shares = int(target_amount / margin_price)
+
     # 매매 단위 맞춤
     shares = (shares // lot_size) * lot_size
-    
+
+    # 상한가 기준으로도 1주 살 수 없으면 0 반환
+    if shares == 0:
+        return {"shares": 0, "amount": 0, "actual_weight": 0}
+
     # 최소 1주
     shares = max(lot_size, shares)
-    
-    # 실제 투자 금액
+
+    # 실제 투자 금액 (현재가 기준)
     amount = shares * price
-    
+
     # 실제 비중
     actual_weight = amount / capital
-    
+
     return {
         "shares": shares,
         "amount": round(amount),

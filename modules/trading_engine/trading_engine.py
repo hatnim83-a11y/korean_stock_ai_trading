@@ -35,6 +35,8 @@ from modules.trading_engine.kis_order_api import KISOrderApi, MockOrderApi
 MAX_RETRY = 3  # 최대 재시도 횟수
 ORDER_CHECK_INTERVAL = 2  # 주문 확인 간격 (초)
 ORDER_TIMEOUT = 60  # 주문 타임아웃 (초)
+UPPER_LIMIT_RATIO = 1.3  # 시장가 주문 상한가 증거금 배수 (+30%)
+RETRY_QTY_REDUCTION = 0.9  # 재시도 시 수량 감소 비율 (10% 감소)
 
 
 class TradingEngine:
@@ -177,25 +179,50 @@ class TradingEngine:
     def _execute_buy_orders(self, orders: list[dict]) -> list[dict]:
         """매수 주문 실행"""
         results = []
-        
+
+        # 주문 직전 실제 주문가능현금 재확인
+        orderable_cash = 0
+        if hasattr(self.order_api, 'get_orderable_cash'):
+            orderable_cash = self.order_api.get_orderable_cash()
+            logger.info(f"💰 주문 직전 가용현금 재확인: {orderable_cash:,}원")
+
         for i, order in enumerate(orders, 1):
             stock_code = order.get("stock_code", "")
             stock_name = order.get("stock_name", stock_code)
             quantity = order.get("quantity", 0)
             order_type = order.get("order_type", "market")
             price = order.get("price", 0)
-            
+            # 시장가 주문은 price=0이므로 expected_price(스크리닝 시점 가격) 사용
+            expected_price = order.get("expected_price", price) or price
+
             logger.info(f"\n[{i}/{len(orders)}] 매수: {stock_name} ({stock_code})")
             logger.info(f"   수량: {quantity}주")
-            
-            # 재시도 로직
+
+            # 시장가 주문 시 상한가 기준 사전 검증
+            if (order_type == "market" or price == 0) and orderable_cash > 0 and expected_price > 0:
+                margin_required = quantity * expected_price * UPPER_LIMIT_RATIO  # 상한가 기준 증거금
+                if margin_required > orderable_cash:
+                    safe_qty = int(orderable_cash / (expected_price * UPPER_LIMIT_RATIO))
+                    if safe_qty < 1:
+                        logger.warning(f"   ⚠️ 주문가능금액 부족 (필요: {margin_required:,}원, 가용: {orderable_cash:,}원) → 매수 건너뜀")
+                        results.append({
+                            "success": False,
+                            "stock_code": stock_code,
+                            "stock_name": stock_name,
+                            "message": "주문가능금액 부족 (상한가 기준)"
+                        })
+                        continue
+                    logger.warning(f"   ⚠️ 상한가 증거금 초과 → 수량 조정: {quantity}주 → {safe_qty}주")
+                    quantity = safe_qty
+
+            # 재시도 로직 (실패 시 수량 5%씩 감소)
             for attempt in range(MAX_RETRY):
                 try:
                     if order_type == "market" or price == 0:
                         result = self.order_api.buy_market_order(stock_code, quantity)
                     else:
                         result = self.order_api.buy_limit_order(stock_code, quantity, price)
-                    
+
                     if result.get("success"):
                         result.update({
                             "stock_name": stock_name,
@@ -204,16 +231,32 @@ class TradingEngine:
                             "stop_loss": order.get("stop_loss"),
                             "take_profit": order.get("take_profit")
                         })
+                        # 성공 시 가용현금 차감 (다음 종목 계산용)
+                        if orderable_cash > 0 and expected_price > 0:
+                            orderable_cash = max(0, orderable_cash - quantity * expected_price * UPPER_LIMIT_RATIO)
                         results.append(result)
                         break
                     else:
-                        if attempt < MAX_RETRY - 1:
+                        msg = result.get("message", "")
+                        # 주문가능금액 초과 → 수량 10% 감소 후 재시도
+                        if "주문가능금액" in msg or "초과" in msg:
+                            reduced = max(1, int(quantity * RETRY_QTY_REDUCTION))
+                            if reduced < quantity:
+                                logger.warning(f"   ⚠️ 주문가능금액 초과 → 수량 감소: {quantity}주 → {reduced}주 (재시도 {attempt + 1}/{MAX_RETRY})")
+                                quantity = reduced
+                                time.sleep(1)
+                            else:
+                                # 더 이상 줄일 수 없음
+                                result["stock_name"] = stock_name
+                                results.append(result)
+                                break
+                        elif attempt < MAX_RETRY - 1:
                             logger.warning(f"   재시도 {attempt + 1}/{MAX_RETRY}")
                             time.sleep(1)
                         else:
                             result["stock_name"] = stock_name
                             results.append(result)
-                            
+
                 except Exception as e:
                     logger.error(f"   주문 오류: {e}")
                     if attempt == MAX_RETRY - 1:

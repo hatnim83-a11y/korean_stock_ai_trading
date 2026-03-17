@@ -396,6 +396,7 @@ def generate_buy_orders(
             "order_type": order_type,
             "quantity": pos["shares"],
             "price": 0 if order_type == "market" else pos["price"],
+            "expected_price": pos["price"],  # 시장가 주문에서도 예상 가격 보존
             "amount": pos["amount"],
             "stop_loss": pos["stop_loss_price"],
             "take_profit": pos["take_profit_price"],
