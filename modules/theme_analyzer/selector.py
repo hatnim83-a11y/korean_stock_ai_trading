@@ -42,8 +42,8 @@ THEME_BLACKLIST = settings.THEME_BLACKLIST
 # 최소 점수 기준
 MIN_SELECTION_SCORE = 30.0
 
-# 테마 유지 기준 점수 (B등급 이상이면 교체하지 않고 연장)
-RETENTION_SCORE = 38.0
+# 테마 유지 기준 점수 (A등급 이상이면 교체하지 않고 연장)
+RETENTION_SCORE = 48.0
 
 # 최소 종목 수 기준
 MIN_STOCK_COUNT = settings.MIN_THEME_STOCK_COUNT
@@ -152,7 +152,7 @@ def select_themes_with_retention(
         scored_themes: 이번 주 점수가 계산된 전체 테마 리스트
         previous_themes: 지난 주 활성 테마 리스트
         count: 선정할 총 테마 수
-        retention_score: 유지 기준 점수 (기본 38.0 = B등급)
+        retention_score: 유지 기준 점수 (기본 48.0 = A등급)
         blacklist: 추가 블랙리스트
 
     Returns:
