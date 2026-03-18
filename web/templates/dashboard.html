@@ -264,6 +264,10 @@ tr:hover td { background:#16162a; }
     <div class="theme-grid active-grid" id="selected-theme-grid"></div>
     <h3 style="margin:16px 0 12px;color:var(--text2)">일별 수집 테마</h3>
     <div class="theme-grid" id="candidate-theme-grid"></div>
+    <h3 style="margin:16px 0 12px">테마 점수 트렌드 (7일)</h3>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+      <canvas id="theme-trend-chart" height="220"></canvas>
+    </div>
     <h3 style="margin:4px 0 12px">Theme History</h3>
     <div class="table-wrap">
       <table>
@@ -414,6 +418,19 @@ async function loadPortfolio() {
   // 포트폴리오 하단 테마 로드
   const themeData = await api('/themes?days=7');
 
+  // 테마별 전일 대비 delta 계산용 히스토리 맵 구축
+  const _themeHistMap = {};
+  if (themeData && themeData.history) {
+    for (const h of themeData.history) {
+      const key = h.theme_name;
+      if (!_themeHistMap[key]) _themeHistMap[key] = [];
+      _themeHistMap[key].push({ date: h.date, score: Number(h.score) });
+    }
+    for (const key of Object.keys(_themeHistMap)) {
+      _themeHistMap[key].sort((a, b) => b.date.localeCompare(a.date));
+    }
+  }
+
   function renderThemeCards(themes, gridId, cardClass, badgeLabel, badgeClass) {
     const grid = document.getElementById(gridId);
     if (!themes || !themes.length) {
@@ -428,8 +445,17 @@ async function loadPortfolio() {
       if (t.supply_ratio) meta += ` | Supply: ${Number(t.supply_ratio).toFixed(0)}%`;
       if (t.news_count) meta += ` | News: ${t.news_count}`;
       const rank = cardClass === 'active' ? `<span style="color:var(--green);font-size:0.75rem;margin-right:4px">#${idx+1}</span>` : '';
+      // 전일 대비 delta 계산
+      let deltaHtml = '';
+      const hist = _themeHistMap[t.theme_name];
+      if (hist && hist.length >= 2) {
+        const delta = hist[0].score - hist[1].score;
+        const dColor = delta > 0 ? 'var(--green)' : delta < 0 ? 'var(--red)' : 'var(--text2)';
+        const dSign = delta > 0 ? '+' : '';
+        deltaHtml = ` <span style="color:${dColor};font-size:0.75rem">${dSign}${delta.toFixed(1)}</span>`;
+      }
       return `<div class="theme-card ${cardClass}">
-        <div class="name">${rank}${t.theme_name} <span style="color:${gradeColor};font-size:0.8rem">${grade}</span><span class="theme-badge ${badgeClass}">${badgeLabel}</span></div>
+        <div class="name">${rank}${t.theme_name} <span style="color:${gradeColor};font-size:0.8rem">${grade}</span>${deltaHtml}<span class="theme-badge ${badgeClass}">${badgeLabel}</span></div>
         <div class="score">${score.toFixed(1)}</div>
         <div class="meta">${meta}</div>
         <div class="meta" style="margin-top:4px;font-size:0.65rem">${t.date}</div>
@@ -461,6 +487,85 @@ async function loadPortfolio() {
     <td>${t.date}</td><td>${t.theme_name}</td><td>${Number(t.score).toFixed(1)}</td>
     <td>${Number(t.momentum||0).toFixed(1)}</td><td>${Number(t.supply_ratio||0).toFixed(0)}%</td><td>${t.news_count||0}</td>
   </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2)">히스토리 없음</td></tr>';
+
+  // 테마 점수 트렌드 차트
+  (function renderThemeTrendChart() {
+    const ctx = document.getElementById('theme-trend-chart');
+    if (!ctx || !themeData || !themeData.history || !themeData.history.length) return;
+
+    const activeNames = new Set();
+    const activeThemes = themeData.selected_themes && themeData.selected_themes.length
+      ? themeData.selected_themes : themeData.current_themes;
+    if (activeThemes) activeThemes.forEach(t => activeNames.add(t.theme_name));
+
+    // 날짜 수집 (최근 7일)
+    const allDates = [...new Set(themeData.history.map(h => h.date))].sort();
+    const dates = allDates.slice(-7);
+
+    // 활성 테마 + 후보 상위 3개
+    const candidateNames = new Set();
+    if (themeData.candidate_themes) {
+      themeData.candidate_themes.slice(0, 3).forEach(t => candidateNames.add(t.theme_name));
+    }
+    const targetNames = new Set([...activeNames, ...candidateNames]);
+
+    // 테마별 시계열 구축
+    const series = {};
+    for (const h of themeData.history) {
+      if (!targetNames.has(h.theme_name)) continue;
+      if (!series[h.theme_name]) series[h.theme_name] = {};
+      series[h.theme_name][h.date] = Number(h.score);
+    }
+
+    const activeColors = ['#00f5ff','#00ff88','#ffaa00','#ff66cc','#66aaff'];
+    const candidateColors = ['#555','#666','#777'];
+    const datasets = [];
+    let aIdx = 0, cIdx = 0;
+
+    for (const name of Object.keys(series)) {
+      const isActive = activeNames.has(name);
+      const color = isActive ? activeColors[aIdx++ % activeColors.length] : candidateColors[cIdx++ % candidateColors.length];
+      datasets.push({
+        label: name,
+        data: dates.map(d => series[name][d] ?? null),
+        borderColor: color,
+        backgroundColor: color + '22',
+        borderWidth: isActive ? 2 : 1.5,
+        borderDash: isActive ? [] : [5, 3],
+        pointRadius: isActive ? 3 : 2,
+        tension: 0.3,
+        spanGaps: true,
+      });
+    }
+
+    // 38점 기준선
+    datasets.push({
+      label: 'B등급 (38점)',
+      data: dates.map(() => 38),
+      borderColor: '#ff3366',
+      borderWidth: 1,
+      borderDash: [3, 3],
+      pointRadius: 0,
+      fill: false,
+    });
+
+    new Chart(ctx, {
+      type: 'line',
+      data: { labels: dates.map(d => d.slice(5)), datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#e0e0e0', font: { size: 11 } }, position: 'bottom' },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: { ticks: { color: '#888' }, grid: { color: '#1e1e2e' } },
+          y: { ticks: { color: '#888' }, grid: { color: '#1e1e2e' }, min: 0 },
+        },
+      }
+    });
+  })();
 }
 
 // ===== Trades =====

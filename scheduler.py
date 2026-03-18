@@ -95,6 +95,8 @@ class TradingScheduler:
         self.on_daily_theme_collection: Optional[Callable] = None  # 17:05 일별 테마 수집
         self.on_weekly_trade_review: Optional[Callable] = None  # 금 17:30 주간 복기
         self.on_daily_health_check: Optional[Callable] = None  # 16:10 일일 헬스체크
+        self.on_midweek_sell_profit: Optional[Callable] = None  # 09:00 주중 교체 수익 매도
+        self.on_midweek_sell_loss: Optional[Callable] = None    # 09:10 주중 교체 손실 매도
         
         # 이벤트 리스너
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
@@ -196,7 +198,25 @@ class TradingScheduler:
             replace_existing=True
         )
 
-        # 9. 매매 사후 분석 (KST 17:00)
+        # 9. 주중 교체 수익 매도 (KST 09:00)
+        self.scheduler.add_job(
+            self._run_midweek_sell_profit,
+            CronTrigger(hour=9, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='midweek_sell_profit',
+            name='주중 교체 수익 매도',
+            replace_existing=True
+        )
+
+        # 10. 주중 교체 손실 매도 (KST 09:10)
+        self.scheduler.add_job(
+            self._run_midweek_sell_loss,
+            CronTrigger(hour=9, minute=10, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='midweek_sell_loss',
+            name='주중 교체 손실 매도',
+            replace_existing=True
+        )
+
+        # 11. 매매 사후 분석 (KST 17:00)
         self.scheduler.add_job(
             self._run_post_trade_analysis,
             CronTrigger(hour=17, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
@@ -205,7 +225,7 @@ class TradingScheduler:
             replace_existing=True
         )
 
-        # 9. 일별 테마 데이터 수집 (KST 17:05, 장 마감 후)
+        # 12. 일별 테마 데이터 수집 (KST 17:05, 장 마감 후)
         self.scheduler.add_job(
             self._run_daily_theme_collection,
             CronTrigger(hour=17, minute=5, day_of_week='mon-fri', timezone=_KST_TZ),
@@ -214,7 +234,7 @@ class TradingScheduler:
             replace_existing=True
         )
 
-        # 10. 주간 매매 복기 (KST 금요일 17:30)
+        # 13. 주간 매매 복기 (KST 금요일 17:30)
         self.scheduler.add_job(
             self._run_weekly_trade_review,
             CronTrigger(hour=17, minute=30, day_of_week='fri', timezone=_KST_TZ),
@@ -396,6 +416,26 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"일별 테마 수집 실패: {e}")
             self._send_error_notification("일별 테마 수집", str(e))
+
+    @_skip_on_holiday
+    async def _run_midweek_sell_profit(self) -> None:
+        """09:00 - 주중 교체 수익 종목 매도"""
+        try:
+            if self.on_midweek_sell_profit:
+                await self.on_midweek_sell_profit()
+        except Exception as e:
+            logger.error(f"주중 교체 수익 매도 실패: {e}")
+            self._send_error_notification("주중 교체 수익 매도", str(e))
+
+    @_skip_on_holiday
+    async def _run_midweek_sell_loss(self) -> None:
+        """09:10 - 주중 교체 손실 종목 매도"""
+        try:
+            if self.on_midweek_sell_loss:
+                await self.on_midweek_sell_loss()
+        except Exception as e:
+            logger.error(f"주중 교체 손실 매도 실패: {e}")
+            self._send_error_notification("주중 교체 손실 매도", str(e))
 
     @_skip_on_holiday
     async def _run_daily_health_check(self) -> None:

@@ -160,8 +160,8 @@ def select_themes_with_retention(
 
     Note:
         - previous_themes가 비어있으면 select_top_themes() 결과를 직접 반환
-        - 신규 진입 기준(MIN_SELECTION_SCORE=30)과 유지 기준(38)은 의도적 비대칭:
-          새 테마는 30점+에서 진입 기회를 얻고, 유지하려면 38점+ 증명 필요
+        - 신규 진입 기준(MIN_SELECTION_SCORE=30)과 유지 기준(RETENTION_SCORE=48)은 의도적 비대칭:
+          새 테마는 30점+에서 진입 기회를 얻고, 유지하려면 48점+ 증명 필요
     """
     if not scored_themes:
         logger.warning("선정할 테마가 없습니다")
@@ -242,6 +242,72 @@ def select_themes_with_retention(
         logger.info(f"   교체된 테마: {', '.join(dropped)}")
 
     return final
+
+
+def select_replacement_candidate(
+    daily_scores: list[dict],
+    active_theme_names: set[str],
+    active_categories: list[str] = None,
+    min_score: float = 35.0,
+) -> Optional[dict]:
+    """
+    비활성 테마 중 교체 후보 1개 선정
+
+    현재 활성 테마를 제외하고, 블랙리스트/최소 종목 수 필터 적용 후
+    카테고리 다양성을 고려하여 최고 점수 후보를 반환.
+
+    Args:
+        daily_scores: 전일 일별 수집 점수 리스트 (점수 내림차순)
+        active_theme_names: 현재 활성 테마명 set
+        active_categories: 현재 활성 테마의 카테고리 리스트 (다양성 판단용)
+        min_score: 교체 후보 최소 점수
+
+    Returns:
+        교체 후보 dict (없으면 None)
+    """
+    if not daily_scores:
+        return None
+
+    full_blacklist = set(THEME_BLACKLIST)
+
+    # 활성 카테고리 카운트 (다양성 판단)
+    active_cat_count = {}
+    if active_categories:
+        for cat in active_categories:
+            active_cat_count[cat] = active_cat_count.get(cat, 0) + 1
+
+    for theme in daily_scores:
+        theme_name = theme.get("theme_name", "")
+        score = theme.get("score", 0)
+        stock_count = theme.get("stock_count", 0) if "stock_count" in theme else 0
+        category = theme.get("category", "기타")
+
+        # 활성 테마 제외
+        if theme_name in active_theme_names:
+            continue
+
+        # 블랙리스트 체크
+        if any(bl.lower() in theme_name.lower() for bl in full_blacklist):
+            continue
+
+        # 최소 점수 체크
+        if score < min_score:
+            continue
+
+        # 최소 종목 수 체크 (stock_count=0이면 장외시간 미제공이므로 스킵 안 함)
+        if stock_count > 0 and stock_count < MIN_STOCK_COUNT:
+            continue
+
+        # 카테고리 다양성: 이미 MAX_THEMES_PER_CATEGORY개 이상이면 스킵
+        if active_cat_count.get(category, 0) >= MAX_THEMES_PER_CATEGORY:
+            logger.debug(f"[교체후보] {theme_name} 카테고리 제한 ({category}) - 스킵")
+            continue
+
+        logger.info(f"[교체후보] {theme_name} ({score:.1f}점, {category}) 선정")
+        return theme
+
+    logger.info("[교체후보] 적합한 후보 없음")
+    return None
 
 
 def _select_with_diversity(

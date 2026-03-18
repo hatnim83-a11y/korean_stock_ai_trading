@@ -663,6 +663,28 @@ class Database:
             logger.debug(f"마지막 테마 분석 날짜 조회 실패: {e}")
         return None
 
+    def get_daily_theme_scores(self, target_date: date) -> list[dict]:
+        """
+        전일 일별 수집 점수 조회 (selected=0)
+
+        주중 교체 판단에 사용: 일별 17:05에 수집된 데이터에서
+        각 테마의 점수를 내림차순으로 반환.
+
+        Args:
+            target_date: 조회할 날짜
+
+        Returns:
+            테마 리스트 (점수 내림차순) [{'theme_name': ..., 'score': ..., ...}, ...]
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT * FROM themes
+                WHERE date = ? AND selected = 0
+                ORDER BY score DESC
+            """, (target_date,))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
     # ===== 종목 관련 메서드 =====
 
     def save_screened_stocks(self, stocks: list[dict], target_date: date) -> None:

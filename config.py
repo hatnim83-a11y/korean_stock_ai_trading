@@ -336,6 +336,32 @@ class Settings(BaseSettings):
         description="테마 평균 시가총액 최소 기준 (1000억원)"
     )
     
+    # ===== 주중 테마 교체 설정 =====
+    MIDWEEK_REPLACEMENT_ENABLED: bool = Field(
+        default=True,
+        description="주중 테마 교체 기능 활성화"
+    )
+    MIDWEEK_MIN_HOLD_DAYS: int = Field(
+        default=2,
+        description="최소 보유 영업일 (선정 후 이 기간은 교체 불가)"
+    )
+    MIDWEEK_ABS_FLOOR: float = Field(
+        default=38.0,
+        description="절대 점수 하한 (B등급 이하, <= 비교)"
+    )
+    MIDWEEK_RELATIVE_GAP: float = Field(
+        default=15.0,
+        description="비활성 최상위 후보와의 최소 점수 갭"
+    )
+    MIDWEEK_CANDIDATE_MIN_SCORE: float = Field(
+        default=35.0,
+        description="교체 후보 최소 점수"
+    )
+    MIDWEEK_LOSS_RESCORE_THRESHOLD: float = Field(
+        default=50.0,
+        description="손실 종목 재평가 통과 기준 (final_score)"
+    )
+
     # ===== 테마 로테이션 설정 =====
     THEME_REVIEW_DAYS: int = Field(
         default=7,

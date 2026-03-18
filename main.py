@@ -131,6 +131,12 @@ class TradingSystem:
         self._last_theme_rotation_date: Optional[date] = None  # 7일 고정 로테이션
         self.trading_paused = False  # 텔레그램 /pause로 매매 일시정지
 
+        # 주중 테마 교체 상태
+        self._midweek_sell_queue: list[dict] = []       # 09:00 수익 매도 대기열
+        self._midweek_loss_queue: list[dict] = []       # 09:10 손실 매도 대기열
+        self._midweek_dropped_theme: Optional[str] = None
+        self._midweek_new_theme: Optional[dict] = None
+
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -182,6 +188,8 @@ class TradingSystem:
                         "theme": t["theme_name"],
                         "score": t["score"],
                         "total_score": t["score"],
+                        "url": t.get("url", ""),
+                        "category": t.get("category", "기타"),
                     }
                     for t in themes_from_db
                 ]
@@ -297,6 +305,8 @@ class TradingSystem:
         self.scheduler.on_daily_theme_collection = self.run_daily_theme_collection  # 17:05 일별 테마 수집
         self.scheduler.on_weekly_trade_review = self.run_weekly_trade_review  # 금 17:30 주간 복기
         self.scheduler.on_daily_health_check = self.run_daily_health_check  # 16:10 헬스체크
+        self.scheduler.on_midweek_sell_profit = self._execute_midweek_profit_sells  # 09:00 주중 교체 수익 매도
+        self.scheduler.on_midweek_sell_loss = self._execute_midweek_loss_sells      # 09:10 주중 교체 손실 매도
 
     # ===== 08:30 테마 분석 (장 시작 전) =====
 
@@ -333,9 +343,10 @@ class TradingSystem:
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
                 )
 
-                # DB 복원 테마에 종목 목록이 없으면 크롤링으로 보충
-                if not any(t.get("url") for t in self.today_themes):
-                    logger.info("   종목 URL 없음 → 크롤링으로 보충")
+                # URL 없는 테마만 개별 보충 (주중 교체 신규 테마 포함)
+                missing_url_themes = [t for t in self.today_themes if not t.get("url")]
+                if missing_url_themes:
+                    logger.info(f"   URL 없는 테마 {len(missing_url_themes)}개 → 크롤링으로 보충")
                     try:
                         from modules.theme_analyzer import crawl_all_themes
                         from modules.theme_analyzer.crawlers import search_naver_theme
@@ -343,7 +354,7 @@ class TradingSystem:
 
                         all_crawled = await asyncio.to_thread(crawl_all_themes)
                         crawled_map = {t["name"]: t for t in all_crawled}
-                        for t in self.today_themes:
+                        for t in missing_url_themes:
                             t_name = t.get("theme", t.get("name", ""))
                             if t_name in crawled_map:
                                 matched = crawled_map[t_name]
@@ -386,10 +397,21 @@ class TradingSystem:
                     t_name = t.get("theme", t.get("name", ""))
                     t_score = t.get("score", 0)
                     stock_cnt = t.get("stock_count", 0) or len(t.get("stocks", []))
-                    theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점, {stock_cnt}종목) 📌유지")
+                    # 주중 교체 표시
+                    if self._midweek_new_theme and t_name == self._midweek_new_theme.get("theme_name"):
+                        tag = "🆕교체"
+                    else:
+                        tag = "📌유지"
+                    theme_lines.append(f"  {i}. {t_name} ({t_score:.1f}점, {stock_cnt}종목) {tag}")
+
+                header = "🔄 기존 테마 유지"
+                if self._midweek_dropped_theme:
+                    header = f"🔄 주중 교체 반영 (❌{self._midweek_dropped_theme})"
+                header += f" (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
+
                 self.notifier.send_message(
                     f"📊 08:30 테마 분석\n\n"
-                    f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)\n"
+                    f"{header}\n"
                     + "\n".join(theme_lines)
                     + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} (화) ({days_until_tuesday}일 후)"
                 )
@@ -806,6 +828,10 @@ class TradingSystem:
                     f"⏰ 09:25 필터링 후 매수 예정"
                 )
 
+            # 주중 교체: 손실 종목 재평가 (탈락 테마 손실 종목을 스크리닝으로 평가)
+            if self._midweek_loss_queue and self._midweek_dropped_theme:
+                await self._rescore_midweek_loss_stocks()
+
             # 실시간 관찰 시작 (09:05 ~ 09:23)
             if settings.ENABLE_MORNING_FILTER and self.today_candidates:
                 observer = CandidateObserver(self.today_candidates, self.notifier)
@@ -827,6 +853,73 @@ class TradingSystem:
             self.notifier.send_error_alert("종목 스크리닝", str(e))
             return {"success": False, "error": str(e)}
     
+    async def _rescore_midweek_loss_stocks(self) -> None:
+        """
+        주중 교체 손실 종목 재평가
+
+        탈락 테마의 손실 종목을 screen_stocks_in_theme로 개별 평가.
+        final_score >= MIDWEEK_LOSS_RESCORE_THRESHOLD이면 유지 (큐에서 제거).
+        """
+        logger.info("\n🔄 주중 교체 — 손실 종목 재평가")
+        threshold = settings.MIDWEEK_LOSS_RESCORE_THRESHOLD
+        keep_list = []
+        drop_list = []
+
+        from modules.stock_screener.screener import screen_stocks_in_theme
+
+        # 탈락 테마 정보 (스크리닝용)
+        dropped_theme = {
+            "name": self._midweek_dropped_theme,
+            "score": 0,
+        }
+
+        stock_codes = [s["stock_code"] for s in self._midweek_loss_queue]
+
+        try:
+            passed, failed = await asyncio.to_thread(
+                screen_stocks_in_theme,
+                theme=dropped_theme,
+                stock_codes=stock_codes,
+                max_stocks=len(stock_codes),
+            )
+
+            # passed 종목의 final_score 확인
+            passed_map = {p["code"]: p.get("final_score", 0) for p in passed}
+
+            for stock in self._midweek_loss_queue:
+                code = stock["stock_code"]
+                score = passed_map.get(code, 0)
+                if score >= threshold:
+                    keep_list.append(stock)
+                    logger.info(
+                        f"   ✅ {stock['stock_name']} — 재평가 통과 "
+                        f"({score:.1f} >= {threshold}) → 유지"
+                    )
+                else:
+                    drop_list.append(stock)
+                    logger.info(
+                        f"   ❌ {stock['stock_name']} — 재평가 탈락 "
+                        f"({score:.1f} < {threshold}) → 09:10 매도"
+                    )
+
+        except Exception as e:
+            logger.error(f"   손실 종목 재평가 실패: {e} — 전부 매도 대상으로 유지")
+            drop_list = list(self._midweek_loss_queue)
+            keep_list = []
+
+        # 큐 업데이트: 유지 종목은 제거, 탈락 종목만 남김
+        self._midweek_loss_queue = drop_list
+
+        if keep_list:
+            self.notifier.send_message(
+                f"🔄 주중 교체 — 손실 종목 재평가 결과\n\n"
+                f"✅ 유지: {len(keep_list)}개 (기존 손절/트레일링 적용)\n"
+                + "\n".join(f"  - {s['stock_name']} ({s['profit_rate']:+.1%})" for s in keep_list)
+                + (f"\n\n❌ 09:10 매도 예정: {len(drop_list)}개\n"
+                   + "\n".join(f"  - {s['stock_name']} ({s['profit_rate']:+.1%})" for s in drop_list)
+                   if drop_list else "")
+            )
+
     async def _run_observation(self, observer: CandidateObserver):
         """관찰 루프 실행 헬퍼"""
         try:
@@ -1339,6 +1432,7 @@ class TradingSystem:
 
         7일 단위로 메인 테마를 재평가합니다.
         점수 -20% 하락 또는 +15% 급등 시 즉시 변경됩니다.
+        주중 교체: 전일 일별 점수 기반으로 탈락 테마 1개 교체.
 
         Returns:
             체크 결과
@@ -1346,6 +1440,12 @@ class TradingSystem:
         logger.info("=" * 70)
         logger.info("🔄 테마 로테이션 체크 (08:00)")
         logger.info("=" * 70)
+
+        # 주중 교체 상태 초기화 (매일 리셋)
+        self._midweek_sell_queue = []
+        self._midweek_loss_queue = []
+        self._midweek_dropped_theme = None
+        self._midweek_new_theme = None
 
         try:
             # 현재 테마 정보 출력
@@ -1370,14 +1470,366 @@ class TradingSystem:
             else:
                 logger.info("   메인 테마 미설정")
 
+            # ===== 주중 테마 교체 판단 =====
+            self._check_midweek_replacement()
+
             return {"success": True, "theme_info": theme_info}
 
         except Exception as e:
             logger.error(f"테마 로테이션 체크 실패: {e}")
             return {"success": False, "error": str(e)}
+
+    def _check_midweek_replacement(self) -> None:
+        """
+        주중 테마 교체 판단 (check_theme_rotation에서 호출)
+
+        조건:
+        1. 기능 활성화 (MIDWEEK_REPLACEMENT_ENABLED)
+        2. 화요일이 아님 (정규 재선정일)
+        3. 활성 테마가 있음
+        4. 최소 보유 기간(2영업일) 경과
+        5. 전일 일별 점수 DB에 데이터 존재
+        6. 절대 하한 + 상대 열세 조건 충족
+        """
+        if not settings.MIDWEEK_REPLACEMENT_ENABLED:
+            logger.info("   주중 교체: 비활성화 상태")
+            return
+
+        today = now_kst().date()
+
+        # 화요일은 정규 재선정일이므로 스킵
+        if today.weekday() == 1:
+            logger.info("   주중 교체: 화요일(정규 재선정일) — 스킵")
+            return
+
+        # 활성 테마 확인
+        if not self.today_themes:
+            logger.info("   주중 교체: 활성 테마 없음 — 스킵")
+            return
+
+        # 최소 보유 기간 체크
+        if not self._last_theme_rotation_date:
+            logger.info("   주중 교체: 선정 날짜 불명 — 스킵")
+            return
+        days_held = (today - self._last_theme_rotation_date).days
+        if days_held < settings.MIDWEEK_MIN_HOLD_DAYS:
+            logger.info(
+                f"   주중 교체: 보유 {days_held}일 < 최소 {settings.MIDWEEK_MIN_HOLD_DAYS}일 — 스킵"
+            )
+            return
+
+        # 전일 일별 점수 조회 (timedelta는 모듈 상단에서 import 됨)
+        yesterday = today - timedelta(days=1)
+        # 주말 보정: 금요일→월요일인 경우 금요일 데이터 사용
+        while yesterday.weekday() >= 5:
+            yesterday -= timedelta(days=1)
+
+        daily_scores = self.db.get_daily_theme_scores(yesterday)
+        if not daily_scores:
+            logger.info(f"   주중 교체: 전일({yesterday}) 일별 점수 없음 — 스킵")
+            return
+
+        # 전일 점수 맵 (테마명 → 점수)
+        daily_score_map = {s["theme_name"]: s["score"] for s in daily_scores}
+
+        # 활성 테마별 전일 점수 매핑 + 탈락 후보 검출
+        active_names = set()
+        active_categories = []
+        candidates_for_drop = []
+
+        for t in self.today_themes:
+            t_name = t.get("theme", t.get("name", ""))
+            active_names.add(t_name)
+            active_categories.append(t.get("category", "기타"))
+
+            yesterday_score = daily_score_map.get(t_name)
+            if yesterday_score is None:
+                logger.debug(f"   [{t_name}] 전일 점수 없음 — 교체 대상에서 제외")
+                continue
+
+            # 절대 하한 체크
+            if yesterday_score <= settings.MIDWEEK_ABS_FLOOR:
+                candidates_for_drop.append({
+                    "name": t_name,
+                    "yesterday_score": yesterday_score,
+                    "theme_data": t,
+                })
+
+        if not candidates_for_drop:
+            logger.info("   주중 교체: 절대 하한 미달 테마 없음 — 교체 없음")
+            return
+
+        # 비활성 최상위 후보 점수 (교체 후보 선정)
+        from modules.theme_analyzer.selector import select_replacement_candidate
+        replacement = select_replacement_candidate(
+            daily_scores=daily_scores,
+            active_theme_names=active_names,
+            active_categories=active_categories,
+            min_score=settings.MIDWEEK_CANDIDATE_MIN_SCORE,
+        )
+
+        if not replacement:
+            logger.info("   주중 교체: 적합한 교체 후보 없음 — 교체 없음")
+            return
+
+        best_candidate_score = replacement["score"]
+
+        # 상대 열세 조건: 각 탈락 후보에 대해 점수 갭 체크
+        drop_target = None
+        for c in sorted(candidates_for_drop, key=lambda x: x["yesterday_score"]):
+            gap = best_candidate_score - c["yesterday_score"]
+            if gap >= settings.MIDWEEK_RELATIVE_GAP:
+                drop_target = c
+                break  # 가장 낮은 점수부터 확인, 첫 매치 탈락
+
+        if not drop_target:
+            logger.info(
+                f"   주중 교체: 상대 열세 조건 미충족 "
+                f"(최저 {candidates_for_drop[0]['yesterday_score']:.1f}점 vs "
+                f"후보 {best_candidate_score:.1f}점, "
+                f"갭 {best_candidate_score - candidates_for_drop[0]['yesterday_score']:.1f} "
+                f"< {settings.MIDWEEK_RELATIVE_GAP})"
+            )
+            return
+
+        # ===== 교체 확정 =====
+        dropped_name = drop_target["name"]
+        self._midweek_dropped_theme = dropped_name
+        self._midweek_new_theme = replacement
+
+        logger.info(f"   🔄 주중 교체 확정!")
+        logger.info(f"      ❌ 탈락: {dropped_name} (전일 {drop_target['yesterday_score']:.1f}점)")
+        logger.info(f"      ✅ 교체: {replacement['theme_name']} (전일 {best_candidate_score:.1f}점)")
+
+        # today_themes 갱신: 탈락 테마 제거 + 교체 테마 추가
+        self.today_themes = [
+            t for t in self.today_themes
+            if t.get("theme", t.get("name", "")) != dropped_name
+        ]
+        self.today_themes.append({
+            "name": replacement["theme_name"],
+            "theme": replacement["theme_name"],
+            "score": replacement["score"],
+            "total_score": replacement["score"],
+            "category": replacement.get("category", "기타"),
+            "url": replacement.get("url", ""),
+        })
+
+        # 탈락 테마 보유 종목 분류 (수익/손실)
+        holdings = self.db.get_portfolio(status='holding')
+        for h in holdings:
+            h_theme = h.get("theme", "")
+            if h_theme != dropped_name:
+                continue
+
+            profit_rate = h.get("profit_rate", 0) or 0
+            stock_info = {
+                "stock_code": h["stock_code"],
+                "stock_name": h["stock_name"],
+                "shares": h.get("shares", 0),
+                "buy_price": h.get("buy_price", 0),
+                "profit_rate": profit_rate,
+                "theme": dropped_name,
+            }
+
+            if profit_rate > 0:
+                self._midweek_sell_queue.append(stock_info)
+                logger.info(f"      📈 {h['stock_name']} ({profit_rate:+.1%}) → 09:00 매도")
+            else:
+                self._midweek_loss_queue.append(stock_info)
+                logger.info(f"      📉 {h['stock_name']} ({profit_rate:+.1%}) → 09:05 재평가")
+
+        # 텔레그램 알림
+        profit_lines = []
+        for s in self._midweek_sell_queue:
+            profit_lines.append(f"  📈 {s['stock_name']} ({s['profit_rate']:+.1%}) → 09:00 매도")
+        loss_lines = []
+        for s in self._midweek_loss_queue:
+            loss_lines.append(f"  📉 {s['stock_name']} ({s['profit_rate']:+.1%}) → 09:05 재평가")
+
+        position_text = ""
+        if profit_lines or loss_lines:
+            position_text = "\n\n탈락 종목 처리:\n" + "\n".join(profit_lines + loss_lines)
+
+        self.notifier.send_message(
+            f"🔄 주중 테마 교체 (08:00)\n\n"
+            f"❌ 탈락: {dropped_name} (전일 {drop_target['yesterday_score']:.1f}점)\n"
+            f"✅ 교체: {replacement['theme_name']} (전일 {best_candidate_score:.1f}점)"
+            f"{position_text}\n\n"
+            f"빈 슬롯은 09:25에 {replacement['theme_name']} 종목으로 채움"
+        )
     
+    # ===== 주중 교체 매도 =====
+
+    async def _execute_midweek_profit_sells(self) -> None:
+        """
+        주중 교체 수익 종목 매도 (09:00)
+
+        _midweek_sell_queue에 있는 수익 종목을 시장가 매도.
+        교체가 없는 날에는 큐가 비어있으므로 즉시 종료.
+        """
+        if not self._midweek_sell_queue:
+            return
+
+        logger.info("=" * 70)
+        logger.info("🔄 주중 교체 — 수익 종목 매도 (09:00)")
+        logger.info("=" * 70)
+
+        reason = "주중 테마 교체 (수익 청산)"
+
+        if self.test_mode:
+            for stock in self._midweek_sell_queue:
+                logger.info(f"   [테스트] {stock['stock_name']} ({stock['stock_code']}) {stock['shares']}주 매도 스킵")
+            self._midweek_sell_queue.clear()
+            return
+
+        # execute_sell_orders 형식으로 변환
+        sell_orders = [
+            {
+                "stock_code": s["stock_code"],
+                "stock_name": s["stock_name"],
+                "quantity": s["shares"],
+                "buy_price": s.get("buy_price", 0),
+                "reason": reason,
+            }
+            for s in self._midweek_sell_queue
+        ]
+
+        try:
+            result = await asyncio.to_thread(
+                self.trading_engine.execute_sell_orders,
+                sell_orders,
+                save_to_db=False,  # 아래에서 직접 DB 처리
+            )
+
+            sold_count = 0
+            for order in result.get("orders", []):
+                stock_code = order.get("stock_code", "")
+                stock_name = order.get("stock_name", "")
+                if not order.get("success"):
+                    logger.error(f"   ❌ {stock_name} 매도 실패: {order}")
+                    continue
+
+                sold_count += 1
+                filled_price = order.get("filled_price", order.get("price", 0))
+                quantity = order.get("quantity", 0)
+                logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
+
+                # DB 기록
+                self.db.close_position(stock_code, reason)
+                self.db.save_trade({
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "action": "sell",
+                    "shares": quantity,
+                    "price": filled_price,
+                    "amount": (filled_price or 0) * quantity,
+                    "reason": reason,
+                    "profit_rate": order.get("profit_rate", 0),
+                    "profit_amount": order.get("profit_amount", 0),
+                    "buy_price": order.get("buy_price", 0),
+                    "filled_price": filled_price,
+                })
+
+                # 모니터 포지션 제거
+                if self.monitor:
+                    self.monitor.remove_position(stock_code)
+
+            logger.info(f"   주중 교체 수익 매도 완료: {sold_count}/{len(sell_orders)}건")
+
+        except Exception as e:
+            logger.error(f"   주중 교체 수익 매도 오류: {e}")
+            self.notifier.send_error_alert(
+                "주중 교체 수익 매도",
+                f"매도 실행 중 오류 발생 — 수동 확인 필요\n{e}"
+            )
+
+        self._midweek_sell_queue.clear()
+
+    async def _execute_midweek_loss_sells(self) -> None:
+        """
+        주중 교체 손실 종목 매도 (09:10)
+
+        _midweek_loss_queue에서 09:05 재평가 탈락한 종목만 매도.
+        재평가 통과 종목은 이미 큐에서 제거됨 (run_stock_screening에서 처리).
+        """
+        if not self._midweek_loss_queue:
+            return
+
+        logger.info("=" * 70)
+        logger.info("🔄 주중 교체 — 재평가 탈락 종목 매도 (09:10)")
+        logger.info("=" * 70)
+
+        reason = "주중 테마 교체 (재평가 탈락)"
+
+        if self.test_mode:
+            for stock in self._midweek_loss_queue:
+                logger.info(f"   [테스트] {stock['stock_name']} ({stock['stock_code']}) {stock['shares']}주 매도 스킵")
+            self._midweek_loss_queue.clear()
+            return
+
+        sell_orders = [
+            {
+                "stock_code": s["stock_code"],
+                "stock_name": s["stock_name"],
+                "quantity": s["shares"],
+                "buy_price": s.get("buy_price", 0),
+                "reason": reason,
+            }
+            for s in self._midweek_loss_queue
+        ]
+
+        try:
+            result = await asyncio.to_thread(
+                self.trading_engine.execute_sell_orders,
+                sell_orders,
+                save_to_db=False,
+            )
+
+            sold_count = 0
+            for order in result.get("orders", []):
+                stock_code = order.get("stock_code", "")
+                stock_name = order.get("stock_name", "")
+                if not order.get("success"):
+                    logger.error(f"   ❌ {stock_name} 매도 실패: {order}")
+                    continue
+
+                sold_count += 1
+                filled_price = order.get("filled_price", order.get("price", 0))
+                quantity = order.get("quantity", 0)
+                logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
+
+                self.db.close_position(stock_code, reason)
+                self.db.save_trade({
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "action": "sell",
+                    "shares": quantity,
+                    "price": filled_price,
+                    "amount": (filled_price or 0) * quantity,
+                    "reason": reason,
+                    "profit_rate": order.get("profit_rate", 0),
+                    "profit_amount": order.get("profit_amount", 0),
+                    "buy_price": order.get("buy_price", 0),
+                    "filled_price": filled_price,
+                })
+
+                if self.monitor:
+                    self.monitor.remove_position(stock_code)
+
+            logger.info(f"   주중 교체 손실 매도 완료: {sold_count}/{len(sell_orders)}건")
+
+        except Exception as e:
+            logger.error(f"   주중 교체 손실 매도 오류: {e}")
+            self.notifier.send_error_alert(
+                "주중 교체 손실 매도",
+                f"매도 실행 중 오류 발생 — 수동 확인 필요\n{e}"
+            )
+
+        self._midweek_loss_queue.clear()
+
     # ===== 장 마감 =====
-    
+
     async def run_market_close(self) -> None:
         """장 마감 정리 (15:35)"""
         logger.info("장 마감 정리")
@@ -1870,7 +2322,7 @@ class TradingSystem:
                 holdings = db.get_portfolio(status="holding")
                 info_lines.append(f"보유종목: {len(holdings)}개")
                 for h in holdings:
-                    prate = h.get("profit_rate", 0) or 0
+                    prate = (h.get("profit_rate", 0) or 0) * 100
                     info_lines.append(f"  {h['stock_name']} {prate:+.1f}%")
 
                 # 오늘 매매
