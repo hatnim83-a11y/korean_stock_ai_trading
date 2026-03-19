@@ -308,7 +308,7 @@ async def get_themes_data(days: int = 30) -> dict:
     all_selected = [t for t in all_themes if t.get("selected") == 1]
     if all_selected:
         latest_selected_date = all_selected[0]["date"]  # DESC 정렬
-        selected_themes = [t for t in all_selected if t["date"] == latest_selected_date]
+        selected_themes = [dict(t) for t in all_selected if t["date"] == latest_selected_date]
 
     # candidate: 최신 날짜의 미선정 테마 (selected=0)
     candidate_themes = []
@@ -316,6 +316,18 @@ async def get_themes_data(days: int = 30) -> dict:
     if non_selected:
         latest_candidate_date = non_selected[0]["date"]
         candidate_themes = [t for t in non_selected if t["date"] == latest_candidate_date]
+
+    # 선정 테마에 최신 일별 수집(selected=0) 뉴스 건수 오버레이
+    if selected_themes and non_selected:
+        latest_news_map = {}
+        for t in non_selected:
+            name = t["theme_name"]
+            if name not in latest_news_map:  # DESC 정렬이므로 첫 번째가 최신
+                latest_news_map[name] = t.get("news_count", 0) or 0
+        for t in selected_themes:
+            fresh = latest_news_map.get(t["theme_name"])
+            if fresh is not None:
+                t["news_count"] = fresh
 
     # 하위 호환: current_themes = selected 우선, 없으면 candidate
     current_themes = selected_themes if selected_themes else candidate_themes

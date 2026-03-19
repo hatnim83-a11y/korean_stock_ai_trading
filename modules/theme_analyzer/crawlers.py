@@ -412,6 +412,27 @@ def _clean_news_html(raw: str) -> str:
     return text.strip()
 
 
+# ===== 뉴스 검색 쿼리 생성 =====
+
+# 다의적 테마: 일반 용어와 겹쳐 비증권 뉴스가 혼입되는 테마
+_AMBIGUOUS_THEMES = {
+    "엔터테인먼트": "엔터테인먼트 관련주 주가",
+    "게임": "게임주 주가 실적",
+    "음식료": "음식료 관련주 주가",
+    "화장품": "화장품주 주가 실적",
+    "여행": "여행주 주가 실적",
+    "의류": "의류주 주가 실적",
+    "교육": "교육주 주가 실적",
+}
+
+
+def _build_news_query(theme_name: str) -> str:
+    """테마명 → 증권 뉴스 검색 쿼리 생성 (다의적 테마 보정)"""
+    if theme_name in _AMBIGUOUS_THEMES:
+        return _AMBIGUOUS_THEMES[theme_name]
+    return f"{theme_name} 주가 증권"
+
+
 # ===== 뉴스 텍스트 + 건수 수집 =====
 
 def crawl_theme_news(theme_name: str, days: int = 3, max_items: int = 5) -> dict:
@@ -440,7 +461,7 @@ def crawl_theme_news(theme_name: str, days: int = 3, max_items: int = 5) -> dict
         return {"count": count, "text": ""}
 
     try:
-        search_query = f"{theme_name} 주식"
+        search_query = _build_news_query(theme_name)
         url = "https://openapi.naver.com/v1/search/news.json"
         headers = {
             "X-Naver-Client-Id": client_id,
@@ -499,7 +520,7 @@ def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
         return _crawl_theme_news_count_scrape(theme_name, days)
 
     try:
-        search_query = f"{theme_name} 주식"
+        search_query = _build_news_query(theme_name)
         url = "https://openapi.naver.com/v1/search/news.json"
         headers = {
             "X-Naver-Client-Id": client_id,
@@ -531,7 +552,7 @@ def _crawl_theme_news_count_scrape(theme_name: str, days: int = 3) -> int:
         start_date = (today - timedelta(days=days)).strftime("%Y.%m.%d")
         end_date = today.strftime("%Y.%m.%d")
 
-        search_query = f"{theme_name} 주식"
+        search_query = _build_news_query(theme_name)
         url = "https://search.naver.com/search.naver"
         params = {
             "where": "news",

@@ -109,7 +109,7 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
                 "weighted_score": 0.0,
                 "weighted_momentum": 0.0,
                 "total_weight": 0.0,
-                "total_news": 0,
+                "latest_news": None,
                 "total_ai": 0.0,
                 "ai_count": 0,
                 "category": row.get("category", "기타"),
@@ -122,7 +122,9 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
         td["weighted_score"] += (row.get("score", 0) or 0) * weight
         td["weighted_momentum"] += (row.get("momentum", 0) or 0) * weight
         td["total_weight"] += weight
-        td["total_news"] += row.get("news_count", 0) or 0
+        # 최신일(가장 처음 만나는) 뉴스 건수만 사용 (rows는 date DESC)
+        if td["latest_news"] is None:
+            td["latest_news"] = row.get("news_count", 0) or 0
         if row.get("ai_sentiment", 0):
             td["total_ai"] += row["ai_sentiment"]
             td["ai_count"] += 1
@@ -150,7 +152,7 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
             "score": round(avg_score, 2),
             "momentum": round(avg_momentum, 2),
             "momentum_score": round(avg_momentum, 2),
-            "news_count": td["total_news"],
+            "news_count": td["latest_news"] if td["latest_news"] is not None else 0,
             "ai_sentiment": round(avg_ai, 2),
             "category": td["category"],
             "days_found": td["days_found"],
