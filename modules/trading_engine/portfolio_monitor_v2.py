@@ -17,7 +17,7 @@ portfolio_monitor_v2.py - 개선된 포트폴리오 실시간 모니터링 모�
 """
 
 import asyncio
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from typing import Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -98,8 +98,16 @@ class Position:
     
     @property
     def hold_days(self) -> int:
-        """보유 일수"""
-        return (now_kst() - self.buy_date).days
+        """보유 영업일수 (주말/공휴일 제외)"""
+        count = 0
+        d = self.buy_date.date() if isinstance(self.buy_date, datetime) else self.buy_date
+        d = d + timedelta(days=1)
+        today = now_kst().date()
+        while d <= today:
+            if is_trading_day(d):
+                count += 1
+            d += timedelta(days=1)
+        return count
 
 
 @dataclass

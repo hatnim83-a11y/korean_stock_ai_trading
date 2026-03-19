@@ -189,16 +189,16 @@ class Settings(BaseSettings):
 
     # ===== 보유 기간 설정 =====
     MAX_HOLD_DAYS_PROFIT: int = Field(
-        default=14,
-        description="수익 시 최대 보유 기간 (14일)"
+        default=10,
+        description="수익 시 최대 보유 기간 (10영업일)"
     )
     MAX_HOLD_DAYS_LOSS: int = Field(
-        default=7,
-        description="손실 시 최대 보유 기간 (7일)"
+        default=5,
+        description="손실 시 최대 보유 기간 (5영업일)"
     )
     MIN_PROFIT_FOR_LONG_HOLD: float = Field(
-        default=0.05,
-        description="장기 보유 최소 수익률 (5% 이상)"
+        default=0.03,
+        description="장기 보유 최소 수익률 (3% 이상)"
     )
     MIN_PROFIT_TO_IGNORE_SUPPLY: float = Field(
         default=0.10,

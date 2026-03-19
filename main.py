@@ -307,6 +307,7 @@ class TradingSystem:
         self.scheduler.on_daily_health_check = self.run_daily_health_check  # 16:10 헬스체크
         self.scheduler.on_midweek_sell_profit = self._execute_midweek_profit_sells  # 09:00 주중 교체 수익 매도
         self.scheduler.on_midweek_sell_loss = self._execute_midweek_loss_sells      # 09:10 주중 교체 손실 매도
+        self.scheduler.on_hold_period_sell = self.run_hold_period_sells              # 09:15 보유기간 만료 매도
 
     # ===== 08:30 테마 분석 (장 시작 전) =====
 
@@ -343,10 +344,11 @@ class TradingSystem:
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
                 )
 
-                # URL 없는 테마만 개별 보충 (주중 교체 신규 테마 포함)
-                missing_url_themes = [t for t in self.today_themes if not t.get("url")]
-                if missing_url_themes:
-                    logger.info(f"   URL 없는 테마 {len(missing_url_themes)}개 → 크롤링으로 보충")
+                # URL 또는 stock_count 없는 테마 보충
+                needs_supplement = [t for t in self.today_themes
+                                    if not t.get("url") or not t.get("stock_count")]
+                if needs_supplement:
+                    logger.info(f"   URL/종목수 보충 필요 {len(needs_supplement)}개 → 크롤링")
                     try:
                         from modules.theme_analyzer import crawl_all_themes
                         from modules.theme_analyzer.crawlers import search_naver_theme
@@ -354,32 +356,33 @@ class TradingSystem:
 
                         all_crawled = await asyncio.to_thread(crawl_all_themes)
                         crawled_map = {t["name"]: t for t in all_crawled}
-                        for t in missing_url_themes:
+                        for t in needs_supplement:
                             t_name = t.get("theme", t.get("name", ""))
                             if t_name in crawled_map:
                                 matched = crawled_map[t_name]
-                                t["url"] = matched.get("url") or ""
-                                t["stock_count"] = matched.get("stock_count", 0)
-                                if t.get("url"):
-                                    logger.info(f"   ✓ [{t_name}] url 보충 완료 ({t['stock_count']}종목)")
+                                if not t.get("url"):
+                                    t["url"] = matched.get("url") or ""
+                                t["stock_count"] = matched.get("stock_count", 0) or t.get("stock_count", 0)
+                                if t.get("url") and t.get("stock_count"):
+                                    logger.info(f"   ✓ [{t_name}] 보충 완료 ({t['stock_count']}종목)")
                                     continue
-                                logger.warning(f"   [{t_name}] 크롤링 결과에 URL 없음 → 폴백 시도")
-                            # 폴백 1: 네이버 테마 개별 검색
-                            naver_result = await asyncio.to_thread(search_naver_theme, t_name)
-                            if naver_result and naver_result.get("url"):
-                                t["url"] = naver_result["url"]
-                                t["stock_count"] = naver_result.get("stock_count", 0)
-                                logger.info(f"   ✓ [{t_name}] 네이버 검색으로 url 보충 ({t['stock_count']}종목)")
-                            else:
-                                # 폴백 2: 네이버 업종 검색
-                                upjong_url = await asyncio.to_thread(_search_naver_upjong, t_name)
-                                if upjong_url:
-                                    t["url"] = upjong_url
-                                    logger.info(f"   ✓ [{t_name}] 업종 검색으로 url 보충")
+                            if not t.get("url"):
+                                # 폴백 1: 네이버 테마 개별 검색
+                                naver_result = await asyncio.to_thread(search_naver_theme, t_name)
+                                if naver_result and naver_result.get("url"):
+                                    t["url"] = naver_result["url"]
+                                    t["stock_count"] = naver_result.get("stock_count", 0) or t.get("stock_count", 0)
+                                    logger.info(f"   ✓ [{t_name}] 네이버 검색으로 보충 ({t['stock_count']}종목)")
                                 else:
-                                    logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 (09:05 스크리닝에서 재시도)")
+                                    # 폴백 2: 네이버 업종 검색
+                                    upjong_url = await asyncio.to_thread(_search_naver_upjong, t_name)
+                                    if upjong_url:
+                                        t["url"] = upjong_url
+                                        logger.info(f"   ✓ [{t_name}] 업종 검색으로 url 보충")
+                                    else:
+                                        logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 (09:05 스크리닝에서 재시도)")
                     except Exception as e:
-                        logger.error(f"   종목 URL 보충 실패: {e}")
+                        logger.error(f"   종목 URL/종목수 보충 실패: {e}")
 
                 for t in self.today_themes:
                     t_name = t.get("theme", t.get("name", ""))
@@ -1557,6 +1560,11 @@ class TradingSystem:
 
         if not candidates_for_drop:
             logger.info("   주중 교체: 절대 하한 미달 테마 없음 — 교체 없음")
+            self.notifier.send_message(
+                f"🔄 08:00 주중 교체 점검\n\n"
+                f"✅ 교체 없음 — 전 테마 양호\n"
+                f"📊 활성 {len(self.today_themes)}개 테마 모두 B등급({settings.MIDWEEK_ABS_FLOOR}점) 이상"
+            )
             return
 
         # 비활성 최상위 후보 점수 (교체 후보 선정)
@@ -1570,6 +1578,13 @@ class TradingSystem:
 
         if not replacement:
             logger.info("   주중 교체: 적합한 교체 후보 없음 — 교체 없음")
+            worst = min(candidates_for_drop, key=lambda x: x["yesterday_score"])
+            self.notifier.send_message(
+                f"🔄 08:00 주중 교체 점검\n\n"
+                f"⚠️ 부진 테마 있으나 교체 불가\n"
+                f"📉 {worst['name']} ({worst['yesterday_score']:.1f}점)\n"
+                f"❌ 적합한 교체 후보 없음"
+            )
             return
 
         best_candidate_score = replacement["score"]
@@ -1583,12 +1598,21 @@ class TradingSystem:
                 break  # 가장 낮은 점수부터 확인, 첫 매치 탈락
 
         if not drop_target:
+            worst = min(candidates_for_drop, key=lambda x: x["yesterday_score"])
+            gap = best_candidate_score - worst["yesterday_score"]
             logger.info(
                 f"   주중 교체: 상대 열세 조건 미충족 "
-                f"(최저 {candidates_for_drop[0]['yesterday_score']:.1f}점 vs "
+                f"(최저 {worst['yesterday_score']:.1f}점 vs "
                 f"후보 {best_candidate_score:.1f}점, "
-                f"갭 {best_candidate_score - candidates_for_drop[0]['yesterday_score']:.1f} "
+                f"갭 {gap:.1f} "
                 f"< {settings.MIDWEEK_RELATIVE_GAP})"
+            )
+            self.notifier.send_message(
+                f"🔄 08:00 주중 교체 점검\n\n"
+                f"⚠️ 부진 테마 있으나 교체 불가\n"
+                f"📉 {worst['name']} ({worst['yesterday_score']:.1f}점)\n"
+                f"📈 후보: {replacement['theme_name']} ({best_candidate_score:.1f}점)\n"
+                f"❌ 점수 갭 {gap:.1f} < 기준 {settings.MIDWEEK_RELATIVE_GAP} — 유지"
             )
             return
 
@@ -1659,6 +1683,169 @@ class TradingSystem:
             f"빈 슬롯은 09:25에 {replacement['theme_name']} 종목으로 채움"
         )
     
+    # ===== 보유기간 만료 매도 (09:15) =====
+
+    async def run_hold_period_sells(self) -> None:
+        """
+        보유기간 만료 종목 매도 (09:15)
+
+        09:25 매수 전에 실행하여 빈 슬롯을 확보한다.
+        DB에서 포트폴리오를 읽어 영업일 기준 보유기간 초과 종목을 매도.
+        """
+        logger.info("⏰ 보유기간 만료 체크 (09:15)")
+
+        try:
+            portfolio = self.db.get_portfolio("holding")
+        except Exception as e:
+            logger.error(f"포트폴리오 조회 실패: {e}")
+            return
+
+        if not portfolio:
+            logger.info("   보유 종목 없음 — 스킵")
+            return
+
+        # position_state에서 remaining_shares 조회 (분할 익절 반영)
+        position_states = self.db.get_all_position_states()
+
+        # 영업일 기준 보유일수 계산
+        today = now_kst().date()
+        sell_targets = []
+
+        for pos in portfolio:
+            buy_date_raw = pos.get("buy_date") or pos.get("date")
+            if not buy_date_raw:
+                continue
+
+            if isinstance(buy_date_raw, str):
+                buy_date = datetime.strptime(buy_date_raw, "%Y-%m-%d").date()
+            elif isinstance(buy_date_raw, datetime):
+                buy_date = buy_date_raw.date()
+            else:
+                buy_date = buy_date_raw
+
+            # 영업일 카운팅 (매수 다음날부터)
+            hold_biz_days = 0
+            d = buy_date + timedelta(days=1)
+            while d <= today:
+                if is_trading_day(d):
+                    hold_biz_days += 1
+                d += timedelta(days=1)
+
+            buy_price = pos.get("buy_price") or pos.get("price", 0)
+            current_price = pos.get("current_price", buy_price)
+            profit_rate = (current_price - buy_price) / buy_price if buy_price > 0 else 0
+
+            if profit_rate >= settings.MIN_PROFIT_FOR_LONG_HOLD:
+                max_days = settings.MAX_HOLD_DAYS_PROFIT
+            else:
+                max_days = settings.MAX_HOLD_DAYS_LOSS
+
+            if hold_biz_days >= max_days:
+                # position_state에서 remaining_shares 우선 조회 (분할 익절 반영)
+                stock_code = pos["stock_code"]
+                state = position_states.get(stock_code, {})
+                remaining = state.get("remaining_shares") or pos.get("shares", 0)
+
+                sell_targets.append({
+                    "stock_code": stock_code,
+                    "stock_name": pos.get("stock_name", stock_code),
+                    "quantity": remaining,
+                    "buy_price": buy_price,
+                    "hold_days": hold_biz_days,
+                    "max_days": max_days,
+                    "profit_rate": profit_rate,
+                    "reason": "보유기간 초과",
+                })
+
+        if not sell_targets:
+            logger.info("   보유기간 만료 종목 없음")
+            return
+
+        logger.info(f"   보유기간 만료 {len(sell_targets)}종목 매도 실행")
+        for t in sell_targets:
+            logger.info(f"   - {t['stock_name']} ({t['stock_code']}) "
+                        f"보유 {t['hold_days']}영업일/{t['max_days']}일 "
+                        f"수익률 {t['profit_rate']:.1%}")
+
+        if self.test_mode:
+            for t in sell_targets:
+                logger.info(f"   [테스트] {t['stock_name']} 매도 스킵")
+            return
+
+        # 매도 실행
+        try:
+            result = await asyncio.to_thread(
+                self.trading_engine.execute_sell_orders,
+                sell_targets,
+                save_to_db=False,
+            )
+
+            sold_count = 0
+            for order in result.get("orders", []):
+                stock_code = order.get("stock_code", "")
+                stock_name = order.get("stock_name", "")
+                if not order.get("success"):
+                    logger.error(f"   ❌ {stock_name} 매도 실패: {order}")
+                    continue
+
+                sold_count += 1
+                filled_price = order.get("filled_price", order.get("price", 0))
+                quantity = order.get("quantity", 0)
+                buy_price = order.get("buy_price", 0)
+                actual_profit_rate = (filled_price - buy_price) / buy_price if buy_price > 0 else 0
+                actual_profit_amount = (filled_price - buy_price) * quantity
+
+                logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
+
+                # DB 기록 (profit_rate는 소수 형태로 저장 — 기존 패턴 일치)
+                reason = "보유기간 초과"
+                self.db.close_position(stock_code, reason)
+                self.db.save_trade({
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "action": "sell",
+                    "shares": quantity,
+                    "price": filled_price,
+                    "amount": (filled_price or 0) * quantity,
+                    "reason": reason,
+                    "profit_rate": actual_profit_rate,
+                    "profit_amount": actual_profit_amount,
+                    "buy_price": buy_price,
+                    "filled_price": filled_price,
+                })
+
+                # 모니터 포지션 제거 (09:15는 모니터 시작 전이므로 보통 None)
+                if self.monitor:
+                    self.monitor.remove_position(stock_code)
+
+                # 텔레그램 알림
+                pnl_emoji = "🔺" if actual_profit_rate >= 0 else "🔻"
+                target = next((t for t in sell_targets if t["stock_code"] == stock_code), {})
+                self.notifier.send_message(
+                    f"⏰ 보유기간 초과 매도 (09:15)\n\n"
+                    f"📊 {stock_name} ({stock_code})\n"
+                    f"💰 매수가: {int(buy_price):,}원 → 매도가: {int(filled_price):,}원\n"
+                    f"📊 수량: {quantity}주\n"
+                    f"{pnl_emoji} 수익: {actual_profit_rate:+.2%} ({int(actual_profit_amount):+,}원)\n"
+                    f"📅 보유: {target.get('hold_days', '?')}영업일 / 최대 {target.get('max_days', '?')}일\n\n"
+                    f"⚠️ 보유기간 만료 → 09:25 매수에서 슬롯 활용"
+                )
+
+                self.today_trades.append({
+                    "action": "sell", "stock_code": stock_code,
+                    "stock_name": stock_name, "shares": quantity,
+                    "price": int(filled_price), "reason": "보유기간 초과 (09:15)"
+                })
+
+            logger.info(f"   보유기간 매도 완료: {sold_count}/{len(sell_targets)}건")
+
+        except Exception as e:
+            logger.error(f"   보유기간 매도 오류: {e}")
+            self.notifier.send_error_alert(
+                "보유기간 만료 매도",
+                f"매도 실행 중 오류 발생 — 수동 확인 필요\n{e}"
+            )
+
     # ===== 주중 교체 매도 =====
 
     async def _execute_midweek_profit_sells(self) -> None:

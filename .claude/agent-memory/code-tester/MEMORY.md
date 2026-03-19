@@ -132,6 +132,47 @@
 - 버그 발생 위치: `report_generator.py:328` (any() 조건), `telegram_notifier.py:506` (리스트컴프리헨션 필터)
 - 수정 완료: 2026-03-13
 
+### 주중 테마 교체 기능 (2026-03-18 1회차 검증)
+- 수정 파일: config.py, database.py, selector.py, scheduler.py, main.py, dashboard.html
+- `execute_sell_orders(save_to_db=False)` 호출 후 직접 `db.close_position` + `db.save_trade` 패턴 (정상)
+- `kis_order_api._place_order` 반환값: stock_code, quantity 포함 → `order.get("stock_code")` 안전
+- `themes` 테이블에 `stock_count` 컬럼 없음 → `select_replacement_candidate`에서 항상 0 반환 → 필터 스킵 (기능은 정상, 종목수 필터 비활성 상태)
+- `MIDWEEK_MIN_HOLD_DAYS=2`: 달력일 기준 비교 (`_last_theme_rotation_date`가 None이면 체크 스킵)
+  → None 케이스: today_themes가 있으면 교체 판단 실행 (잠재적 부작용, 발동 조건은 희소)
+- `from datetime import timedelta` 내부 중복 import: 상단에 이미 import됨, 기능 무관
+- `_check_midweek_replacement`에서 `Database()` 새 인스턴스 생성 (self.db로 대체 가능, 비효율적이나 무해)
+- `_rescore_midweek_loss_stocks`에서 `screen_stocks_in_theme` 반환 시그니처: `tuple[list, list]` (passed, failed) 정상 호출
+- 대시보드 Chart.js `borderDash` 위치: dataset 직속 속성으로 올바름
+- 09:00 스케줄이 기존 09:05 스크리닝보다 먼저 실행: 시계열 순서 정상
+- `profit_rate` 단위: DB 저장값은 소수(0.05=5%), `:+.1%` 포맷팅과 일치 (정상)
+
+### 주중 교체 청산·진입 흐름 심층 검증 (2026-03-18 2회차)
+- **close_position SQL**: reason 파라미터가 로그에만 출력되고 DB 저장 안 됨 (portfolio 테이블에 reason 컬럼 없음) — 기능 무관
+- **profit_rate=0.0 경계**: `profit_rate > 0`이므로 정확히 0인 종목은 loss_queue에 배치됨 — 의도 여부 불명확, 재평가 대상으로 간주 (허용 수준)
+- **test_mode DB 불일치**: test_mode=True 시 매도 스킵 → DB portfolio 여전히 holding → execute_buy_orders에서 슬롯 소진처럼 인식 → 교체 후 신규 매수 안 됨 (test_mode 한계)
+- **_execute_midweek_loss_sells clear() 위치**: `except` 블록 밖에 있어 예외 발생 시에도 큐가 초기화됨 (의도된 동작, 재시도 방지 목적)
+- **_execute_midweek_profit_sells clear() 위치**: 동일하게 except 밖에 위치 — 예외 후에도 초기화
+- **position_state vs portfolio 이중 삭제 없음**: `close_position()`은 portfolio 테이블만, `remove_position()`은 position_state 테이블만 수정 — 독립적
+- **09:26 모니터 재로드 문제 없음**: `load_positions_from_db()`는 status='holding'만 조회, close_position 후 'closed'로 변경되므로 재로드 안 됨
+- **screener 반환 구조 정합성**: `screen_stocks_in_theme` 반환 candidates 각 항목에 `code`(kis_api.py 확인), `final_score`(filters.py 확인) 키 존재 — `passed_map = {p["code"]: p.get("final_score", 0)}` 패턴 안전
+- **execute_sell_orders 반환 orders 구조**: `_place_order` 반환값에 `stock_code`, `quantity` 포함 + `execute_sell_orders`에서 `stock_name`, `buy_price` 추가 + `_wait_for_fills`에서 `filled_price` 추가 — main.py의 `order.get("filled_price", order.get("price", 0))` 폴백 패턴 안전
+- **09:00~09:26 사이 monitor=None**: `_execute_midweek_profit_sells`에서 `if self.monitor: remove_position()` 가드 있음 — NoneType 오류 없음, 단 position_state 잔류 (09:26 load_positions_from_db에서 portfolio 기반으로 재로드하므로 실질 문제 없음)
+- **중복 저장 없음**: `save_to_db=False` 시 `_save_trades()` 호출 안 됨, 이후 `db.close_position + db.save_trade` 직접 호출 — 중복 없음 확인
+- **주요 미발견 이슈**: `_execute_midweek_profit_sells`에서 `exception` 발생 시 `sold_count`는 0이지만 `_midweek_sell_queue.clear()` 호출됨 → 매도 실패한 종목 재시도 불가 (주의)
+
+### 주중 교체 평가·시각화·엣지케이스 검증 (2026-03-18 3회차)
+- **점수 기준 정합성**: MIDWEEK_ABS_FLOOR(38) = RETENTION_SCORE(48)과 다름 (의도적 비대칭)
+  → 이전 MEMORY에 RETENTION_SCORE=38.0으로 잘못 기록됨. **실제 현재값은 48.0** (selector.py line 46)
+- **자기 자신 교체 불가 확인**: active_names에서 제외되므로 select_replacement_candidate에서 스킵됨
+- **하루 1개만 교체 확인**: break 후 return 패턴 — 복수 탈락 시에도 1개만 교체됨
+  → 다음 날 가장 낮은 점수 순 교체 가능 (의도된 설계)
+- **대시보드 38 하드코딩**: dashboard.html line 442 등급 기준(38, 48, 58), line 543 기준선 38 — config에서 로드 안 함 (주의)
+- **activeThemes fallback**: `selected_themes`가 비면 `current_themes`로 폴백 — current_themes가 None이면 undefined 전달 (renderThemeCards가 방어 처리함)
+- **delta 계산**: hist[0]이 가장 최근(내림차순 정렬), hist.length < 2이면 delta 미표시 — 정상
+- **금요일 교체 후 월요일 재시작**: `get_last_theme_analysis_date()`는 selected=1 기준 → 금요일 교체로 추가된 테마는 DB에 저장됨 (line 562 selected=True) → 복원 가능
+  → 단 교체 테마가 same_week 로직(days_since_rotation < 7)으로 "기존 유지" 경로로 진입 — 정상
+- **RETENTION_SCORE 수정**: selector.py:46 현재 48.0, MEMORY의 38.0 오기 수정됨
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`

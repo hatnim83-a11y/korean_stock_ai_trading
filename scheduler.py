@@ -97,6 +97,7 @@ class TradingScheduler:
         self.on_daily_health_check: Optional[Callable] = None  # 16:10 일일 헬스체크
         self.on_midweek_sell_profit: Optional[Callable] = None  # 09:00 주중 교체 수익 매도
         self.on_midweek_sell_loss: Optional[Callable] = None    # 09:10 주중 교체 손실 매도
+        self.on_hold_period_sell: Optional[Callable] = None     # 09:15 보유기간 만료 매도
         
         # 이벤트 리스너
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
@@ -213,6 +214,15 @@ class TradingScheduler:
             CronTrigger(hour=9, minute=10, day_of_week='mon-fri', timezone=_KST_TZ),
             id='midweek_sell_loss',
             name='주중 교체 손실 매도',
+            replace_existing=True
+        )
+
+        # 10-1. 보유기간 만료 매도 (KST 09:15) - 09:25 매수 전 슬롯 확보
+        self.scheduler.add_job(
+            self._run_hold_period_sell,
+            CronTrigger(hour=9, minute=15, day_of_week='mon-fri', timezone=_KST_TZ),
+            id='hold_period_sell',
+            name='보유기간 만료 매도 (09:15)',
             replace_existing=True
         )
 
@@ -436,6 +446,16 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"주중 교체 손실 매도 실패: {e}")
             self._send_error_notification("주중 교체 손실 매도", str(e))
+
+    @_skip_on_holiday
+    async def _run_hold_period_sell(self) -> None:
+        """09:15 - 보유기간 만료 종목 매도 (09:25 매수 전 슬롯 확보)"""
+        try:
+            if self.on_hold_period_sell:
+                await self.on_hold_period_sell()
+        except Exception as e:
+            logger.error(f"보유기간 만료 매도 실패: {e}")
+            self._send_error_notification("보유기간 만료 매도", str(e))
 
     @_skip_on_holiday
     async def _run_daily_health_check(self) -> None:
