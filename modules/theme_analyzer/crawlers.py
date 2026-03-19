@@ -469,7 +469,7 @@ def crawl_theme_news(theme_name: str, days: int = 3, max_items: int = 5) -> dict
         }
         params = {
             "query": search_query,
-            "display": max_items,
+            "display": 100,
             "sort": "date",
         }
 
@@ -477,19 +477,30 @@ def crawl_theme_news(theme_name: str, days: int = 3, max_items: int = 5) -> dict
         response.raise_for_status()
 
         data = response.json()
-        count = data.get("total", 0)
         items = data.get("items", [])
 
-        # 제목 + 설명(본문 요약)을 합쳐 텍스트 생성
+        # 최근 N일 이내 기사만 카운트 (pubDate 기반)
+        cutoff = now_kst() - timedelta(days=days)
+        count = 0
         text_parts = []
         for item in items:
-            title = _clean_news_html(item.get("title", ""))
-            desc = _clean_news_html(item.get("description", ""))
-            if title:
-                text_parts.append(f"- {title}: {desc}" if desc else f"- {title}")
+            pub_str = item.get("pubDate", "")
+            try:
+                pub_dt = datetime.strptime(pub_str, "%a, %d %b %Y %H:%M:%S %z")
+                if pub_dt >= cutoff:
+                    count += 1
+            except (ValueError, TypeError):
+                count += 1  # 파싱 실패 시 포함
+
+            # 텍스트는 상위 max_items개만 수집
+            if len(text_parts) < max_items:
+                title = _clean_news_html(item.get("title", ""))
+                desc = _clean_news_html(item.get("description", ""))
+                if title:
+                    text_parts.append(f"- {title}: {desc}" if desc else f"- {title}")
 
         news_text = "\n".join(text_parts)
-        logger.debug(f"[{theme_name}] 뉴스 {count}건, 텍스트 {len(news_text)}자 (API)")
+        logger.debug(f"[{theme_name}] 뉴스 {count}건(최근{days}일), 텍스트 {len(news_text)}자 (API)")
         return {"count": count, "text": news_text}
 
     except Exception as e:
@@ -528,7 +539,7 @@ def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
         }
         params = {
             "query": search_query,
-            "display": 1,
+            "display": 100,
             "sort": "date",
         }
 
@@ -536,8 +547,20 @@ def crawl_theme_news_count(theme_name: str, days: int = 3) -> int:
         response.raise_for_status()
 
         data = response.json()
-        count = data.get("total", 0)
-        logger.debug(f"[{theme_name}] 뉴스 {count}건 (API)")
+        items = data.get("items", [])
+
+        # 최근 N일 이내 기사만 카운트
+        cutoff = now_kst() - timedelta(days=days)
+        count = 0
+        for item in items:
+            pub_str = item.get("pubDate", "")
+            try:
+                pub_dt = datetime.strptime(pub_str, "%a, %d %b %Y %H:%M:%S %z")
+                if pub_dt >= cutoff:
+                    count += 1
+            except (ValueError, TypeError):
+                count += 1
+        logger.debug(f"[{theme_name}] 뉴스 {count}건(최근{days}일) (API)")
         return count
 
     except Exception as e:
