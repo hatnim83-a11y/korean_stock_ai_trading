@@ -416,7 +416,7 @@ async function loadPortfolio() {
   }
 
   // 포트폴리오 하단 테마 로드
-  const themeData = await api('/themes?days=7');
+  const themeData = await api('/themes?days=14');
 
   // 테마별 전일 대비 delta 계산용 히스토리 맵 구축
   const _themeHistMap = {};
