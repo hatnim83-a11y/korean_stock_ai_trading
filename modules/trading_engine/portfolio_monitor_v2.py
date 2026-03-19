@@ -7,7 +7,7 @@ portfolio_monitor_v2.py - 개선된 포트폴리오 실시간 모니터링 모�
 - 분할 익절 (3단계: +10%, +15%, +20%)
 - 향상된 트레일링 스탑 (최고가 -5%)
 - 수익 중 수급 이탈 무시 (10% 이상)
-- 보유 기간 관리 (수익 시 14일, 손실 시 7일)
+- 보유 기간 관리 (수익 시 10영업일, 손실 시 5영업일)
 
 사용법:
     from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2
@@ -17,7 +17,7 @@ portfolio_monitor_v2.py - 개선된 포트폴리오 실시간 모니터링 모�
 """
 
 import asyncio
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time
 from typing import Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
-from config import settings, now_kst, is_trading_day
+from config import settings, now_kst, is_trading_day, count_trading_days
 from database import Database
 from modules.trading_engine.kis_websocket import KISWebSocket, MockWebSocket, PriceData
 from modules.trading_engine.trading_engine import TradingEngine
@@ -99,15 +99,7 @@ class Position:
     @property
     def hold_days(self) -> int:
         """보유 영업일수 (주말/공휴일 제외)"""
-        count = 0
-        d = self.buy_date.date() if isinstance(self.buy_date, datetime) else self.buy_date
-        d = d + timedelta(days=1)
-        today = now_kst().date()
-        while d <= today:
-            if is_trading_day(d):
-                count += 1
-            d += timedelta(days=1)
-        return count
+        return count_trading_days(self.buy_date)
 
 
 @dataclass
@@ -1140,10 +1132,10 @@ class PortfolioMonitorV2:
     
     def _check_max_hold_days(self, pos: Position) -> bool:
         """
-        최대 보유 기간 체크
-        
-        - 수익 +5% 이상: 최대 14일
-        - 손실 중: 최대 7일
+        최대 보유 기간 체크 (영업일 기준)
+
+        - 수익 +3% 이상: 최대 10영업일
+        - 손실 중: 최대 5영업일
         """
         profit_rate = pos.profit_rate
         hold_days = pos.hold_days

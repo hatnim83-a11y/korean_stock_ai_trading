@@ -49,6 +49,28 @@ def is_trading_day(check_date=None) -> bool:
     return True  # holidays 미설치 시 평일이면 거래일로 간주
 
 
+def count_trading_days(from_date, to_date=None) -> int:
+    """from_date 다음날부터 to_date까지의 영업일수 (주말/공휴일 제외)
+
+    Args:
+        from_date: 시작일 (이 날은 카운트에 포함되지 않음)
+        to_date: 종료일 (None이면 오늘 KST)
+    """
+    if to_date is None:
+        to_date = now_kst().date()
+    if hasattr(from_date, 'date'):
+        from_date = from_date.date()
+    if hasattr(to_date, 'date'):
+        to_date = to_date.date()
+    count = 0
+    d = from_date + timedelta(days=1)
+    while d <= to_date:
+        if is_trading_day(d):
+            count += 1
+        d += timedelta(days=1)
+    return count
+
+
 _STOCK_CODE_RE = re.compile(r'^\d{6}$')
 
 def validate_stock_code(code: str) -> str:
@@ -343,7 +365,7 @@ class Settings(BaseSettings):
     )
     MIDWEEK_MIN_HOLD_DAYS: int = Field(
         default=2,
-        description="최소 보유 영업일 (선정 후 이 기간은 교체 불가)"
+        description="최소 보유 달력일 (선정 후 이 기간은 교체 불가)"
     )
     MIDWEEK_ABS_FLOOR: float = Field(
         default=38.0,

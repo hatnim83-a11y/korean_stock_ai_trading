@@ -26,7 +26,7 @@ main.py - 한국 주식 AI 스윙 트레이딩 시스템 메인 엔트리
 하이브리드 전략:
     - 분할 익절: +10% → 30% 매도, +15% → 30% 매도, +20% → 전량 매도
     - 트레일링 스탑: 최고가 -5%
-    - 보유 기간: 수익(+5%) 14일, 손실 7일
+    - 보유 기간: 수익(+3%) 10영업일, 손실 5영업일
     - 테마 로테이션: 7일 단위, 점수 -20% 시 즉시 변경
 
 작성자: AI Trading System
@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 PID_FILE = Path(__file__).parent / "trading_system.pid"
 
 from logger import logger
-from config import settings, now_kst, is_trading_day
+from config import settings, now_kst, is_trading_day, count_trading_days
 from database import Database
 from scheduler import TradingScheduler
 
@@ -59,7 +59,7 @@ from modules.stock_screener import run_daily_screening
 from modules.ai_verifier import run_daily_verification
 from modules.portfolio_optimizer import run_daily_optimization, display_portfolio
 from modules.trading_engine import TradingEngine
-from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2
+from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2, SellReason
 from modules.rebalancer import run_daily_rebalancing
 from modules.reporter import (
     PerformanceCalculator,
@@ -1405,7 +1405,7 @@ class TradingSystem:
             self.today_trades.append({
                 "action": "sell", "stock_code": position.stock_code,
                 "stock_name": position.stock_name, "shares": position.remaining_shares,
-                "price": int(price), "reason": "보유기간 초과"
+                "price": int(price), "reason": SellReason.MAX_HOLD_DAYS.value
             })
         except Exception as e:
             logger.error(f"_on_max_hold_sell 콜백 오류: {e}")
@@ -1724,12 +1724,7 @@ class TradingSystem:
                 buy_date = buy_date_raw
 
             # 영업일 카운팅 (매수 다음날부터)
-            hold_biz_days = 0
-            d = buy_date + timedelta(days=1)
-            while d <= today:
-                if is_trading_day(d):
-                    hold_biz_days += 1
-                d += timedelta(days=1)
+            hold_biz_days = count_trading_days(buy_date, today)
 
             buy_price = pos.get("buy_price") or pos.get("price", 0)
             current_price = pos.get("current_price", buy_price)
@@ -1754,7 +1749,7 @@ class TradingSystem:
                     "hold_days": hold_biz_days,
                     "max_days": max_days,
                     "profit_rate": profit_rate,
-                    "reason": "보유기간 초과",
+                    "reason": SellReason.MAX_HOLD_DAYS.value,
                 })
 
         if not sell_targets:
@@ -1798,7 +1793,7 @@ class TradingSystem:
                 logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
 
                 # DB 기록 (profit_rate는 소수 형태로 저장 — 기존 패턴 일치)
-                reason = "보유기간 초과"
+                reason = SellReason.MAX_HOLD_DAYS.value
                 self.db.close_position(stock_code, reason)
                 self.db.save_trade({
                     "stock_code": stock_code,
@@ -1834,7 +1829,7 @@ class TradingSystem:
                 self.today_trades.append({
                     "action": "sell", "stock_code": stock_code,
                     "stock_name": stock_name, "shares": quantity,
-                    "price": int(filled_price), "reason": "보유기간 초과 (09:15)"
+                    "price": int(filled_price), "reason": SellReason.MAX_HOLD_DAYS.value
                 })
 
             logger.info(f"   보유기간 매도 완료: {sold_count}/{len(sell_targets)}건")
