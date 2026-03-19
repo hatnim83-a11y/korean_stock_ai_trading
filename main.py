@@ -1514,7 +1514,7 @@ class TradingSystem:
         if not self._last_theme_rotation_date:
             logger.info("   주중 교체: 선정 날짜 불명 — 스킵")
             return
-        days_held = (today - self._last_theme_rotation_date).days
+        days_held = count_trading_days(self._last_theme_rotation_date, today)
         if days_held < settings.MIDWEEK_MIN_HOLD_DAYS:
             logger.info(
                 f"   주중 교체: 보유 {days_held}일 < 최소 {settings.MIDWEEK_MIN_HOLD_DAYS}일 — 스킵"

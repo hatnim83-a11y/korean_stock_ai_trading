@@ -365,7 +365,7 @@ class Settings(BaseSettings):
     )
     MIDWEEK_MIN_HOLD_DAYS: int = Field(
         default=2,
-        description="최소 보유 달력일 (선정 후 이 기간은 교체 불가)"
+        description="최소 보유 영업일 (선정 후 이 기간은 교체 불가)"
     )
     MIDWEEK_ABS_FLOOR: float = Field(
         default=38.0,
