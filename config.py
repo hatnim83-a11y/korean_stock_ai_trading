@@ -384,6 +384,36 @@ class Settings(BaseSettings):
         description="손실 종목 재평가 통과 기준 (final_score)"
     )
 
+    # ===== 시장 위기 방어 (Market Guard) 설정 =====
+    MARKET_GUARD_ENABLED: bool = Field(
+        default=True,
+        description="시장 위기 방어 기능 ON/OFF"
+    )
+    MARKET_GUARD_CRISIS_DROP: float = Field(
+        default=-2.0,
+        description="CRISIS: 코스피 AND 코스닥 동시 이 수치(%) 이하 → 즉시 스킵"
+    )
+    MARKET_GUARD_DANGER_DROP: float = Field(
+        default=-1.0,
+        description="DANGER: 양쪽 동시 하락 또는 한쪽 CRISIS급 → 지연 재판단"
+    )
+    MARKET_GUARD_CAUTION_DROP: float = Field(
+        default=-1.0,
+        description="CAUTION: 한쪽만 이 수치(%) 이하 → 축소 진입"
+    )
+    MARKET_GUARD_CAUTION_RATIO: float = Field(
+        default=0.7,
+        description="CAUTION 시 투자금 비율 (70%)"
+    )
+    MARKET_GUARD_DELAY_ENABLED: bool = Field(
+        default=True,
+        description="DANGER 시 지연 재체크 활성화"
+    )
+    MARKET_GUARD_DELAY_MINUTES: int = Field(
+        default=35,
+        description="지연 대기 시간(분) — 09:25→10:00"
+    )
+
     # ===== 테마 로테이션 설정 =====
     THEME_REVIEW_DAYS: int = Field(
         default=7,

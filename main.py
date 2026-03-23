@@ -948,6 +948,61 @@ class TradingSystem:
             self.notifier.send_message("⏸️ 09:25 매수 스킵 (일시정지 중)")
             return {"success": True, "paused": True}
 
+        # Phase 0.5: 시장 위기 방어 (Market Guard)
+        cash_ratio = 1.0
+        if settings.MARKET_GUARD_ENABLED:
+            from modules.market_guard import MarketGuard, MarketStatus
+            guard = MarketGuard()
+            market_status, market_info = await asyncio.to_thread(guard.check)
+            kr = market_info.get("kospi_rate") or 0
+            kd = market_info.get("kosdaq_rate") or 0
+            reason = market_info.get("reason", "")
+
+            if market_status == MarketStatus.CRISIS:
+                msg = f"🚨 시장 폭락 감지 — 매수 전면 스킵\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%\n사유: {reason}"
+                logger.warning(msg)
+                self.notifier.send_message(msg)
+                return {"success": True, "market_guard": "crisis", "skipped": True}
+
+            elif market_status == MarketStatus.DANGER:
+                if settings.MARKET_GUARD_DELAY_ENABLED:
+                    delay_min = settings.MARKET_GUARD_DELAY_MINUTES
+                    msg = f"⚠️ 시장 급락 감지 — {delay_min}분 후 재체크\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%"
+                    logger.warning(msg)
+                    self.notifier.send_message(msg)
+                    await asyncio.sleep(delay_min * 60)
+                    market_status, market_info = await asyncio.to_thread(guard.check)
+                    kr = market_info.get("kospi_rate") or 0
+                    kd = market_info.get("kosdaq_rate") or 0
+                    if market_status in (MarketStatus.CRISIS, MarketStatus.DANGER):
+                        msg = f"🚫 시장 미회복 — 금일 매수 스킵\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%"
+                        logger.warning(msg)
+                        self.notifier.send_message(msg)
+                        return {"success": True, "market_guard": "danger_no_recovery", "skipped": True}
+                    elif market_status == MarketStatus.CAUTION:
+                        cash_ratio = settings.MARKET_GUARD_CAUTION_RATIO
+                        reason = market_info.get("reason", "")
+                        msg = f"📈 시장 부분 회복 — {int(cash_ratio*100)}% 축소 진입\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%\n사유: {reason}"
+                    else:
+                        reason = market_info.get("reason", "")
+                        msg = f"📈 시장 회복 — 정상 진입\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%\n사유: {reason}"
+                    logger.info(msg)
+                    self.notifier.send_message(msg)
+                else:
+                    msg = f"🚫 시장 급락 — 매수 스킵 (지연 비활성)\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%"
+                    logger.warning(msg)
+                    self.notifier.send_message(msg)
+                    return {"success": True, "market_guard": "danger", "skipped": True}
+
+            elif market_status == MarketStatus.CAUTION:
+                cash_ratio = settings.MARKET_GUARD_CAUTION_RATIO
+                msg = f"⚠️ 시장 약세 — {int(cash_ratio*100)}% 축소 진입\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%"
+                logger.info(msg)
+                self.notifier.send_message(msg)
+
+            else:
+                logger.info(f"[MarketGuard] 시장 정상 — KOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%")
+
         logger.info("=" * 70)
         logger.info("💰 빈 슬롯 매수 실행 (09:25)")
         logger.info("=" * 70)
@@ -996,6 +1051,11 @@ class TradingSystem:
             if available_cash <= 0:
                 balance = self.trading_engine.get_balance()
                 available_cash = balance.get("cash", 0)
+        # Market Guard 투자금 축소 적용
+        if cash_ratio < 1.0:
+            available_cash = int(available_cash * cash_ratio)
+            logger.info(f"   [MarketGuard] 투자금 {int(cash_ratio*100)}% 축소 적용")
+
         logger.info(f"   가용 현금: {available_cash:,}원")
 
         if available_cash < 100_000:
