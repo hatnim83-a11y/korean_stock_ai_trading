@@ -1704,6 +1704,22 @@ class TradingSystem:
             logger.info("   보유 종목 없음 — 스킵")
             return
 
+        # KIS API로 실시간 가격 조회 (DB의 current_price는 전일 종가일 수 있음)
+        live_prices: dict[str, float] = {}
+        try:
+            from modules.stock_screener.kis_api import KISApi
+            kis = KISApi()
+            for pos in portfolio:
+                code = pos["stock_code"]
+                price_info = kis.get_current_price(code)
+                if price_info and price_info.get("price", 0) > 0:
+                    live_prices[code] = price_info["price"]
+                    logger.info(f"   실시간 가격 조회: {pos.get('stock_name')} "
+                                f"DB={pos.get('current_price', 0):,.0f}원 → "
+                                f"실시간={price_info['price']:,}원")
+        except Exception as e:
+            logger.warning(f"   실시간 가격 조회 실패 (DB 가격으로 폴백): {e}")
+
         # position_state에서 remaining_shares 조회 (분할 익절 반영)
         position_states = self.db.get_all_position_states()
 
@@ -1727,7 +1743,9 @@ class TradingSystem:
             hold_biz_days = count_trading_days(buy_date, today)
 
             buy_price = pos.get("buy_price") or pos.get("price", 0)
-            current_price = pos.get("current_price", buy_price)
+            stock_code = pos["stock_code"]
+            # 실시간 가격 우선, 없으면 DB 가격 폴백
+            current_price = live_prices.get(stock_code, pos.get("current_price", buy_price))
             profit_rate = (current_price - buy_price) / buy_price if buy_price > 0 else 0
 
             if profit_rate >= settings.MIN_PROFIT_FOR_LONG_HOLD:
@@ -1737,7 +1755,6 @@ class TradingSystem:
 
             if hold_biz_days >= max_days:
                 # position_state에서 remaining_shares 우선 조회 (분할 익절 반영)
-                stock_code = pos["stock_code"]
                 state = position_states.get(stock_code, {})
                 remaining = state.get("remaining_shares") or pos.get("shares", 0)
 

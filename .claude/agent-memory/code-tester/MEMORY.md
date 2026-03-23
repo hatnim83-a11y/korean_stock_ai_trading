@@ -92,10 +92,15 @@
 - `scorer.py:119-122` `OVERHEAT_THRESHOLD=8.0/OVERHEAT_MAX=15.0/PENALTY_MAX=15.0` — 함수 로컬 상수
 - `selector.py:43,46` `MIN_SELECTION_SCORE=30.0/RETENTION_SCORE=38.0` — 모듈 상수 (config 없음)
 
-### crawl_theme_news 주의사항 (2026-03-13)
-- `days` 파라미터: 네이버 Open API 경로에서 **미사용** (날짜 필터 없음, 전체 건수 반환)
-  → 스크래핑 폴백에서만 사용됨. API 키 있는 환경에서 days 값은 결과에 영향 없음
-- `count = data.get("total", 0)`: 검색어 전체 건수 (실시간), 기간 필터 아님
+### crawl_theme_news 주의사항 (2026-03-19 업데이트)
+- `days` 파라미터: **이제 API 경로에서도 사용됨** (display=100 items의 pubDate 파싱 후 cutoff 필터)
+- `cutoff = now_kst() - timedelta(days=days)`: timezone-aware 비교 (pubDate %z도 aware → 정상)
+- `count = data.get("total", 0)` 제거됨 → items 순회 + cutoff 필터로 실제 건수 카운트
+- 파싱 실패 시 `count += 1` (보수적 포함 처리, 허용 수준)
+- `text_parts` 수집: 날짜 필터와 독립적으로 상위 max_items개 수집 (sort=date 내림차순 의존)
+  → sort=date이므로 실전에서 최신 기사가 text_parts에 들어오는 구조 (코드 수준 보장 없음)
+- `display=100`: Naver API 최대값, Rate Limit 무관 (호출 횟수 변경 없음)
+- `_crawl_theme_news_count_scrape`: 변경 없음, now_kst() 사용 확인
 - API 키 없을 때만 _crawl_theme_news_count_scrape(days 사용)로 폴백
 
 ### _enrich_tuesday_themes 패턴 (2026-03-13)
