@@ -760,6 +760,13 @@ class TradingSystem:
 
             if not verified:
                 logger.warning("AI 검증 통과 종목이 없습니다")
+                self.notifier.send_message(
+                    f"⚠️ 09:05 스크리닝 완료 - AI 검증 통과 0개\n\n"
+                    f"📊 필터 통과: {len(candidates)}개 종목\n"
+                    f"🤖 AI 검증 통과: 0개\n"
+                    f"─────────────────\n"
+                    f"금일 매수 후보 없음"
+                )
                 return {"success": False, "reason": "AI 검증 통과 없음"}
 
             # 3. 포트폴리오 최적화 및 후보 선정
@@ -1018,6 +1025,11 @@ class TradingSystem:
         # Phase 1: 안전 체크
         if not self.today_ai_analysis:
             logger.warning("AI 분석 결과 없음 - 매수 스킵")
+            self.notifier.send_message(
+                "⚠️ 09:25 매수 스킵\n\n"
+                "AI 분석 결과가 없습니다\n"
+                "09:05 스크리닝 결과를 확인하세요"
+            )
             return {"success": False, "reason": "AI 분석 없음"}
 
         # Phase 2: 현재 보유 종목 로드
