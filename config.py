@@ -414,6 +414,32 @@ class Settings(BaseSettings):
         description="지연 대기 시간(분) — 09:25→10:00"
     )
 
+    # ===== 테마 유동성 검증 설정 =====
+    THEME_LIQUIDITY_CHECK_ENABLED: bool = Field(
+        default=True,
+        description="테마 선정 시 종목 유동성(스크리닝 통과율) 사전 검증 ON/OFF"
+    )
+    THEME_MIN_PASS_RATE: float = Field(
+        default=0.10,
+        description="최소 통과율 — 이하면 최대 감점 (10%)"
+    )
+    THEME_LOW_PASS_RATE: float = Field(
+        default=0.20,
+        description="저유동성 기준 — 이하면 비례 감점 (20%)"
+    )
+    THEME_PASS_RATE_PENALTY_MAX: float = Field(
+        default=8.0,
+        description="통과율 저조 시 최대 감점"
+    )
+    THEME_PASS_RATE_LOOKBACK_DAYS: int = Field(
+        default=7,
+        description="통과율 계산 시 참조할 과거 일수"
+    )
+    THEME_PASS_RATE_MIN_DATA_DAYS: int = Field(
+        default=3,
+        description="통과율 판단에 필요한 최소 데이터 일수"
+    )
+
     # ===== 테마 로테이션 설정 =====
     THEME_REVIEW_DAYS: int = Field(
         default=7,

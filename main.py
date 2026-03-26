@@ -436,6 +436,14 @@ class TradingSystem:
             today = now_kst().date()
             is_tuesday = (today.weekday() == 1)
 
+            # 유동성 통과율 조회 (screening_log 기반)
+            pass_rates = {}
+            if settings.THEME_LIQUIDITY_CHECK_ENABLED:
+                try:
+                    pass_rates = self.db.get_theme_pass_rates(settings.THEME_PASS_RATE_LOOKBACK_DAYS)
+                except Exception as e:
+                    logger.warning(f"유동성 통과율 조회 실패 (무시): {e}")
+
             if is_tuesday:
                 logger.info("\n📊 Step 1: 화요일 — 6일 누적 가중 집계")
                 scored_themes = aggregate_weekly_scores(self.db, base_date=today - timedelta(days=1))
@@ -443,6 +451,31 @@ class TradingSystem:
                     logger.info(f"   가중 집계 완료: {len(scored_themes)}개 테마")
                     # 실시간 보강: 상위 15개 테마의 모멘텀 + 뉴스 + AI 보정
                     scored_themes = await self._enrich_tuesday_themes(scored_themes)
+                    # 유동성 통과율 보정 (화요일 가중 집계에도 적용)
+                    if pass_rates:
+                        from modules.theme_analyzer.scorer import calculate_liquidity_penalty
+                        for t in scored_themes:
+                            t_name = t.get("theme", t.get("name", ""))
+                            penalty, note = calculate_liquidity_penalty(
+                                t_name, pass_rates,
+                                min_pass_rate=settings.THEME_MIN_PASS_RATE,
+                                low_pass_rate=settings.THEME_LOW_PASS_RATE,
+                                penalty_max=settings.THEME_PASS_RATE_PENALTY_MAX,
+                                min_data_days=settings.THEME_PASS_RATE_MIN_DATA_DAYS,
+                            )
+                            if penalty < 0:
+                                t["total_score"] = round(t.get("total_score", 0) + penalty, 2)
+                                t["score"] = t["total_score"]
+                                t["liquidity_penalty"] = round(penalty, 2)
+                                t["liquidity_note"] = note
+                                t["pass_rate"] = pass_rates.get(t_name, {}).get("pass_rate")
+                                logger.info(f"   [{t_name}] 유동성 보정: {penalty:+.1f}점 ({note})")
+                            else:
+                                t["liquidity_penalty"] = 0.0
+                                t["liquidity_note"] = ""
+                                t["pass_rate"] = pass_rates.get(t_name, {}).get("pass_rate")
+                        # 보정 후 재정렬
+                        scored_themes.sort(key=lambda x: x.get("total_score", 0), reverse=True)
                 else:
                     logger.warning("   가중 집계 데이터 없음 → 실시간 크롤링 폴백")
                     is_tuesday = False  # 폴백
@@ -451,7 +484,7 @@ class TradingSystem:
                 logger.info("\n📊 Step 1: 테마 크롤링")
                 raw_themes = crawl_all_themes()
                 logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
-                scored_themes = score_themes(raw_themes[:20])
+                scored_themes = score_themes(raw_themes[:20], pass_rates=pass_rates)
                 logger.info(f"   점수화 완료: {len(scored_themes)}개")
 
             # 현재 테마 저장
@@ -640,7 +673,11 @@ class TradingSystem:
                         name = t.get("theme", t.get("name", ""))
                         score = t.get("score", 0)
                         diff = score - prev_score
-                        msg += f"  {idx}. {name} ({score:.1f}점, {diff:+.1f})\n"
+                        liq = t.get("liquidity_note", "")
+                        pr = t.get("pass_rate")
+                        pr_str = f" 통과율{pr:.0%}" if pr is not None else ""
+                        liq_warn = f" {liq}" if liq else ""
+                        msg += f"  {idx}. {name} ({score:.1f}점, {diff:+.1f}){pr_str}{liq_warn}\n"
 
                 if new_entries:
                     msg += f"\n🆕 신규: {len(new_entries)}개\n"
@@ -649,7 +686,11 @@ class TradingSystem:
                         name = t.get("theme", t.get("name", ""))
                         score = t.get("score", 0)
                         momentum = t.get("avg_change_rate", 0)
-                        msg += f"  {idx}. {name} ({score:.1f}점) — 모멘텀 {momentum:+.1f}%\n"
+                        liq = t.get("liquidity_note", "")
+                        pr = t.get("pass_rate")
+                        pr_str = f" 통과율{pr:.0%}" if pr is not None else ""
+                        liq_warn = f" {liq}" if liq else ""
+                        msg += f"  {idx}. {name} ({score:.1f}점) — 모멘텀 {momentum:+.1f}%{pr_str}{liq_warn}\n"
 
                 if dropped:
                     msg += f"\n❌ 탈락: {len(dropped)}개\n"
@@ -670,7 +711,11 @@ class TradingSystem:
                 for i, t in enumerate(themes[:5], 1):
                     name = t.get("theme", t.get("name", ""))
                     score = t.get("score", 0)
-                    msg += f"  {i}. {name} ({score:.1f}점)\n"
+                    pr = t.get("pass_rate")
+                    pr_str = f" 통과율{pr:.0%}" if pr is not None else ""
+                    liq = t.get("liquidity_note", "")
+                    liq_warn = f" {liq}" if liq else ""
+                    msg += f"  {i}. {name} ({score:.1f}점){pr_str}{liq_warn}\n"
 
             msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} (화) ({days_until_tuesday}일 후)\n"
             msg += f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"

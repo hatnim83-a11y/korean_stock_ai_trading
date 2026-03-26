@@ -685,6 +685,48 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
+    def get_theme_pass_rates(self, days: int = 7) -> dict:
+        """
+        최근 N일간 테마별 스크리닝 필터 통과율 조회
+
+        screening_log 테이블에서 테마별 통과/탈락 집계를 수행합니다.
+
+        Args:
+            days: 참조할 과거 일수 (기본 7일)
+
+        Returns:
+            {theme_name: {"total": int, "passed": int, "pass_rate": float, "days_data": int}}
+        """
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT theme,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END) as passed_count,
+                           COUNT(DISTINCT date) as days_data
+                    FROM screening_log
+                    WHERE date >= date('now', ? || ' days') AND stage = 'filter'
+                    GROUP BY theme
+                """, (str(-days),))
+                rows = cursor.fetchall()
+
+            result = {}
+            for row in rows:
+                theme = row["theme"]
+                total = row["total"]
+                passed = row["passed_count"]
+                result[theme] = {
+                    "total": total,
+                    "passed": passed,
+                    "pass_rate": passed / total if total > 0 else 0.0,
+                    "days_data": row["days_data"],
+                }
+            logger.info(f"테마 통과율 조회: {len(result)}개 테마 ({days}일 룩백)")
+            return result
+        except Exception as e:
+            logger.warning(f"테마 통과율 조회 실패: {e}")
+            return {}
+
     # ===== 종목 관련 메서드 =====
 
     def save_screened_stocks(self, stocks: list[dict], target_date: date) -> None:

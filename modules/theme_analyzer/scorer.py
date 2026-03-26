@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from config import now_kst
+from config import now_kst, settings
 from logger import logger
 
 
@@ -488,18 +488,71 @@ def _calculate_theme_momentum(theme: dict, kis) -> float:
     return 0.0
 
 
-def score_themes(themes: list[dict], include_news: bool = False, include_ai: bool = False) -> list[dict]:
+def calculate_liquidity_penalty(
+    theme_name: str,
+    pass_rates: dict,
+    min_pass_rate: float = 0.10,
+    low_pass_rate: float = 0.20,
+    penalty_max: float = 8.0,
+    min_data_days: int = 3
+) -> tuple[float, str]:
+    """
+    테마 통과율 기반 유동성 보정 점수 계산
+
+    과거 screening_log 통과율이 낮은 테마에 감점을 적용합니다.
+
+    Args:
+        theme_name: 테마명
+        pass_rates: {theme: {"pass_rate": float, "days_data": int, ...}}
+        min_pass_rate: 최소 통과율 (이하면 최대 감점)
+        low_pass_rate: 저유동성 기준 (이하면 비례 감점)
+        penalty_max: 최대 감점 (절대값)
+        min_data_days: 최소 데이터 일수 (미만이면 판단 보류)
+
+    Returns:
+        (penalty: float, note: str)
+    """
+    data = pass_rates.get(theme_name)
+
+    # 히스토리 없음 또는 데이터 부족 → 판단 보류
+    if not data or data.get("days_data", 0) < min_data_days:
+        return 0.0, ""
+
+    pass_rate = data.get("pass_rate", 0.0)
+
+    # 통과율 충분 → 감점 없음
+    if pass_rate >= low_pass_rate:
+        return 0.0, ""
+
+    # 통과율 < min_pass_rate → 최대 감점
+    if pass_rate <= min_pass_rate:
+        return -penalty_max, f"유동성탈락({pass_rate:.0%})"
+
+    # 통과율 min~low 구간 → 비례 감점
+    denom = low_pass_rate - min_pass_rate
+    if denom <= 0:
+        return -penalty_max, f"유동성주의({pass_rate:.0%})"
+
+    ratio = (low_pass_rate - pass_rate) / denom
+    penalty = -ratio * penalty_max
+    return round(penalty, 1), f"유동성주의({pass_rate:.0%})"
+
+
+def score_themes(themes: list[dict], include_news: bool = False, include_ai: bool = False,
+                 pass_rates: dict = None) -> list[dict]:
     """
     여러 테마에 대해 점수 일괄 계산
 
-    배점: 모멘텀(25) + 과열(0~-15) + 뉴스(15) + AI감성(10) + 종목수(5) + 기본(10) = 최대 65점
+    배점: 모멘텀(25) + 과열(0~-15) + 뉴스(15) + AI감성(10) + 종목수(5) + 기본(10) + 유동성(0~-8) = 최대 65점
     과열 감점: 5일 수익률 +8% 이상 시 감점 시작, 급등 테마 고점매수 방지.
+    유동성 감점: screening_log 통과율이 낮은 테마에 감점 (소형주 테마 방지).
     뉴스/AI는 include_news/include_ai 플래그로 활성화 (17:00 일별 수집 시).
 
     Args:
         themes: 테마 정보 리스트
         include_news: 뉴스 점수 수집 및 반영 여부
         include_ai: AI 감성 점수 수집 및 반영 여부
+        pass_rates: 테마별 스크리닝 통과율 (None이면 유동성 검증 스킵)
 
     Returns:
         점수가 추가된 테마 리스트 (점수 내림차순 정렬)
@@ -546,8 +599,20 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
         three_day = theme.get("three_day_rate") or avg_return
         overheat = calculate_overheat_penalty(avg_return, three_day)
 
-        # 6. 기본점수 10점
-        total = momentum_score + overheat + news_score + ai_score + size_bonus + BASE_SCORE
+        # 6. 유동성 보정 (0 ~ -8점) — pass_rates 없으면 스킵
+        liquidity_penalty = 0.0
+        liquidity_note = ""
+        if pass_rates:
+            liquidity_penalty, liquidity_note = calculate_liquidity_penalty(
+                theme_name, pass_rates,
+                min_pass_rate=settings.THEME_MIN_PASS_RATE,
+                low_pass_rate=settings.THEME_LOW_PASS_RATE,
+                penalty_max=settings.THEME_PASS_RATE_PENALTY_MAX,
+                min_data_days=settings.THEME_PASS_RATE_MIN_DATA_DAYS,
+            )
+
+        # 7. 기본점수 10점
+        total = momentum_score + overheat + news_score + ai_score + size_bonus + BASE_SCORE + liquidity_penalty
 
         # 등급 산정 (최대 65점 기준)
         if total >= 58:
@@ -571,6 +636,8 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
             reasons.append(f"모멘텀({avg_return:+.1f}%)")
         if overheat < 0:
             reasons.append(f"과열감점({overheat:+.1f})")
+        if liquidity_penalty < 0:
+            reasons.append(liquidity_note)
         if news_score >= 8:
             reasons.append(f"화제({news_count}건)")
         if ai_score >= 6:
@@ -596,6 +663,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
             "ai_score": round(ai_score, 2),
             "ai_sentiment": round(ai_sentiment, 2) if ai_sentiment else 0,
             "overheat_penalty": round(overheat, 2),
+            "liquidity_penalty": round(liquidity_penalty, 2),
+            "liquidity_note": liquidity_note,
+            "pass_rate": pass_rates.get(theme_name, {}).get("pass_rate") if pass_rates else None,
             "bonus_score": round(size_bonus, 2),
             "grade": grade,
             "selection_reason": selection_reason
