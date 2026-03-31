@@ -4,25 +4,100 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Trading Dashboard - Login</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.login-box{background:#12121a;border:1px solid #1e1e2e;border-radius:12px;padding:48px 40px;width:90%;max-width:380px;box-shadow:0 0 30px rgba(0,245,255,0.08)}
-@media(max-width:480px){.login-box{padding:32px 24px}}
-.login-box h1{text-align:center;font-size:1.5rem;color:#00f5ff;margin-bottom:8px;text-shadow:0 0 10px rgba(0,245,255,0.3)}
-.login-box .sub{text-align:center;color:#666;font-size:0.85rem;margin-bottom:32px}
-.field{margin-bottom:20px}
-.field label{display:block;font-size:0.8rem;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px}
-.field input{width:100%;padding:12px 16px;background:#0a0a0f;border:1px solid #2a2a3a;border-radius:8px;color:#e0e0e0;font-size:1rem;outline:none;transition:border-color .2s}
-.field input:focus{border-color:#00f5ff;box-shadow:0 0 8px rgba(0,245,255,0.15)}
-.btn{width:100%;padding:12px;background:linear-gradient(135deg,#00f5ff 0%,#0088ff 100%);color:#0a0a0f;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;transition:opacity .2s}
-.btn:hover{opacity:0.9}
-.error{color:#ff3366;text-align:center;font-size:0.85rem;margin-bottom:16px}
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0f1218;
+  color: #e6e2dc;
+  font-family: "Pretendard Variable", Pretendard, -apple-system, system-ui, sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+.login-box {
+  background: #161b25;
+  border: 1px solid #252d3f;
+  border-radius: 14px;
+  padding: 48px 40px;
+  width: 90%;
+  max-width: 380px;
+}
+@media (max-width: 480px) {
+  .login-box { padding: 32px 24px; }
+}
+.login-box h1 {
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #7e8594;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.login-box .sub {
+  text-align: center;
+  color: #515868;
+  font-size: 0.82rem;
+  margin-bottom: 36px;
+}
+.field { margin-bottom: 24px; }
+.field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #515868;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.field input {
+  width: 100%;
+  padding: 13px 16px;
+  background: #0f1218;
+  border: 1px solid #2e3750;
+  border-radius: 8px;
+  color: #e6e2dc;
+  font-family: inherit;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.field input:focus {
+  border-color: #c9983e;
+}
+.field input::placeholder {
+  color: #515868;
+}
+.btn {
+  width: 100%;
+  padding: 13px;
+  background: #c9983e;
+  color: #0f1218;
+  border: none;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  letter-spacing: 0.3px;
+}
+.btn:hover { opacity: 0.88; }
+.error {
+  color: #d9566b;
+  text-align: center;
+  font-size: 0.82rem;
+  margin-bottom: 16px;
+}
 </style>
 </head>
 <body>
 <form class="login-box" action="/api/v1/auth/login" method="post">
-  <h1>TRADING DASHBOARD</h1>
+  <h1>Trading Dashboard</h1>
   <p class="sub">AI Stock Trading System</p>
   {% if error %}
   <p class="error">비밀번호가 올바르지 않습니다.</p>

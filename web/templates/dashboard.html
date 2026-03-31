@@ -4,227 +4,469 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Trading Dashboard</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-/* ===== 디자인 토큰 ===== */
+/* ===== Design Tokens ===== */
 :root {
-  --bg: #0a0a0f;
-  --card: #12121a;
-  --border: #1e1e2e;
-  --cyan: #00f5ff;
-  --green: #00ff88;
-  --red: #ff3366;
-  --yellow: #ffaa00;
-  --text: #e0e0e0;
-  --text2: #888;
-  --glow-cyan: 0 0 10px rgba(0,245,255,0.3);
+  /* Surfaces — warm navy tinted */
+  --bg-base: #0f1218;
+  --bg-surface: #161b25;
+  --bg-elevated: #1c2230;
+  --bg-hover: #232a3a;
+
+  /* Borders */
+  --border-subtle: #252d3f;
+  --border-default: #2e3750;
+
+  /* Typography */
+  --text-primary: #e6e2dc;
+  --text-secondary: #7e8594;
+  --text-tertiary: #515868;
+
+  /* Semantic */
+  --positive: #3bb888;
+  --positive-dim: rgba(59,184,136,0.1);
+  --negative: #d9566b;
+  --negative-dim: rgba(217,86,107,0.1);
+  --accent: #c9983e;
+  --accent-dim: rgba(201,152,62,0.1);
+  --info: #6889c6;
+  --info-dim: rgba(104,137,198,0.1);
+
+  /* Spacing — 4pt base */
+  --sp-xs: 4px;
+  --sp-sm: 8px;
+  --sp-md: 16px;
+  --sp-lg: 24px;
+  --sp-xl: 32px;
+  --sp-2xl: 48px;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Font */
+  --font: "Pretendard Variable", Pretendard, -apple-system, system-ui, sans-serif;
 }
 
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,-apple-system,sans-serif; font-size:14px; }
+/* ===== Reset ===== */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* ===== 헤더 ===== */
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== Header ===== */
 .header {
-  display:flex; justify-content:space-between; align-items:center;
-  padding:12px 24px; border-bottom:1px solid var(--border); background:var(--card);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--sp-md) var(--sp-lg);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
 }
-.header h1 { font-size:1.1rem; color:var(--cyan); text-shadow:var(--glow-cyan); letter-spacing:1px; }
-.header .right { display:flex; align-items:center; gap:16px; }
-.header .time { color:var(--text2); font-size:0.8rem; }
-.header .logout { color:var(--text2); text-decoration:none; font-size:0.8rem; }
-.header .logout:hover { color:var(--red); }
-.header .status-dot { width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block; }
-.header .status-dot.off { background:var(--red); }
+.header h1 {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+}
+.header .right { display: flex; align-items: center; gap: var(--sp-md); }
+.header .time { color: var(--text-tertiary); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.header .logout {
+  color: var(--text-tertiary);
+  text-decoration: none;
+  font-size: 0.78rem;
+  transition: color 0.15s;
+}
+.header .logout:hover { color: var(--negative); }
+.header .status-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--positive);
+  flex-shrink: 0;
+}
+.header .status-dot.off { background: var(--negative); }
 
-/* ===== 탭 ===== */
+/* ===== Tabs ===== */
 .tabs {
-  display:flex; gap:0; border-bottom:1px solid var(--border); background:var(--card);
-  padding:0 24px; overflow-x:auto;
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  padding: 0 var(--sp-lg);
+  overflow-x: auto;
 }
 .tab {
-  padding:10px 20px; cursor:pointer; color:var(--text2); font-size:0.85rem;
-  border-bottom:2px solid transparent; transition:all .2s; white-space:nowrap;
+  padding: 12px 22px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  user-select: none;
 }
-.tab:hover { color:var(--text); }
-.tab.active { color:var(--cyan); border-bottom-color:var(--cyan); }
+.tab:hover { color: var(--text-secondary); }
+.tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
 
-/* ===== 컨텐츠 ===== */
-.content { padding:20px 24px; max-width:1400px; margin:0 auto; }
-.panel { display:none; }
-.panel.active { display:block; }
+/* ===== Content ===== */
+.content { padding: var(--sp-lg); max-width: 1400px; margin: 0 auto; }
+.panel { display: none; }
+.panel.active { display: block; animation: fadeIn 0.2s ease-out; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-/* ===== 요약 카드 ===== */
+/* ===== Summary Cards ===== */
 .summary {
-  display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--sp-md);
+  margin-bottom: var(--sp-lg);
 }
 .card {
-  background:var(--card); border:1px solid var(--border); border-radius:10px;
-  padding:16px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--sp-md) 20px;
 }
-.card .label { font-size:0.75rem; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
-.card .value { font-size:1.4rem; font-weight:700; }
-.card .value.plus { color:var(--green); }
-.card .value.minus { color:var(--red); }
+.card .label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 6px;
+}
+.card .value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.card .value.plus { color: var(--positive); }
+.card .value.minus { color: var(--negative); }
 
-/* ===== 테이블 ===== */
-.table-wrap { overflow-x:auto; }
-table { width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; }
-th { background:#16162a; color:var(--text2); font-weight:600; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.5px; text-align:left; padding:10px 12px; }
-td { padding:10px 12px; border-top:1px solid var(--border); font-size:0.85rem; }
-tr:hover td { background:#16162a; }
+/* ===== Tables ===== */
+.table-wrap { overflow-x: auto; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+th {
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  text-align: left;
+  padding: 10px 14px;
+}
+td {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+}
+tr:hover td { background: var(--bg-elevated); }
 
-/* ===== 배지 ===== */
-.badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; }
-.badge-l0 { background:#333; color:#888; }
-.badge-l1 { background:rgba(0,245,255,0.15); color:var(--cyan); }
-.badge-l2 { background:rgba(0,255,136,0.15); color:var(--green); }
-.badge-l3 { background:rgba(255,170,0,0.15); color:var(--yellow); }
+/* ===== Badges ===== */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.badge-l0 { background: rgba(81,88,104,0.2); color: var(--text-tertiary); }
+.badge-l1 { background: var(--info-dim); color: var(--info); }
+.badge-l2 { background: var(--positive-dim); color: var(--positive); }
+.badge-l3 { background: var(--accent-dim); color: var(--accent); }
 
-.profit-plus { color:var(--green); }
-.profit-minus { color:var(--red); }
+.profit-plus { color: var(--positive); }
+.profit-minus { color: var(--negative); }
 
-/* ===== 차트 ===== */
-.chart-container { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px; }
-.chart-container canvas { max-height:300px; }
+/* ===== Charts ===== */
+.chart-container {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  margin-bottom: var(--sp-md);
+}
+.chart-container canvas { max-height: 300px; }
 
-/* ===== 섹션 구분선 ===== */
-.section-divider { border:none; border-top:3px solid var(--border); margin:28px 0 20px; }
+/* ===== Section Divider ===== */
+.section-divider {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: var(--sp-xl) 0 var(--sp-lg);
+}
 
-/* ===== 테마 카드 ===== */
-.theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; margin-bottom:20px; }
-.theme-grid.active-grid { grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
-.theme-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; transition:border-color .2s; }
-.theme-card.active { background:rgba(0,255,136,0.03); border:1px solid rgba(0,255,136,0.35); }
-.theme-card.active .name { color:var(--cyan); }
-.theme-card.active .score { color:var(--green); }
-.theme-card.candidate { border-color:var(--border); opacity:0.8; }
-.theme-card .name { font-size:1rem; font-weight:700; color:var(--cyan); margin-bottom:8px; }
-.theme-card .score { font-size:1.8rem; font-weight:700; }
-.theme-card .meta { font-size:0.75rem; color:var(--text2); margin-top:6px; }
-.theme-badge { display:inline-block; padding:2px 6px; border-radius:3px; font-size:0.6rem; font-weight:700; margin-left:6px; vertical-align:middle; }
-.theme-badge.badge-active { background:rgba(0,255,136,0.2); color:var(--green); border:1px solid rgba(0,255,136,0.3); }
-.theme-badge.badge-candidate { background:rgba(136,136,136,0.15); color:var(--text2); }
-.active-header { display:flex; align-items:center; gap:8px; margin:0 0 14px; }
-.active-header h3 { margin:0; color:var(--green); }
-.active-header .next-eval { font-size:0.75rem; color:var(--text2); }
+/* ===== Theme Cards ===== */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--sp-md);
+  margin-bottom: var(--sp-lg);
+}
+.theme-grid.active-grid {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--sp-md);
+}
+.theme-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--sp-md);
+  transition: border-color 0.15s;
+}
+.theme-card.active {
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
+  border-left: 3px solid var(--accent);
+}
+.theme-card.active .name { color: var(--text-primary); }
+.theme-card.active .score { color: var(--accent); }
+.theme-card.candidate { opacity: 0.75; }
+.theme-card .name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: var(--sp-sm);
+}
+.theme-card .score {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.theme-card .meta {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  margin-top: 6px;
+}
+.theme-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+}
+.theme-badge.badge-active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.theme-badge.badge-candidate {
+  background: rgba(81,88,104,0.15);
+  color: var(--text-tertiary);
+}
+.active-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  margin: 0 0 var(--sp-md);
+}
+.active-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.active-header .next-eval {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
 
-/* ===== 뉴스 ===== */
-.news-item { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:8px; }
-.news-item .title { font-weight:600; margin-bottom:4px; }
-.news-item .title a { color:var(--text); text-decoration:none; }
-.news-item .title a:hover { color:var(--cyan); }
-.news-item .meta { font-size:0.75rem; color:var(--text2); }
+/* ===== Section Heading ===== */
+.section-heading {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  margin: var(--sp-md) 0 var(--sp-md);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
 
-/* ===== 시스템 ===== */
-.sys-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-.error-log { background:#1a0a0a; border:1px solid #2a1515; border-radius:8px; padding:12px; font-family:monospace; font-size:0.75rem; max-height:300px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; color:var(--red); }
+/* ===== News ===== */
+.news-item {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 14px var(--sp-md);
+  margin-bottom: var(--sp-sm);
+  transition: border-color 0.15s;
+}
+.news-item:hover { border-color: var(--border-default); }
+.news-item .title { font-weight: 600; margin-bottom: var(--sp-xs); }
+.news-item .title a { color: var(--text-primary); text-decoration: none; transition: color 0.15s; }
+.news-item .title a:hover { color: var(--accent); }
+.news-item .meta { font-size: 0.72rem; color: var(--text-tertiary); }
 
-/* ===== 필터 ===== */
-.filters { display:flex; gap:12px; margin-bottom:16px; align-items:center; flex-wrap:wrap; }
-.filters select, .filters input { padding:6px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.8rem; }
-.filters label { font-size:0.8rem; color:var(--text2); }
+/* ===== System ===== */
+.sys-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-md); }
+.error-log {
+  background: var(--bg-surface);
+  border: 1px solid rgba(217,86,107,0.15);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-md);
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 0.72rem;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--negative);
+  line-height: 1.6;
+}
 
-/* ===== 반응형 ===== */
+/* ===== Filters ===== */
+.filters {
+  display: flex;
+  gap: var(--sp-md);
+  margin-bottom: var(--sp-md);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.filters select, .filters input {
+  padding: 7px 14px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 0.8rem;
+  transition: border-color 0.15s;
+}
+.filters select:focus, .filters input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.filters label {
+  font-size: 0.78rem;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
 
-/* --- 태블릿 이하 (768px) --- */
-@media(max-width:768px) {
-  .header { padding:10px 16px; }
-  .header h1 { font-size:0.95rem; }
-  .tabs { padding:0 12px; }
-  .tab { padding:12px 16px; font-size:0.8rem; }
-  .content { padding:12px; }
-  .summary { grid-template-columns:1fr 1fr; }
-  .card { padding:12px 14px; }
-  .card .value { font-size:1.1rem; }
-  .sys-grid { grid-template-columns:1fr; }
-  .theme-grid, .theme-grid.active-grid { grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
-  .chart-container { padding:12px; }
-  .filters select, .filters input { padding:10px 12px; font-size:0.85rem; }
+/* ===== Responsive — Tablet (768px) ===== */
+@media (max-width: 768px) {
+  .header { padding: 10px var(--sp-md); }
+  .header h1 { font-size: 0.72rem; }
+  .tabs { padding: 0 var(--sp-md); }
+  .tab { padding: 12px var(--sp-md); font-size: 0.8rem; }
+  .content { padding: var(--sp-md); }
+  .summary { grid-template-columns: 1fr 1fr; }
+  .card { padding: var(--sp-md) 14px; }
+  .card .value { font-size: 1.1rem; }
+  .sys-grid { grid-template-columns: 1fr; }
+  .theme-grid, .theme-grid.active-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .chart-container { padding: var(--sp-md); }
+  .filters select, .filters input { padding: 10px var(--sp-md); font-size: 0.85rem; }
 
-  /* 포트폴리오 테이블 → 카드뷰 */
-  #portfolio-table thead { display:none; }
+  /* Portfolio table → card view */
+  #portfolio-table thead { display: none; }
   #portfolio-table tbody tr {
-    display:grid; grid-template-columns:1fr 1fr;
-    background:var(--card); border:1px solid var(--border); border-radius:10px;
-    padding:14px; margin-bottom:10px; gap:6px 12px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 14px; margin-bottom: 10px; gap: 6px 12px;
   }
-  #portfolio-table tbody tr:hover td { background:transparent; }
-  #portfolio-table tbody td { border:none; padding:2px 0; font-size:0.8rem; }
-  #portfolio-table tbody td:nth-child(1) { grid-column:1/3; font-size:0.9rem; }
-  #portfolio-table tbody td:nth-child(2) { grid-column:1/3; color:var(--text2); font-size:0.75rem; margin-bottom:4px; }
-  #portfolio-table tbody td:nth-child(7) { font-size:1.1rem; font-weight:700; }
-  #portfolio-table tbody td:nth-child(8) { font-size:1.1rem; font-weight:700; }
-  #portfolio-table tbody td:nth-child(3)::before { content:'수량 '; color:var(--text2); font-size:0.7rem; }
-  #portfolio-table tbody td:nth-child(4)::before { content:'매수 '; color:var(--text2); font-size:0.7rem; }
-  #portfolio-table tbody td:nth-child(5)::before { content:'현재 '; color:var(--text2); font-size:0.7rem; }
-  #portfolio-table tbody td:nth-child(6)::before { content:'평가 '; color:var(--text2); font-size:0.7rem; }
-  #portfolio-table tbody td:nth-child(9)::before { content:'보유 '; color:var(--text2); font-size:0.7rem; }
-  #portfolio-table tbody td:nth-child(10)::before { content:'트레일링 '; color:var(--text2); font-size:0.7rem; }
+  #portfolio-table tbody tr:hover td { background: transparent; }
+  #portfolio-table tbody td { border: none; padding: 2px 0; font-size: 0.8rem; }
+  #portfolio-table tbody td:nth-child(1) { grid-column: 1/3; font-size: 0.9rem; }
+  #portfolio-table tbody td:nth-child(2) { grid-column: 1/3; color: var(--text-tertiary); font-size: 0.72rem; margin-bottom: 4px; }
+  #portfolio-table tbody td:nth-child(7) { font-size: 1.1rem; font-weight: 700; }
+  #portfolio-table tbody td:nth-child(8) { font-size: 1.1rem; font-weight: 700; }
+  #portfolio-table tbody td:nth-child(3)::before { content: '수량 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #portfolio-table tbody td:nth-child(4)::before { content: '매수 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #portfolio-table tbody td:nth-child(5)::before { content: '현재 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #portfolio-table tbody td:nth-child(6)::before { content: '평가 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #portfolio-table tbody td:nth-child(9)::before { content: '보유 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #portfolio-table tbody td:nth-child(10)::before { content: '트레일링 '; color: var(--text-tertiary); font-size: 0.68rem; }
 
-  /* Trades 테이블 → 카드뷰 */
-  #panel-trades table thead { display:none; }
+  /* Trades table → card view */
+  #panel-trades table thead { display: none; }
   #panel-trades table tbody tr {
-    display:grid; grid-template-columns:1fr 1fr;
-    background:var(--card); border:1px solid var(--border); border-radius:10px;
-    padding:14px; margin-bottom:10px; gap:4px 12px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 14px; margin-bottom: 10px; gap: 4px 12px;
   }
-  #panel-trades table tbody tr:hover td { background:transparent; }
-  #panel-trades table tbody td { border:none; padding:2px 0; font-size:0.8rem; }
-  #panel-trades table tbody td:nth-child(1) { font-size:0.7rem; color:var(--text2); }
-  #panel-trades table tbody td:nth-child(2) { font-size:0.7rem; color:var(--text2); text-align:right; }
-  #panel-trades table tbody td:nth-child(3) { grid-column:1/3; font-size:0.9rem; font-weight:600; }
-  #panel-trades table tbody td:nth-child(8) { font-size:1.1rem; font-weight:700; }
-  #panel-trades table tbody td:nth-child(9) { font-size:1.1rem; font-weight:700; }
-  #panel-trades table tbody td:nth-child(10) { grid-column:1/3; font-size:0.75rem; color:var(--text2); }
-  #panel-trades table tbody td:nth-child(5)::before { content:'수량 '; color:var(--text2); font-size:0.7rem; }
-  #panel-trades table tbody td:nth-child(6)::before { content:'가격 '; color:var(--text2); font-size:0.7rem; }
-  #panel-trades table tbody td:nth-child(7)::before { content:'금액 '; color:var(--text2); font-size:0.7rem; }
+  #panel-trades table tbody tr:hover td { background: transparent; }
+  #panel-trades table tbody td { border: none; padding: 2px 0; font-size: 0.8rem; }
+  #panel-trades table tbody td:nth-child(1) { font-size: 0.68rem; color: var(--text-tertiary); }
+  #panel-trades table tbody td:nth-child(2) { font-size: 0.68rem; color: var(--text-tertiary); text-align: right; }
+  #panel-trades table tbody td:nth-child(3) { grid-column: 1/3; font-size: 0.9rem; font-weight: 600; }
+  #panel-trades table tbody td:nth-child(8) { font-size: 1.1rem; font-weight: 700; }
+  #panel-trades table tbody td:nth-child(9) { font-size: 1.1rem; font-weight: 700; }
+  #panel-trades table tbody td:nth-child(10) { grid-column: 1/3; font-size: 0.72rem; color: var(--text-tertiary); }
+  #panel-trades table tbody td:nth-child(5)::before { content: '수량 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #panel-trades table tbody td:nth-child(6)::before { content: '가격 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #panel-trades table tbody td:nth-child(7)::before { content: '금액 '; color: var(--text-tertiary); font-size: 0.68rem; }
 
-  /* Theme History 테이블 → 카드뷰 */
-  #theme-history-body { display:block; }
+  /* Theme History table → card view */
+  #theme-history-body { display: block; }
   #theme-history-body tr {
-    display:grid; grid-template-columns:1fr 1fr;
-    background:var(--card); border:1px solid var(--border); border-radius:8px;
-    padding:12px; margin-bottom:8px; gap:4px 12px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 12px; margin-bottom: 8px; gap: 4px 12px;
   }
-  #theme-history-body tr:hover td { background:transparent; }
-  #theme-history-body td { display:block; border:none; padding:2px 0; font-size:0.8rem; }
-  #theme-history-body td:nth-child(1) { font-size:0.7rem; color:var(--text2); }
-  #theme-history-body td:nth-child(2) { font-weight:600; font-size:0.9rem; text-align:right; }
-  #theme-history-body td:nth-child(3)::before { content:'점수 '; color:var(--text2); font-size:0.7rem; }
-  #theme-history-body td:nth-child(4)::before { content:'모멘텀 '; color:var(--text2); font-size:0.7rem; }
-  #theme-history-body td:nth-child(5)::before { content:'수급 '; color:var(--text2); font-size:0.7rem; }
-  #theme-history-body td:nth-child(6)::before { content:'뉴스 '; color:var(--text2); font-size:0.7rem; }
-
-  /* Theme History 부모 테이블 투명화 + thead 숨김 */
-  table:has(#theme-history-body) { background:transparent; border-radius:0; overflow:visible; }
-  table:has(#theme-history-body) thead { display:none; }
+  #theme-history-body tr:hover td { background: transparent; }
+  #theme-history-body td { display: block; border: none; padding: 2px 0; font-size: 0.8rem; }
+  #theme-history-body td:nth-child(1) { font-size: 0.68rem; color: var(--text-tertiary); }
+  #theme-history-body td:nth-child(2) { font-weight: 600; font-size: 0.9rem; text-align: right; }
+  #theme-history-body td:nth-child(3)::before { content: '점수 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #theme-history-body td:nth-child(4)::before { content: '모멘텀 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #theme-history-body td:nth-child(5)::before { content: '수급 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  #theme-history-body td:nth-child(6)::before { content: '뉴스 '; color: var(--text-tertiary); font-size: 0.68rem; }
+  table:has(#theme-history-body) { background: transparent; border-radius: 0; overflow: visible; }
+  table:has(#theme-history-body) thead { display: none; }
 }
 
-/* --- 모바일 세로 (480px) --- */
-@media(max-width:480px) {
-  .header h1 { font-size:0.85rem; letter-spacing:0; }
-  .header .right { gap:8px; }
-  .header .time { font-size:0.7rem; }
-  .tab { padding:12px 12px; font-size:0.78rem; }
-  .content { padding:8px; }
-  .summary { grid-template-columns:1fr; gap:8px; }
-  .card { padding:10px 12px; }
-  .card .label { font-size:0.7rem; }
-  .card .value { font-size:1rem; }
-  .theme-grid, .theme-grid.active-grid { grid-template-columns:1fr; }
-  .theme-card .score { font-size:1.4rem; }
-  .news-item { padding:10px 12px; }
-  .chart-container { padding:8px; margin-bottom:10px; }
-  .error-log { font-size:0.7rem; }
+/* ===== Mobile Portrait (480px) ===== */
+@media (max-width: 480px) {
+  .header h1 { font-size: 0.68rem; letter-spacing: 1.5px; }
+  .header .right { gap: var(--sp-sm); }
+  .header .time { font-size: 0.68rem; }
+  .tab { padding: 12px 12px; font-size: 0.78rem; }
+  .content { padding: var(--sp-sm); }
+  .summary { grid-template-columns: 1fr; gap: var(--sp-sm); }
+  .card { padding: 10px 12px; }
+  .card .label { font-size: 0.68rem; }
+  .card .value { font-size: 1rem; }
+  .theme-grid, .theme-grid.active-grid { grid-template-columns: 1fr; }
+  .theme-card .score { font-size: 1.3rem; }
+  .news-item { padding: 10px 12px; }
+  .chart-container { padding: var(--sp-sm); margin-bottom: 10px; }
+  .error-log { font-size: 0.68rem; }
 }
 </style>
 </head>
 <body>
 
-<!-- 헤더 -->
+<!-- Header -->
 <div class="header">
-  <h1>TRADING DASHBOARD</h1>
+  <h1>Trading Dashboard</h1>
   <div class="right">
     <span class="status-dot" id="botDot"></span>
     <span class="time" id="clock"></span>
@@ -232,7 +474,7 @@ tr:hover td { background:#16162a; }
   </div>
 </div>
 
-<!-- 탭 -->
+<!-- Tabs -->
 <div class="tabs">
   <div class="tab active" data-tab="portfolio">Portfolio</div>
   <div class="tab" data-tab="trades">Trades</div>
@@ -241,7 +483,7 @@ tr:hover td { background:#16162a; }
   <div class="tab" data-tab="system">System</div>
 </div>
 
-<!-- 컨텐츠 -->
+<!-- Content -->
 <div class="content">
 
   <!-- ========== Portfolio ========== -->
@@ -262,13 +504,13 @@ tr:hover td { background:#16162a; }
       <span class="next-eval" id="next-eval-date"></span>
     </div>
     <div class="theme-grid active-grid" id="selected-theme-grid"></div>
-    <h3 style="margin:16px 0 12px;color:var(--text2)">일별 수집 테마</h3>
+    <h3 class="section-heading">일별 수집 테마</h3>
     <div class="theme-grid" id="candidate-theme-grid"></div>
-    <h3 style="margin:16px 0 12px">테마 점수 트렌드 (7일)</h3>
-    <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+    <h3 class="section-heading" style="margin-top:var(--sp-lg)">테마 점수 트렌드 (7일)</h3>
+    <div class="chart-container">
       <canvas id="theme-trend-chart" height="220"></canvas>
     </div>
-    <h3 style="margin:4px 0 12px">Theme History</h3>
+    <h3 class="section-heading">Theme History</h3>
     <div class="table-wrap">
       <table>
         <thead><tr><th>날짜</th><th>테마</th><th>점수</th><th>모멘텀</th><th>수급비율</th><th>뉴스</th></tr></thead>
@@ -308,22 +550,22 @@ tr:hover td { background:#16162a; }
 
   <!-- ========== News ========== -->
   <div class="panel" id="panel-news">
-    <div id="news-list"><p style="color:var(--text2)">로딩 중...</p></div>
+    <div id="news-list"><p style="color:var(--text-tertiary)">로딩 중...</p></div>
   </div>
 
   <!-- ========== System ========== -->
   <div class="panel" id="panel-system">
     <div class="sys-grid">
       <div>
-        <div class="card" style="margin-bottom:12px">
+        <div class="card" style="margin-bottom:var(--sp-md)">
           <div class="label">Bot Status</div>
           <div class="value" id="sys-bot-status">-</div>
         </div>
-        <div class="card" style="margin-bottom:12px">
+        <div class="card" style="margin-bottom:var(--sp-md)">
           <div class="label">PID</div>
           <div class="value" id="sys-pid" style="font-size:1rem">-</div>
         </div>
-        <div class="card" style="margin-bottom:12px">
+        <div class="card" style="margin-bottom:var(--sp-md)">
           <div class="label">Mode</div>
           <div class="value" id="sys-mode" style="font-size:1rem">-</div>
         </div>
@@ -333,24 +575,23 @@ tr:hover td { background:#16162a; }
         </div>
       </div>
       <div>
-        <div class="label" style="margin-bottom:8px">RECENT ERRORS</div>
+        <div class="label" style="font-size:0.7rem;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:var(--sp-sm)">Recent Errors</div>
         <div class="error-log" id="error-log">에러 없음</div>
       </div>
     </div>
   </div>
 
-
 </div>
 
 <script>
-// ===== 유틸 =====
+// ===== Utilities =====
 const fmt = n => n != null ? Number(n).toLocaleString() : '-';
 const fmtPct = n => n != null ? (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%' : '-';
 const profitClass = n => n >= 0 ? 'profit-plus' : 'profit-minus';
 const valueClass = n => n >= 0 ? 'plus' : 'minus';
 const badgeLvl = l => `<span class="badge badge-l${l}">L${l}</span>`;
 
-// ===== 시계 =====
+// ===== Clock =====
 function updateClock() {
   const now = new Date();
   const utc = now.getTime() + now.getTimezoneOffset() * 60000;
@@ -360,7 +601,7 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// ===== 탭 전환 =====
+// ===== Tab Switching =====
 let activeTab = 'portfolio';
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
@@ -373,7 +614,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
-// ===== API 호출 =====
+// ===== API =====
 async function api(path) {
   const res = await fetch('/api/v1' + path);
   if (res.status === 401) { window.location = '/login'; return null; }
@@ -399,10 +640,10 @@ async function loadPortfolio() {
 
   const tbody = document.getElementById('portfolio-body');
   if (!holdingsData.length) {
-    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text2)">보유 종목 없음</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-tertiary)">보유 종목 없음</td></tr>';
   } else {
     tbody.innerHTML = holdingsData.map(h => `<tr>
-      <td><strong>${h.stock_name}</strong><br><span style="color:var(--text2);font-size:0.75rem">${h.stock_code}</span></td>
+      <td><strong>${h.stock_name}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${h.stock_code}</span></td>
       <td>${h.theme || '-'}</td>
       <td>${fmt(h.shares)}</td>
       <td>${fmt(h.buy_price)}</td>
@@ -411,14 +652,13 @@ async function loadPortfolio() {
       <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
       <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
       <td>${h.hold_days}일</td>
-      <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.7rem;color:var(--text2)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
+      <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
     </tr>`).join('');
   }
 
-  // 포트폴리오 하단 테마 로드
+  // Theme data
   const themeData = await api('/themes?days=14');
 
-  // 테마별 전일 대비 delta 계산용 히스토리 맵 구축
   const _themeHistMap = {};
   if (themeData && themeData.history) {
     for (const h of themeData.history) {
@@ -434,31 +674,30 @@ async function loadPortfolio() {
   function renderThemeCards(themes, gridId, cardClass, badgeLabel, badgeClass) {
     const grid = document.getElementById(gridId);
     if (!themes || !themes.length) {
-      grid.innerHTML = '<p style="color:var(--text2)">테마 데이터 없음</p>';
+      grid.innerHTML = '<p style="color:var(--text-tertiary)">테마 데이터 없음</p>';
       return;
     }
     grid.innerHTML = themes.map((t, idx) => {
       const score = Number(t.score);
       const grade = score >= 58 ? 'S' : score >= 48 ? 'A' : score >= 38 ? 'B' : score >= 30 ? 'C' : 'D';
-      const gradeColor = score >= 58 ? 'var(--green)' : score >= 48 ? 'var(--cyan)' : score >= 38 ? 'var(--yellow)' : 'var(--text2)';
+      const gradeColor = score >= 58 ? 'var(--positive)' : score >= 48 ? 'var(--info)' : score >= 38 ? 'var(--accent)' : 'var(--text-tertiary)';
       let meta = `Momentum: ${Number(t.momentum||0).toFixed(1)}`;
       if (t.supply_ratio) meta += ` | Supply: ${Number(t.supply_ratio).toFixed(0)}%`;
       if (t.news_count) meta += ` | News: ${t.news_count}`;
-      const rank = cardClass === 'active' ? `<span style="color:var(--green);font-size:0.75rem;margin-right:4px">#${idx+1}</span>` : '';
-      // 전일 대비 delta 계산
+      const rank = cardClass === 'active' ? `<span style="color:var(--accent);font-size:0.72rem;margin-right:4px">#${idx+1}</span>` : '';
       let deltaHtml = '';
       const hist = _themeHistMap[t.theme_name];
       if (hist && hist.length >= 2) {
         const delta = hist[0].score - hist[1].score;
-        const dColor = delta > 0 ? 'var(--green)' : delta < 0 ? 'var(--red)' : 'var(--text2)';
+        const dColor = delta > 0 ? 'var(--positive)' : delta < 0 ? 'var(--negative)' : 'var(--text-tertiary)';
         const dSign = delta > 0 ? '+' : '';
-        deltaHtml = ` <span style="color:${dColor};font-size:0.75rem">${dSign}${delta.toFixed(1)}</span>`;
+        deltaHtml = ` <span style="color:${dColor};font-size:0.72rem">${dSign}${delta.toFixed(1)}</span>`;
       }
       return `<div class="theme-card ${cardClass}">
-        <div class="name">${rank}${t.theme_name} <span style="color:${gradeColor};font-size:0.8rem">${grade}</span>${deltaHtml}<span class="theme-badge ${badgeClass}">${badgeLabel}</span></div>
+        <div class="name">${rank}${t.theme_name} <span style="color:${gradeColor};font-size:0.78rem;font-weight:600">${grade}</span>${deltaHtml}<span class="theme-badge ${badgeClass}">${badgeLabel}</span></div>
         <div class="score">${score.toFixed(1)}</div>
         <div class="meta">${meta}</div>
-        <div class="meta" style="margin-top:4px;font-size:0.65rem">${t.date}</div>
+        <div class="meta" style="margin-top:4px;font-size:0.62rem">${t.date}</div>
       </div>`;
     }).join('');
   }
@@ -468,7 +707,6 @@ async function loadPortfolio() {
       ? themeData.selected_themes : themeData.current_themes;
     renderThemeCards(activeThemes, 'selected-theme-grid', 'active', 'ACTIVE', 'badge-active');
     renderThemeCards(themeData.candidate_themes, 'candidate-theme-grid', 'candidate', 'REVIEW', 'badge-candidate');
-    // 다음 재평가일 표시
     if (activeThemes && activeThemes.length) {
       const selDate = new Date(activeThemes[0].date);
       const nextTue = new Date(selDate);
@@ -477,18 +715,18 @@ async function loadPortfolio() {
         `(${activeThemes[0].date} 선정 / 다음 재평가: ${nextTue.toISOString().slice(0,10)})`;
     }
   } else {
-    document.getElementById('selected-theme-grid').innerHTML = '<p style="color:var(--text2)">테마 데이터 없음</p>';
+    document.getElementById('selected-theme-grid').innerHTML = '<p style="color:var(--text-tertiary)">테마 데이터 없음</p>';
     document.getElementById('candidate-theme-grid').innerHTML = '';
   }
 
-  // 테마 히스토리 테이블
+  // Theme history table
   const histBody = document.getElementById('theme-history-body');
   histBody.innerHTML = (themeData && themeData.history || []).slice(0, 50).map(t => `<tr>
     <td>${t.date}</td><td>${t.theme_name}</td><td>${Number(t.score).toFixed(1)}</td>
     <td>${Number(t.momentum||0).toFixed(1)}</td><td>${Number(t.supply_ratio||0).toFixed(0)}%</td><td>${t.news_count||0}</td>
-  </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2)">히스토리 없음</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text-tertiary)">히스토리 없음</td></tr>';
 
-  // 테마 점수 트렌드 차트
+  // Theme trend chart
   (function renderThemeTrendChart() {
     const ctx = document.getElementById('theme-trend-chart');
     if (!ctx || !themeData || !themeData.history || !themeData.history.length) return;
@@ -498,18 +736,15 @@ async function loadPortfolio() {
       ? themeData.selected_themes : themeData.current_themes;
     if (activeThemes) activeThemes.forEach(t => activeNames.add(t.theme_name));
 
-    // 날짜 수집 (최근 7일)
     const allDates = [...new Set(themeData.history.map(h => h.date))].sort();
     const dates = allDates.slice(-7);
 
-    // 활성 테마 + 후보 상위 3개
     const candidateNames = new Set();
     if (themeData.candidate_themes) {
       themeData.candidate_themes.slice(0, 3).forEach(t => candidateNames.add(t.theme_name));
     }
     const targetNames = new Set([...activeNames, ...candidateNames]);
 
-    // 테마별 시계열 구축
     const series = {};
     for (const h of themeData.history) {
       if (!targetNames.has(h.theme_name)) continue;
@@ -517,8 +752,8 @@ async function loadPortfolio() {
       series[h.theme_name][h.date] = Number(h.score);
     }
 
-    const activeColors = ['#00f5ff','#00ff88','#ffaa00','#ff66cc','#66aaff'];
-    const candidateColors = ['#555','#666','#777'];
+    const activeColors = ['#c9983e','#3bb888','#6889c6','#b87db8','#d4945a'];
+    const candidateColors = ['#3d4352','#4a5060','#565e70'];
     const datasets = [];
     let aIdx = 0, cIdx = 0;
 
@@ -529,7 +764,7 @@ async function loadPortfolio() {
         label: name,
         data: dates.map(d => series[name][d] ?? null),
         borderColor: color,
-        backgroundColor: color + '22',
+        backgroundColor: color + '18',
         borderWidth: isActive ? 2 : 1.5,
         borderDash: isActive ? [] : [5, 3],
         pointRadius: isActive ? 3 : 2,
@@ -538,35 +773,38 @@ async function loadPortfolio() {
       });
     }
 
-    // 38점 기준선
     datasets.push({
       label: 'B등급 (38점)',
       data: dates.map(() => 38),
-      borderColor: '#ff3366',
+      borderColor: '#d9566b',
       borderWidth: 1,
       borderDash: [3, 3],
       pointRadius: 0,
       fill: false,
     });
 
-    new Chart(ctx, {
+    if (trendChart) { trendChart.destroy(); trendChart = null; }
+    trendChart = new Chart(ctx, {
       type: 'line',
       data: { labels: dates.map(d => d.slice(5)), datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { labels: { color: '#e0e0e0', font: { size: 11 } }, position: 'bottom' },
+          legend: { labels: { color: '#7e8594', font: { size: 11, family: 'Pretendard Variable, sans-serif' } }, position: 'bottom' },
           tooltip: { mode: 'index', intersect: false },
         },
         scales: {
-          x: { ticks: { color: '#888' }, grid: { color: '#1e1e2e' } },
-          y: { ticks: { color: '#888' }, grid: { color: '#1e1e2e' }, min: 0 },
+          x: { ticks: { color: '#515868' }, grid: { color: '#252d3f' } },
+          y: { ticks: { color: '#515868' }, grid: { color: '#252d3f' }, min: 0 },
         },
       }
     });
   })();
 }
+
+// ===== Theme Trend Chart instance =====
+let trendChart = null;
 
 // ===== Trades =====
 async function loadTrades() {
@@ -575,15 +813,15 @@ async function loadTrades() {
   if (!d) return;
   const tbody = document.getElementById('trades-body');
   if (!d.trades.length) {
-    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text2)">매매 내역 없음</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-tertiary)">매매 내역 없음</td></tr>';
     return;
   }
   tbody.innerHTML = d.trades.map(t => {
     const isBuy = t.action === 'buy';
     return `<tr>
       <td>${t.date}</td><td>${t.time || '-'}</td>
-      <td>${t.stock_name}<br><span style="color:var(--text2);font-size:0.7rem">${t.stock_code}</span></td>
-      <td style="color:${isBuy?'var(--cyan)':'var(--red)'}">${isBuy?'매수':'매도'}</td>
+      <td>${t.stock_name}<br><span style="color:var(--text-tertiary);font-size:0.68rem">${t.stock_code}</span></td>
+      <td style="color:${isBuy?'var(--info)':'var(--negative)'};font-weight:600">${isBuy?'매수':'매도'}</td>
       <td>${fmt(t.shares)}</td><td>${fmt(t.price)}</td><td>${fmt(t.amount)}</td>
       <td class="${profitClass(t.profit_rate)}">${t.profit_rate != null ? fmtPct(t.profit_rate) : '-'}</td>
       <td class="${profitClass(t.profit_amount)}">${t.profit_amount != null ? fmt(t.profit_amount)+'원' : '-'}</td>
@@ -607,32 +845,39 @@ async function loadPerformance() {
     <div class="card"><div class="label">Trades</div><div class="value">${d.win_count}W / ${d.loss_count}L</div></div>
   `;
 
-  const chartOpt = { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}},
-    scales:{x:{ticks:{color:'#555',maxTicksLimit:10}},y:{ticks:{color:'#555'},grid:{color:'#1e1e2e'}}} };
+  const chartOpt = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#515868', maxTicksLimit: 10, font: { family: 'Pretendard Variable, sans-serif' } }, grid: { color: '#252d3f' } },
+      y: { ticks: { color: '#515868', font: { family: 'Pretendard Variable, sans-serif' } }, grid: { color: '#252d3f' } }
+    }
+  };
 
   if (cumChart) cumChart.destroy();
   cumChart = new Chart(document.getElementById('cumReturnChart'), {
-    type:'line', data:{ labels:d.dates, datasets:[{
-      data:d.cumulative_returns, borderColor:'#00f5ff', backgroundColor:'rgba(0,245,255,0.05)', fill:true, tension:0.3, pointRadius:0, borderWidth:2
-    }]}, options:{...chartOpt, plugins:{...chartOpt.plugins, title:{display:true,text:'Cumulative Return (%)',color:'#888'}}}
+    type: 'line', data: { labels: d.dates, datasets: [{
+      data: d.cumulative_returns, borderColor: '#6889c6', backgroundColor: 'rgba(104,137,198,0.06)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2
+    }] }, options: { ...chartOpt, plugins: { ...chartOpt.plugins, title: { display: true, text: 'Cumulative Return (%)', color: '#7e8594', font: { family: 'Pretendard Variable, sans-serif' } } } }
   });
 
   if (dailyChart) dailyChart.destroy();
   dailyChart = new Chart(document.getElementById('dailyReturnChart'), {
-    type:'bar', data:{ labels:d.dates, datasets:[{
-      data:d.daily_returns, backgroundColor: d.daily_returns.map(v => v >= 0 ? 'rgba(0,255,136,0.6)' : 'rgba(255,51,102,0.6)'), borderWidth:0
-    }]}, options:{...chartOpt, plugins:{...chartOpt.plugins, title:{display:true,text:'Daily Return (%)',color:'#888'}}}
+    type: 'bar', data: { labels: d.dates, datasets: [{
+      data: d.daily_returns, backgroundColor: d.daily_returns.map(v => v >= 0 ? 'rgba(59,184,136,0.55)' : 'rgba(217,86,107,0.55)'), borderWidth: 0
+    }] }, options: { ...chartOpt, plugins: { ...chartOpt.plugins, title: { display: true, text: 'Daily Return (%)', color: '#7e8594', font: { family: 'Pretendard Variable, sans-serif' } } } }
   });
 }
 
 // ===== News =====
 async function loadNews() {
   const el = document.getElementById('news-list');
-  el.innerHTML = '<p style="color:var(--text2)">뉴스 로딩 중...</p>';
+  el.innerHTML = '<p style="color:var(--text-tertiary)">뉴스 로딩 중...</p>';
   const d = await api('/news');
   if (!d) return;
   if (!d.news || !d.news.length) {
-    el.innerHTML = '<p style="color:var(--text2)">뉴스 없음</p>';
+    el.innerHTML = '<p style="color:var(--text-tertiary)">뉴스 없음</p>';
     return;
   }
   el.innerHTML = d.news.map(n => `
@@ -648,17 +893,17 @@ async function loadSystem() {
   const d = await api('/system/status');
   if (!d) return;
   document.getElementById('sys-bot-status').textContent = d.bot_status;
-  document.getElementById('sys-bot-status').style.color = d.bot_status === 'active' ? 'var(--green)' : 'var(--red)';
+  document.getElementById('sys-bot-status').style.color = d.bot_status === 'active' ? 'var(--positive)' : 'var(--negative)';
   document.getElementById('botDot').className = 'status-dot' + (d.bot_status === 'active' ? '' : ' off');
   document.getElementById('sys-pid').textContent = d.pid || '-';
   document.getElementById('sys-mode').textContent = d.is_mock ? 'MOCK' : 'REAL';
-  document.getElementById('sys-mode').style.color = d.is_mock ? 'var(--yellow)' : 'var(--green)';
+  document.getElementById('sys-mode').style.color = d.is_mock ? 'var(--accent)' : 'var(--positive)';
   document.getElementById('sys-time').textContent = d.server_time;
   const logEl = document.getElementById('error-log');
   logEl.textContent = d.recent_errors.length ? d.recent_errors.join('\n') : '에러 없음';
 }
 
-// ===== 탭 로드 =====
+// ===== Tab Load =====
 function loadTab(tab) {
   switch(tab) {
     case 'portfolio': loadPortfolio(); break;
@@ -669,7 +914,7 @@ function loadTab(tab) {
   }
 }
 
-// ===== SSE 실시간 가격 =====
+// ===== SSE Realtime Prices =====
 let evtSource = null;
 function startSSE() {
   if (evtSource) evtSource.close();
@@ -678,7 +923,6 @@ function startSSE() {
     try {
       const d = JSON.parse(e.data);
       if (d.error) return;
-      // Portfolio 탭이 활성이면 테이블 업데이트
       if (activeTab === 'portfolio' && d.holdings) {
         holdingsData = d.holdings;
         updatePortfolioTable(d);
@@ -692,7 +936,6 @@ function startSSE() {
 }
 
 function updatePortfolioTable(d) {
-  // 요약 카드 업데이트 (값만)
   const summaryEl = document.getElementById('portfolio-summary');
   if (summaryEl.children.length >= 3) {
     summaryEl.children[1].querySelector('.value').textContent = fmt(d.total_eval) + '원';
@@ -704,11 +947,10 @@ function updatePortfolioTable(d) {
     }
   }
 
-  // 테이블 업데이트
   const tbody = document.getElementById('portfolio-body');
   if (!d.holdings.length) return;
   tbody.innerHTML = d.holdings.map(h => `<tr>
-    <td><strong>${h.stock_name}</strong><br><span style="color:var(--text2);font-size:0.75rem">${h.stock_code}</span></td>
+    <td><strong>${h.stock_name}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${h.stock_code}</span></td>
     <td>${h.theme || '-'}</td>
     <td>${fmt(h.shares)}</td>
     <td>${fmt(h.buy_price)}</td>
@@ -717,11 +959,11 @@ function updatePortfolioTable(d) {
     <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
     <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
     <td>${h.hold_days}일</td>
-    <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.7rem;color:var(--text2)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
+    <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
   </tr>`).join('');
 }
 
-// ===== 초기 로드 =====
+// ===== Initial Load =====
 loadPortfolio();
 loadSystem();
 startSSE();
