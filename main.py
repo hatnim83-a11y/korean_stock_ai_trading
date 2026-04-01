@@ -1059,6 +1059,12 @@ class TradingSystem:
         logger.info("💰 빈 슬롯 매수 실행 (09:25)")
         logger.info("=" * 70)
 
+        # 매수 요약용 상태 초기화 (이전 날 데이터 누출 방지)
+        self._held_excluded = []
+        self._morning_excluded = []
+        self._slot_excluded = []
+        self._buy_skip_reason = ''
+
         # Phase 0: 관찰 완료 대기
         if self._observer_task and not self._observer_task.done():
             logger.info("⏳ 관찰 완료 대기 중...")
@@ -1117,10 +1123,12 @@ class TradingSystem:
 
         if available_cash < 100_000:
             logger.warning("   현금 부족 (<10만원) - 신규 매수 스킵")
+            self._buy_skip_reason = f"현금 부족 ({available_cash:,.0f}원)"
             self._send_buy_summary(current_holdings, [], 0)
             return {"success": True, "held": held_count, "bought": 0}
 
         # Phase 5: 신규 후보 필터링 (보유 종목 제외)
+        self._held_excluded = [c for c in self.today_candidates if c['stock_code'] in held_codes]
         new_candidates = [c for c in self.today_candidates if c['stock_code'] not in held_codes]
         logger.info(f"   신규 후보 (보유 제외): {len(new_candidates)}개")
 
@@ -1235,8 +1243,47 @@ class TradingSystem:
             for h in current_holdings:
                 lines.append(f"  - {h['stock_name']} ({h['stock_code']})")
 
-        if not current_holdings and not new_buy_orders:
-            lines.append("보유 0개, 매수 후보 없음")
+        # --- 탈락 종목 수집 (조기 리턴 전에 반드시 수집) ---
+        excluded_lines = []
+
+        # 1) 보유 중복 제외
+        for s in getattr(self, '_held_excluded', []):
+            name = s.get('stock_name', s.get('name', s.get('stock_code', '?')))
+            excluded_lines.append(f"  - {name} — 보유 중복")
+
+        # 2) 모닝필터 제외 (갭/수급/거래량/체결강도/트렌드)
+        for s in getattr(self, '_morning_excluded', []):
+            name = s.get('stock_name', s.get('name', s.get('stock_code', '?')))
+            reason = s.get('exclusion_reason', '')
+            if not reason:
+                gap = s.get('gap_percent', 0)
+                reason = f"갭 {gap:+.1f}%" if gap else "모닝필터"
+            excluded_lines.append(f"  - {name} — {reason}")
+
+        # 3) 슬롯 부족
+        for s in getattr(self, '_slot_excluded', []):
+            name = s.get('name', s.get('stock_name', s.get('code', '?')))
+            excluded_lines.append(f"  - {name} — 슬롯 부족")
+
+        # --- 매수 없음 + 탈락 사유 표시 ---
+        if not new_buy_orders:
+            # 파이프라인 요약
+            screening_count = len(self.today_candidates) if self.today_candidates else 0
+            if screening_count > 0:
+                lines.append(f"\n📋 스크리닝 {screening_count}개 → 매수 0개")
+
+            # 조기 종료 사유 (현금 부족 등)
+            skip_reason = getattr(self, '_buy_skip_reason', '')
+            if skip_reason:
+                lines.append(f"⚠️ 사유: {skip_reason}")
+                self._buy_skip_reason = ''  # 1회성 소비
+
+            if excluded_lines:
+                lines.append(f"\n❌ 탈락: {len(excluded_lines)}종목")
+                lines.extend(excluded_lines)
+            elif not current_holdings and screening_count == 0:
+                lines.append("보유 0개, 매수 후보 없음")
+
             self.notifier.send_message("\n".join(lines))
             return
 
@@ -1257,96 +1304,77 @@ class TradingSystem:
                 logger.debug(f"기업개요 조회 실패: {e}")
 
         # 신규 매수 상세
-        if new_buy_orders:
-            lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━")
-            lines.append(f"\n📥 신규 매수: {bought_count}종목\n")
-            for i, o in enumerate(new_buy_orders, 1):
-                code = o.get('stock_code', '')
-                name = o.get('stock_name', code)
-                amount = o.get('amount', 0)
-                stop_loss = o.get('stop_loss', 0)
-                take_profit = o.get('take_profit', 0)
-                price = o.get('price', 0)
-                ai = ai_lookup.get(code, {})
+        lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"\n📥 신규 매수: {bought_count}종목\n")
+        for i, o in enumerate(new_buy_orders, 1):
+            code = o.get('stock_code', '')
+            name = o.get('stock_name', code)
+            amount = o.get('amount', 0)
+            stop_loss = o.get('stop_loss', 0)
+            take_profit = o.get('take_profit', 0)
+            price = o.get('price', 0)
+            ai = ai_lookup.get(code, {})
 
-                lines.append(f"{i}. {name} ({code}) — {amount:,}원")
+            lines.append(f"{i}. {name} ({code}) — {amount:,}원")
 
-                # 테마
-                theme = ai.get('theme', '')
-                if theme:
-                    lines.append(f"🏷 테마: {theme}")
+            # 테마
+            theme = ai.get('theme', '')
+            if theme:
+                lines.append(f"🏷 테마: {theme}")
 
-                # 기업개요
-                overview = overviews.get(code, '')
-                if overview:
-                    lines.append(f"🏢 {overview}")
+            # 기업개요
+            overview = overviews.get(code, '')
+            if overview:
+                lines.append(f"🏢 {overview}")
 
-                # 수급 (억원 변환)
-                foreign = ai.get('foreign_net', 0)
-                institution = ai.get('institution_net', 0)
-                if foreign or institution:
-                    f_str = f"{foreign / 1e8:+,.0f}억" if foreign else "0"
-                    i_str = f"{institution / 1e8:+,.0f}억" if institution else "0"
-                    lines.append(f"📊 수급: 외국인 {f_str} / 기관 {i_str}")
+            # 수급 (억원 변환)
+            foreign = ai.get('foreign_net', 0)
+            institution = ai.get('institution_net', 0)
+            if foreign or institution:
+                f_str = f"{foreign / 1e8:+,.0f}억" if foreign else "0"
+                i_str = f"{institution / 1e8:+,.0f}억" if institution else "0"
+                lines.append(f"📊 수급: 외국인 {f_str} / 기관 {i_str}")
 
-                # 기술 지표
-                rsi = ai.get('rsi', 0)
-                vol_ratio = ai.get('volume_ratio', 0)
-                ma = ai.get('ma_alignment', '')
-                indicators = []
-                if rsi:
-                    indicators.append(f"RSI {rsi:.0f}")
-                if ma:
-                    ma_mark = "✓" if ma in ("bullish", "정배열") else "✗"
-                    indicators.append(f"MA정배열 {ma_mark}")
-                if vol_ratio:
-                    indicators.append(f"거래량 {vol_ratio:.1f}배")
-                if indicators:
-                    lines.append(f"📈 {' | '.join(indicators)}")
+            # 기술 지표
+            rsi = ai.get('rsi', 0)
+            vol_ratio = ai.get('volume_ratio', 0)
+            ma = ai.get('ma_alignment', '')
+            indicators = []
+            if rsi:
+                indicators.append(f"RSI {rsi:.0f}")
+            if ma:
+                ma_mark = "✓" if ma in ("bullish", "정배열") else "✗"
+                indicators.append(f"MA정배열 {ma_mark}")
+            if vol_ratio:
+                indicators.append(f"거래량 {vol_ratio:.1f}배")
+            if indicators:
+                lines.append(f"📈 {' | '.join(indicators)}")
 
-                # AI 분석
-                sentiment = ai.get('ai_sentiment', 0)
-                confidence = ai.get('ai_confidence', 0)
-                reason = ai.get('ai_reason', '')
-                if sentiment:
-                    conf_pct = f"{confidence * 100:.0f}%" if confidence else ""
-                    reason_short = reason[:40] if reason else ""
-                    ai_line = f"🤖 AI {sentiment:.1f}/10"
-                    if conf_pct:
-                        ai_line += f" ({conf_pct})"
-                    if reason_short:
-                        ai_line += f" — {reason_short}"
-                    lines.append(ai_line)
+            # AI 분석
+            sentiment = ai.get('ai_sentiment', 0)
+            confidence = ai.get('ai_confidence', 0)
+            reason = ai.get('ai_reason', '')
+            if sentiment:
+                conf_pct = f"{confidence * 100:.0f}%" if confidence else ""
+                reason_short = reason[:40] if reason else ""
+                ai_line = f"🤖 AI {sentiment:.1f}/10"
+                if conf_pct:
+                    ai_line += f" ({conf_pct})"
+                if reason_short:
+                    ai_line += f" — {reason_short}"
+                lines.append(ai_line)
 
-                # 손절/목표
-                if price and price > 0:
-                    sl_pct = ((stop_loss / price) - 1) * 100 if stop_loss else 0
-                    tp_pct = ((take_profit / price) - 1) * 100 if take_profit else 0
-                    lines.append(f"⚡ 손절 {sl_pct:+.0f}% / 목표 {tp_pct:+.0f}%")
-                elif stop_loss or take_profit:
-                    lines.append(f"⚡ 손절 {stop_loss:,.0f}원 / 목표 {take_profit:,.0f}원")
+            # 손절/목표
+            if price and price > 0:
+                sl_pct = ((stop_loss / price) - 1) * 100 if stop_loss else 0
+                tp_pct = ((take_profit / price) - 1) * 100 if take_profit else 0
+                lines.append(f"⚡ 손절 {sl_pct:+.0f}% / 목표 {tp_pct:+.0f}%")
+            elif stop_loss or take_profit:
+                lines.append(f"⚡ 손절 {stop_loss:,.0f}원 / 목표 {take_profit:,.0f}원")
 
-                lines.append("")  # 종목 간 빈 줄
+            lines.append("")  # 종목 간 빈 줄
 
-        # 탈락 종목
-        excluded_lines = []
-
-        # 1) 모닝필터 제외
-        for s in getattr(self, '_morning_excluded', []):
-            name = s.get('name', s.get('stock_name', s.get('code', '?')))
-            gap = s.get('gap_percent', 0)
-            reason = f"모닝필터 (갭 {gap:+.1f}%)" if gap else "모닝필터"
-            excluded_lines.append(f"  - {name} — {reason}")
-
-        # 2) 슬롯 부족
-        for s in getattr(self, '_slot_excluded', []):
-            name = s.get('name', s.get('stock_name', s.get('code', '?')))
-            excluded_lines.append(f"  - {name} — 슬롯 부족")
-
-        # 3) AI 미통과 (today_ai_analysis 중 ai_passed=False)
-        # AI 미통과 종목은 today_ai_analysis에 포함 안됨 (passed만 저장)
-        # 대신 run_daily_verification에서 이미 필터됨 — 별도 추적 불필요
-
+        # 탈락 종목 (매수 있는 경우에도 표시)
         if excluded_lines:
             lines.append("━━━━━━━━━━━━━━━━━━━━━")
             lines.append(f"\n❌ 탈락: {len(excluded_lines)}종목")

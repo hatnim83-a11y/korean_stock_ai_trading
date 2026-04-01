@@ -178,6 +178,21 @@
   → 단 교체 테마가 same_week 로직(days_since_rotation < 7)으로 "기존 유지" 경로로 진입 — 정상
 - **RETENTION_SCORE 수정**: selector.py:46 현재 48.0, MEMORY의 38.0 오기 수정됨
 
+### 테마 유동성 사전 검증 (2026-03-26 검증)
+- 수정 파일: config.py(설정 6개), database.py(get_theme_pass_rates), scorer.py(calculate_liquidity_penalty), main.py
+- `calculate_liquidity_penalty(theme, None)` → `AttributeError` (pass_rates에 None 방어 없음)
+  → 실제 호출 경로 분석: `if pass_rates:` 가드로 보호됨 (score_themes line 606, main.py line 455)
+  → 타입 힌트가 `dict = None`으로 None 허용처럼 보이나 실제 None 전달 시 크래시
+- `MAX_LIQUIDITY_PENALTY = -8.0` 선언됐으나 calculate_liquidity_penalty 내에서 미사용 (dead constant)
+  → calculate_overheat_penalty의 `max(MAX_OVERHEAT_PENALTY, penalty)` 패턴과 비일관적
+- `date('now', ? || ' days')` 파라미터: `str(-7) = '-7'` → `-7 days` 정상 작동 확인
+- UTC date() 사용: 08:30 KST 실행 시 UTC는 전날 23:30 → date('now') = KST 어제 → 7일치 요청 시 8일치 반환
+  → 영향 없음 (더 많은 데이터 포함 = 안전 방향)
+- 17:05 run_daily_theme_collection: pass_rates 미전달 의도적 (DB에 raw 점수 저장, 이중 감점 방지)
+- `from config import settings` 지연 import (scorer.py line 607): 순환 없음, 최상단으로 이동 권장
+- config.py Field 패턴: 기존과 100% 일관적 (default + description 모두 있음)
+- 텔레그램 pr_str 포맷: `f' 통과율{pr:.0%}'`, pr=None 방어 있음 → 메시지 깨짐 없음
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`

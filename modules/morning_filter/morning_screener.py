@@ -241,19 +241,25 @@ class MorningScreener:
             
             passed, excluded = self.gap_filter.check_multiple(current_stocks)
             gap_excluded = len(excluded)
+            for s in excluded:
+                gap_r = s.get('gap_result')
+                s['exclusion_reason'] = gap_r.reason if gap_r else "갭 필터"
             all_excluded.extend(excluded)
             current_stocks = passed
             logger.info(f"   결과: {len(passed)}개 통과, {gap_excluded}개 제외")
-        
+
         # 2. 당일 수급 필터
         if self.supply_filter and current_stocks:
             logger.info("\n📊 Step 2: 당일 수급 필터")
             passed, excluded = self.supply_filter.check_multiple(current_stocks, delay=0)
             supply_excluded = len(excluded)
+            for s in excluded:
+                sup_r = s.get('supply_result')
+                s['exclusion_reason'] = sup_r.reason if sup_r else "수급 부진"
             all_excluded.extend(excluded)
             current_stocks = passed
             logger.info(f"   결과: {len(passed)}개 통과, {supply_excluded}개 제외")
-        
+
         # 3. 거래량 필터
         if self.volume_filter and current_stocks:
             logger.info("\n📊 Step 3: 거래량 필터")
@@ -261,15 +267,21 @@ class MorningScreener:
                 current_stocks, trading_minutes=trading_minutes
             )
             volume_excluded = len(excluded)
+            for s in excluded:
+                vol_r = s.get('volume_result')
+                s['exclusion_reason'] = vol_r.reason if vol_r else "거래량 미달"
             all_excluded.extend(excluded)
             current_stocks = passed
             logger.info(f"   결과: {len(passed)}개 통과, {volume_excluded}개 제외")
-        
+
         # 4. 체결 강도 필터
         if self.strength_filter and current_stocks:
             logger.info("\n💪 Step 4: 체결 강도 필터")
             passed, excluded = self.strength_filter.check_multiple(current_stocks)
             strength_excluded = len(excluded)
+            for s in excluded:
+                str_r = s.get('strength_result')
+                s['exclusion_reason'] = str_r.reason if str_r else "체결강도 미달"
             all_excluded.extend(excluded)
             current_stocks = passed
             logger.info(f"   결과: {len(passed)}개 통과, {strength_excluded}개 제외")
