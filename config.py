@@ -208,6 +208,15 @@ class Settings(BaseSettings):
         default=0.40,
         description="테마당 최대 투자 비중 (40%)"
     )
+    # ===== 테마/섹터 분산 제한 =====
+    MAX_STOCKS_PER_THEME: int = Field(
+        default=2,
+        description="동일 테마 최대 보유 종목 수 (3월 동시 손절 방어)"
+    )
+    MAX_STOCKS_PER_SECTOR: int = Field(
+        default=3,
+        description="동일 섹터(카테고리) 최대 보유 종목 수"
+    )
 
     # ===== 보유 기간 설정 =====
     MAX_HOLD_DAYS_PROFIT: int = Field(
@@ -235,6 +244,15 @@ class Settings(BaseSettings):
     STOP_LOSS_FAST: float = Field(
         default=-0.07,
         description="빠른 손절률 (-7%, 급락 시)"
+    )
+    # ===== 손절 보호기간 (Grace Period) =====
+    GRACE_PERIOD_DAYS: int = Field(
+        default=1,
+        description="매수 후 보호기간 (hold_days<=N, 당일(0)+다음영업일(1)=2거래일 보호)"
+    )
+    GRACE_PERIOD_STOP_LOSS: float = Field(
+        default=-0.08,
+        description="보호기간 중 손절률 (-8%). ATR 손절가 대신 적용"
     )
     DEFAULT_TAKE_PROFIT: float = Field(
         default=0.15,
@@ -287,8 +305,8 @@ class Settings(BaseSettings):
         description="트레일링 시작 수익률 (+8%)"
     )
     TRAIL_LEVEL1_PCT: float = Field(
-        default=0.05,
-        description="레벨1 트레일링 (8~15%: 고점 대비 -5%)"
+        default=0.04,
+        description="레벨1 트레일링 (8~15%: 고점 대비 -4%)"
     )
     TRAIL_LEVEL2_THRESHOLD: float = Field(
         default=0.15,
@@ -485,8 +503,8 @@ class Settings(BaseSettings):
         description="허용 최대 갭상승률 (%) - 초과시 제외"
     )
     MAX_GAP_DOWN_PERCENT: float = Field(
-        default=3.0,
-        description="허용 최대 갭하락률 (%) - 초과시 제외"
+        default=2.0,
+        description="허용 최대 갭하락률 (%) - 초과시 제외 (3월 분석 후 3.0→2.0 강화)"
     )
     ENABLE_DYNAMIC_GAP: bool = Field(
         default=True,
@@ -519,8 +537,8 @@ class Settings(BaseSettings):
         description="체결 강도 필터 활성화 여부"
     )
     MIN_STRENGTH: float = Field(
-        default=45.0,
-        description="최소 체결 강도 (%, 50=중립, 45=약간 매도우위도 허용)"
+        default=50.0,
+        description="최소 체결 강도 (%, 50=중립. 3월 분석 후 45→50 강화)"
     )
     
     # ===== 실시간 관찰 설정 (Observation Loop) =====

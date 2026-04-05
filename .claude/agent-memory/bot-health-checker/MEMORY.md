@@ -27,17 +27,18 @@
 - screening_log: id, date, stock_code, stock_name, theme, stage, passed, score, reject_reason, details_json, created_at
 - position_state: stock_code(PK), current_price, highest_price, trailing_active, trailing_level, trailing_stop_price, max_profit_rate, partial_1/2/3_executed, remaining_shares, last_updated (NO stock_name column)
 
-## Known Issues (as of 2026-03-30)
-- **BUG: LIG넥스원(079550) 매수 수량 0주**: 3/26 09:25 "주문수량을 확인하여 주십시요" 3회 재시도 실패. 주가(289,500원) 대비 할당금액 부족으로 수량=0 계산. 고가 종목 매수 수량 산정 방어 필요.
-- **BUG: 일별 수집이 주간 선정 점수를 덮어씀**: database.py:574-596에서 selected=False 저장 시 기존 selected=1 행의 score/momentum/ai_sentiment를 일별 수집 값으로 UPDATE.
-- **BUG: position_state 매도 후 잔존**: HJ중공업(097230) 3/26 매도 완료 후에도 position_state 테이블 + monitor_state.json에 데이터 잔존. _close_position_in_db에서 position_state DELETE 누락 추정.
-- **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError. Falls back to Naver-only. 3/27, 3/30 연속 재현.
-- **WARNING: predefined 테마 네이버 미발견 증가**: AI반도체, K-방산, 바이오, 로봇, 원자력, 수소, 조선, 철강 (3/30 기준 8~9개). 반도체, 원자력, 조선이 3/27부터 추가.
-- **WARNING: 방위산업/전쟁및테러 테마 URL 빈값**: selected=1인데 url='' → 스크리닝 시 종목 수집 품질 저하 가능.
+## Known Issues (as of 2026-04-05)
+- **BUG: position_state 매도 후 잔존 (재확인)**: HJ중공업(097230) 3/26 매도 완료, 4/5 현재도 position_state에 잔존 (last_updated=3/25). 오이솔루션(138080) 4/2 매도 후에는 정상 정리됨 → 일관성 없는 정리 로직.
+- **BUG: 주중 교체 테마 DB selected 미마킹**: 4/2 주중 교체로 '건설'이 '오가노이드' 대체 진입했으나, themes DB에서 건설의 selected=0 유지. 스크리닝은 메모리 기반으로 정상 작동하나 DB/대시보드 정합성 문제.
+- **BUG: LIG넥스원(079550) 매수 수량 0주**: 3/26 발생. 고가 종목 매수 수량 산정 방어 필요.
+- **BUG: 일별 수집이 주간 선정 점수를 덮어씀**: database.py에서 selected=False 저장 시 기존 selected=1 행 UPDATE.
+- **WARNING: asyncio Event loop closed 에러**: 4/3 00:28 KST 09:28, httpx AsyncClient.aclose() → RuntimeError('Event loop is closed'). 텔레그램 notifier 관련 추정. 기능 영향 없으나 로그 오염.
+- **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError 계속 재현 (3/27, 3/30, 4/3).
+- **WARNING: predefined 테마 네이버 미발견 8개**: K-방산, 바이오, 로봇, 수소, 엔터테인먼트, 게임, 화장품, 철강 (4/3 기준). 화장품이 활성 테마인데 미발견 → 종목 수집 품질 저하 가능.
+- **WARNING: 오이솔루션 당일 매수→당일 손절**: 4/2 09:25 매수(43,200원) → 10:26 손절(-3.6%, 보유0일). 모닝 필터 통과 직후 급락. 매수 직후 보호 기간 검토 필요.
 - **INFO: Telegram unreachable from GCP VM**: Persistent since 03-04.
 - **INFO: Log file date uses UTC**: 08:00-08:59 KST logs → previous day's file.
-- **INFO: 비철금속 테마 통과율 연속 저조**: 3/26 0%, 3/27 0%, 3/30 5%(1/20). 방위산업도 3/30 0%(0/18).
-- **INFO: trade_reviews AI분석 미완료**: 3/23~3/24 매도 3건 ai_review=NULL. D+5가 비거래일(주말)과 겹쳐 데이터 수집 실패 가능.
+- **INFO: trade_reviews 오이솔루션 ai_review 미완료**: 4/2 매도, D+5 = 4/7(화)에 분석 예정.
 
 ## Scheduler (KST, CronTrigger timezone=Asia/Seoul, _skip_on_holiday)
 - 08:00 Theme rotation | 08:30 Theme analysis | 09:05 Screening | 09:15 Hold period sells | 09:25 Auto buy
@@ -64,8 +65,8 @@
 - Theme rotation: 7 days
 
 ## Recent Health Checks
-- **2026-03-30 10:22 KST (월)**: 전 서비스/스케줄 정상. Market Crisis Guard CRISIS 연속 발동(KOSPI -3.70%, KOSDAQ -3.07%). 포트폴리오 0종목(3/26 이후 4거래일 빈 상태). 스크리닝 75종목 중 7통과(9.3%), AI 1통과(현대모비스 7.0/Yes). position_state 잔존 데이터 발견. 디스크 69%. 누적 P&L +185,881원(+4.22%), 승률 69.4%.
-- **2026-03-27 10:28 KST (금)**: Market Crisis Guard CRISIS(KOSPI -3.68%, KOSDAQ -2.17%). 매수 스킵. 스크리닝 76종목 중 11통과. LIG넥스원 0주 매수 에러.
-- **2026-03-17 19:30 KST (Phase 2.5 점검)**: AI감성분석 정상. 덮어쓰기 버그 재발.
-- **2026-03-16 10:01 KST**: Mon. 5 holdings. 전 스케줄 정상.
-- **2026-03-04 15:36 KST**: Tue. ALL 4 stopped out. P&L: -350K.
+- **2026-04-05 20:47 KST (일)**: 전 서비스 정상 가동(4일째). 포트폴리오 2종목(클래시스 -0.94%, 삼성SDI -3.72%). 4/3 MarketGuard NORMAL(KOSPI +2.56%). 주중 교체 정상 발동(오가노이드→건설). position_state HJ중공업 잔존 재확인. asyncio 에러 1건(비치명적). 디스크 69%. 누적 P&L +167,031원(+3.26%), 승률 67.6%.
+- **2026-03-30 10:22 KST (월)**: Market Crisis Guard CRISIS 연속. 포트폴리오 0종목. 누적 +185,881원(+4.22%), 승률 69.4%.
+- **2026-03-27 10:28 KST (금)**: CRISIS(KOSPI -3.68%). 매수 스킵.
+- **2026-03-17 19:30 KST**: Phase 2.5 점검. AI감성분석 정상.
+- **2026-03-16 10:01 KST**: 5 holdings. 전 스케줄 정상.

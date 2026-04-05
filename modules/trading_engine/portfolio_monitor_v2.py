@@ -201,6 +201,10 @@ class PortfolioMonitorV2:
         self.stop_loss = settings.DEFAULT_STOP_LOSS
         self.stop_loss_fast = settings.STOP_LOSS_FAST
 
+        # 손절 보호기간 (Grace Period)
+        self.grace_period_days = getattr(settings, 'GRACE_PERIOD_DAYS', 1)
+        self.grace_period_stop_loss = getattr(settings, 'GRACE_PERIOD_STOP_LOSS', -0.08)
+
         # 보유 기간
         self.max_hold_days_profit = settings.MAX_HOLD_DAYS_PROFIT
         self.max_hold_days_loss = settings.MAX_HOLD_DAYS_LOSS
@@ -807,6 +811,9 @@ class PortfolioMonitorV2:
         """
         손절 조건 체크 (트레일링 활성 시 트레일링 스탑에서 처리)
 
+        보호기간(Grace Period): 매수 후 GRACE_PERIOD_DAYS 이내에는
+        넓은 손절선(-8%)을 적용하여 장중 노이즈에 의한 조기 손절을 방지.
+
         Args:
             pos: 포지션
 
@@ -817,6 +824,19 @@ class PortfolioMonitorV2:
         # _check_trailing_stop에서 처리하도록 양보
         if pos.trailing_active and pos.trailing_stop is not None:
             return False
+
+        # 보호기간: hold_days <= GRACE_PERIOD_DAYS이면 넓은 손절선 적용
+        if pos.hold_days <= self.grace_period_days:
+            grace_stop_price = pos.buy_price * (1 + self.grace_period_stop_loss)
+            if pos.current_price <= grace_stop_price:
+                logger.info(
+                    f"   ⚠️ 보호기간 비상 손절: {pos.stock_name} "
+                    f"현재가 {pos.current_price:,} <= 보호손절가 {grace_stop_price:,.0f} "
+                    f"(보유 {pos.hold_days}일, 기준 {self.grace_period_stop_loss:.0%})"
+                )
+                return True
+            return False
+
         return pos.current_price <= pos.stop_loss_price
     
     async def _execute_stop_loss(self, pos: Position) -> None:

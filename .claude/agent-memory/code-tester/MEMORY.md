@@ -193,13 +193,20 @@
 - config.py Field 패턴: 기존과 100% 일관적 (default + description 모두 있음)
 - 텔레그램 pr_str 포맷: `f' 통과율{pr:.0%}'`, pr=None 방어 있음 → 메시지 깨짐 없음
 
+### grace period + 분산 필터 (2026-04-05 검증)
+- `GRACE_PERIOD_DAYS=1` 실질 적용: hold_days<=1 조건으로 당일(0) + 익일(1) = 실질 2거래일 보호
+  → "N영업일 보호"를 의도하면 `hold_days < N`으로 변경 필요 (현재 <= 사용)
+- `_slot_excluded = all_ai_candidates[len(diversified_candidates):]` 계산 오류:
+  → 분산 제한으로 제외된 종목은 _slot_excluded에 포함 안 됨 (탈락 사유 보고에서 누락)
+  → 분산 통과했지만 슬롯 부족 종목이 _slot_excluded에 들어감 (정상 케이스)
+  → 기능상 영향: 탈락 보고서에서 분산제한 종목이 "슬롯 부족" 오기입될 수 있음
+- `theme=''` 빈문자열 종목: 테마 카운트 `theme_counts['']` 로 집계됨 — 의도치 않은 동시 집계 가능성
+- `theme_to_category`에 없는 테마: 기타 폴백 정상 동작 확인
+- trailing_active=True + trailing_stop=None: 재시작 DB 복원 시 이론상 가능, 실질 영향 없음
+  (트레일링 진입 = +8% 이상이므로 grace period 내 발생 가능성 극히 낮음)
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`
 - 대시보드 상세: `dashboard-review.md`
 - screener 폴백 상세: `screener-review.md`
-
-### 검증 방법
-- `py_compile` 구문 검사 후 런타임 import 테스트
-- DB 작업: tempfile sqlite3 격리 테스트
-- WAL 모드 DB 복사: `.db`, `.db-wal`, `.db-shm` 3파일 항상 확인

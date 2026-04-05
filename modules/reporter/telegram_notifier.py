@@ -679,7 +679,8 @@ class TelegramNotifier:
         offset = 0
         logger.info("📱 텔레그램 명령어 리스너 시작")
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+        try:
             while self._listening:
                 try:
                     url = f"{self.base_url}/getUpdates"
@@ -760,6 +761,11 @@ class TelegramNotifier:
                 except Exception as e:
                     logger.error(f"명령어 리스너 오류: {e}")
                     await asyncio.sleep(5)
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
         logger.info("📱 텔레그램 명령어 리스너 종료")
 

@@ -1152,14 +1152,60 @@ class TradingSystem:
             self._send_buy_summary(current_holdings, [], 0)
             return {"success": True, "held": held_count, "bought": 0}
 
+        # Phase 5.5: 테마/섹터 분산 제한
+        # 테마명 → 카테고리(섹터) 매핑 구축
+        theme_to_category = {}
+        for t in self.today_themes:
+            t_name = t.get("theme", t.get("name", ""))
+            t_cat = t.get("category", "기타")
+            if t_name:
+                theme_to_category[t_name] = t_cat
+
+        # 기존 보유 종목의 테마/섹터별 카운트
+        theme_counts = {}
+        sector_counts = {}
+        for h in current_holdings:
+            h_theme = h.get("theme", "")
+            if h_theme:
+                theme_counts[h_theme] = theme_counts.get(h_theme, 0) + 1
+                h_sector = theme_to_category.get(h_theme, "기타")
+                sector_counts[h_sector] = sector_counts.get(h_sector, 0) + 1
+
         # Phase 6: 포트폴리오 최적화 (슬롯 비례 자본 배분)
         filtered_codes = {c['stock_code'] for c in filtered_new}
         all_ai_candidates = [
             s for s in self.today_ai_analysis
             if s['code'] in filtered_codes
         ]
-        new_ai_stocks = all_ai_candidates[:available_slots]
-        self._slot_excluded = all_ai_candidates[available_slots:]
+
+        # 테마/섹터 분산 필터 적용
+        max_per_theme = settings.MAX_STOCKS_PER_THEME
+        max_per_sector = settings.MAX_STOCKS_PER_SECTOR
+        diversified_candidates = []
+        for stock in all_ai_candidates:
+            s_theme = stock.get("theme", "")
+            s_sector = theme_to_category.get(s_theme, "기타")
+
+            # 테마 분산 제한 (빈 테마는 제한 미적용)
+            if s_theme:
+                t_count = theme_counts.get(s_theme, 0)
+                if t_count >= max_per_theme:
+                    logger.info(f"   테마 분산 제한: {stock.get('name')} ({s_theme}) 제외 — 테마 {t_count}/{max_per_theme}")
+                    continue
+
+            # 섹터 분산 제한
+            s_count = sector_counts.get(s_sector, 0)
+            if s_count >= max_per_sector:
+                logger.info(f"   섹터 분산 제한: {stock.get('name')} ({s_sector}) 제외 — 섹터 {s_count}/{max_per_sector}")
+                continue
+
+            diversified_candidates.append(stock)
+            if s_theme:
+                theme_counts[s_theme] = theme_counts.get(s_theme, 0) + 1
+            sector_counts[s_sector] = s_count + 1
+
+        new_ai_stocks = diversified_candidates[:available_slots]
+        self._slot_excluded = diversified_candidates[available_slots:]
 
         if new_ai_stocks:
             # 가용현금 기반 슬롯 배분 (수익 재투자 반영)
@@ -1783,6 +1829,26 @@ class TradingSystem:
             "category": replacement.get("category", "기타"),
             "url": replacement.get("url", ""),
         })
+
+        # DB themes 테이블에 교체 테마 selected=1 마킹
+        try:
+            self.db.save_theme_scores(
+                [{
+                    "theme": replacement["theme_name"],
+                    "score": replacement["score"],
+                    "momentum": replacement.get("momentum", 0),
+                    "supply_ratio": replacement.get("supply_ratio", 0),
+                    "news_count": replacement.get("news_count", 0),
+                    "ai_sentiment": replacement.get("ai_sentiment", 0),
+                    "category": replacement.get("category", "기타"),
+                    "url": replacement.get("url", ""),
+                }],
+                target_date=today,
+                selected=True,
+            )
+            logger.info(f"      ✅ DB themes 테이블에 {replacement['theme_name']} selected=1 마킹 완료")
+        except Exception as e:
+            logger.warning(f"      ⚠️ DB selected 마킹 실패 (기능 영향 없음): {e}")
 
         # 탈락 테마 보유 종목 분류 (수익/손실)
         holdings = self.db.get_portfolio(status='holding')
