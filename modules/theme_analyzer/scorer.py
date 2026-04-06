@@ -491,9 +491,9 @@ def _calculate_theme_momentum(theme: dict, kis) -> float:
 def calculate_liquidity_penalty(
     theme_name: str,
     pass_rates: dict,
-    min_pass_rate: float = 0.10,
-    low_pass_rate: float = 0.20,
-    penalty_max: float = 8.0,
+    min_pass_rate: float = 0.15,
+    low_pass_rate: float = 0.25,
+    penalty_max: float = 12.0,
     min_data_days: int = 3
 ) -> tuple[float, str]:
     """
@@ -514,9 +514,10 @@ def calculate_liquidity_penalty(
     """
     data = pass_rates.get(theme_name)
 
-    # 히스토리 없음 또는 데이터 부족 → 판단 보류
+    # 히스토리 없음 또는 데이터 부족 → 비례 기본 감점
     if not data or data.get("days_data", 0) < min_data_days:
-        return 0.0, ""
+        default_penalty = -round(penalty_max * 0.25, 1)
+        return default_penalty, "신규테마(데이터부족)"
 
     pass_rate = data.get("pass_rate", 0.0)
 
@@ -543,7 +544,7 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
     """
     여러 테마에 대해 점수 일괄 계산
 
-    배점: 모멘텀(25) + 과열(0~-15) + 뉴스(15) + AI감성(10) + 종목수(5) + 기본(10) + 유동성(0~-8) = 최대 65점
+    배점: 모멘텀(25) + 과열(0~-15) + 뉴스(15) + AI감성(10) + 종목수(5) + 기본(10) + 유동성(0~-12) = 최대 65점
     과열 감점: 5일 수익률 +8% 이상 시 감점 시작, 급등 테마 고점매수 방지.
     유동성 감점: screening_log 통과율이 낮은 테마에 감점 (소형주 테마 방지).
     뉴스/AI는 include_news/include_ai 플래그로 활성화 (17:00 일별 수집 시).

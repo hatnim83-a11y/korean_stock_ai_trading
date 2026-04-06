@@ -178,28 +178,31 @@
   → 단 교체 테마가 same_week 로직(days_since_rotation < 7)으로 "기존 유지" 경로로 진입 — 정상
 - **RETENTION_SCORE 수정**: selector.py:46 현재 48.0, MEMORY의 38.0 오기 수정됨
 
-### 테마 유동성 사전 검증 (2026-03-26 검증)
+### 테마 유동성 사전 검증 (2026-03-26 검증, 2026-04-06 파라미터 강화 업데이트)
 - 수정 파일: config.py(설정 6개), database.py(get_theme_pass_rates), scorer.py(calculate_liquidity_penalty), main.py
 - `calculate_liquidity_penalty(theme, None)` → `AttributeError` (pass_rates에 None 방어 없음)
   → 실제 호출 경로 분석: `if pass_rates:` 가드로 보호됨 (score_themes line 606, main.py line 455)
   → 타입 힌트가 `dict = None`으로 None 허용처럼 보이나 실제 None 전달 시 크래시
-- `MAX_LIQUIDITY_PENALTY = -8.0` 선언됐으나 calculate_liquidity_penalty 내에서 미사용 (dead constant)
-  → calculate_overheat_penalty의 `max(MAX_OVERHEAT_PENALTY, penalty)` 패턴과 비일관적
+- `calculate_liquidity_penalty` 함수 기본값: 구버전(0.10/0.20/8.0) 그대로 유지
+  → 모든 실제 호출은 settings.* keyword로 전달하므로 기능 무관, but 기본값과 config 불일치 상태
 - `date('now', ? || ' days')` 파라미터: `str(-7) = '-7'` → `-7 days` 정상 작동 확인
 - UTC date() 사용: 08:30 KST 실행 시 UTC는 전날 23:30 → date('now') = KST 어제 → 7일치 요청 시 8일치 반환
   → 영향 없음 (더 많은 데이터 포함 = 안전 방향)
-- 17:05 run_daily_theme_collection: pass_rates 미전달 의도적 (DB에 raw 점수 저장, 이중 감점 방지)
-- `from config import settings` 지연 import (scorer.py line 607): 순환 없음, 최상단으로 이동 권장
+- 17:05 run_daily_theme_collection: pass_rates 전달됨 (2026-04-06 변경) → 17:05 수집에도 유동성 감점 적용
 - config.py Field 패턴: 기존과 100% 일관적 (default + description 모두 있음)
 - 텔레그램 pr_str 포맷: `f' 통과율{pr:.0%}'`, pr=None 방어 있음 → 메시지 깨짐 없음
+- **2026-04-06 변경**: MIN_PASS_RATE 0.10→0.15, LOW_PASS_RATE 0.20→0.25, PENALTY_MAX 8.0→12.0
+  - 신규 테마 기본 감점: 0 → -3.0점 (penalty_max * 0.25)
+  - asyncio.to_thread(score_themes, ..., pass_rates) positional 매핑 정상 확인
+  - calculate_liquidity_penalty 기본값은 구버전 유지 (실제 호출 모두 keyword 전달로 안전)
 
 ### grace period + 분산 필터 (2026-04-05 검증)
 - `GRACE_PERIOD_DAYS=1` 실질 적용: hold_days<=1 조건으로 당일(0) + 익일(1) = 실질 2거래일 보호
   → "N영업일 보호"를 의도하면 `hold_days < N`으로 변경 필요 (현재 <= 사용)
-- `_slot_excluded = all_ai_candidates[len(diversified_candidates):]` 계산 오류:
-  → 분산 제한으로 제외된 종목은 _slot_excluded에 포함 안 됨 (탈락 사유 보고에서 누락)
-  → 분산 통과했지만 슬롯 부족 종목이 _slot_excluded에 들어감 (정상 케이스)
-  → 기능상 영향: 탈락 보고서에서 분산제한 종목이 "슬롯 부족" 오기입될 수 있음
+- `_slot_excluded = all_ai_candidates[len(diversified_candidates):]` 계산 오류: **2026-04-06 수정 완료**
+  → `_diversity_excluded` 리스트 추가로 분산제한 종목 별도 수집 — 탈락 보고서 정확도 개선
+  → `_slot_excluded = diversified_candidates[available_slots:]` 로 슬롯부족만 담음 (정상)
+  → excluded_lines 순서: 1) 보유중복 2) 모닝필터 3) 분산제한 4) 슬롯부족
 - `theme=''` 빈문자열 종목: 테마 카운트 `theme_counts['']` 로 집계됨 — 의도치 않은 동시 집계 가능성
 - `theme_to_category`에 없는 테마: 기타 폴백 정상 동작 확인
 - trailing_active=True + trailing_stop=None: 재시작 DB 복원 시 이론상 가능, 실질 영향 없음

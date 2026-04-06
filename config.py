@@ -438,16 +438,16 @@ class Settings(BaseSettings):
         description="테마 선정 시 종목 유동성(스크리닝 통과율) 사전 검증 ON/OFF"
     )
     THEME_MIN_PASS_RATE: float = Field(
-        default=0.10,
-        description="최소 통과율 — 이하면 최대 감점 (10%)"
+        default=0.15,
+        description="최소 통과율 — 이하면 최대 감점 (15%)"
     )
     THEME_LOW_PASS_RATE: float = Field(
-        default=0.20,
-        description="저유동성 기준 — 이하면 비례 감점 (20%)"
+        default=0.25,
+        description="저유동성 기준 — 이하면 비례 감점 (25%)"
     )
     THEME_PASS_RATE_PENALTY_MAX: float = Field(
-        default=8.0,
-        description="통과율 저조 시 최대 감점"
+        default=12.0,
+        description="통과율 저조 시 최대 감점 (-12점)"
     )
     THEME_PASS_RATE_LOOKBACK_DAYS: int = Field(
         default=7,

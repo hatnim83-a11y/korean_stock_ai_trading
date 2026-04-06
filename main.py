@@ -1062,6 +1062,7 @@ class TradingSystem:
         # 매수 요약용 상태 초기화 (이전 날 데이터 누출 방지)
         self._held_excluded = []
         self._morning_excluded = []
+        self._diversity_excluded = []
         self._slot_excluded = []
         self._buy_skip_reason = ''
 
@@ -1191,12 +1192,14 @@ class TradingSystem:
                 t_count = theme_counts.get(s_theme, 0)
                 if t_count >= max_per_theme:
                     logger.info(f"   테마 분산 제한: {stock.get('name')} ({s_theme}) 제외 — 테마 {t_count}/{max_per_theme}")
+                    self._diversity_excluded.append({**stock, '_reason': f"테마 분산 ({s_theme} {t_count}/{max_per_theme})"})
                     continue
 
             # 섹터 분산 제한
             s_count = sector_counts.get(s_sector, 0)
             if s_count >= max_per_sector:
                 logger.info(f"   섹터 분산 제한: {stock.get('name')} ({s_sector}) 제외 — 섹터 {s_count}/{max_per_sector}")
+                self._diversity_excluded.append({**stock, '_reason': f"섹터 분산 ({s_sector} {s_count}/{max_per_sector})"})
                 continue
 
             diversified_candidates.append(stock)
@@ -1306,7 +1309,13 @@ class TradingSystem:
                 reason = f"갭 {gap:+.1f}%" if gap else "모닝필터"
             excluded_lines.append(f"  - {name} — {reason}")
 
-        # 3) 슬롯 부족
+        # 3) 테마/섹터 분산 제외
+        for s in getattr(self, '_diversity_excluded', []):
+            name = s.get('name', s.get('stock_name', s.get('code', '?')))
+            reason = s.get('_reason', '분산 제한')
+            excluded_lines.append(f"  - {name} — {reason}")
+
+        # 4) 슬롯 부족
         for s in getattr(self, '_slot_excluded', []):
             name = s.get('name', s.get('stock_name', s.get('code', '?')))
             excluded_lines.append(f"  - {name} — 슬롯 부족")
@@ -1435,7 +1444,7 @@ class TradingSystem:
         logger.info("=" * 70)
         logger.info("📊 실시간 모니터링 V2 시작")
         logger.info(f"   - 분할 익절: +{settings.TAKE_PROFIT_1:.0%}/+{settings.TAKE_PROFIT_2:.0%}/+{settings.TAKE_PROFIT_3:.0%}")
-        logger.info(f"   - 트레일링 스탑: 최고가 -{settings.TRAILING_STOP_PERCENT:.0%}")
+        logger.info(f"   - 트레일링 스탑: L1 -{settings.TRAIL_LEVEL1_PCT:.0%} / L2 -{settings.TRAIL_LEVEL2_PCT:.0%} / L3 -{settings.TRAIL_LEVEL3_PCT:.0%}")
         logger.info(f"   - 보유 기간: 수익 {settings.MAX_HOLD_DAYS_PROFIT}일, 손실 {settings.MAX_HOLD_DAYS_LOSS}일")
         logger.info("=" * 70)
         
@@ -2532,9 +2541,16 @@ class TradingSystem:
             raw_themes = await asyncio.to_thread(crawl_all_themes)
             logger.info(f"   크롤링된 테마: {len(raw_themes)}개")
 
-            # 2. 점수화 (모멘텀 + 뉴스 + AI 감성)
+            # 2. 유동성 통과율 조회 + 점수화 (모멘텀 + 뉴스 + 유동성 감점)
+            pass_rates = {}
+            if settings.THEME_LIQUIDITY_CHECK_ENABLED:
+                try:
+                    pass_rates = self.db.get_theme_pass_rates(settings.THEME_PASS_RATE_LOOKBACK_DAYS)
+                except Exception as e:
+                    logger.warning(f"   유동성 통과율 조회 실패 (무시): {e}")
+
             scored_themes = await asyncio.to_thread(
-                score_themes, raw_themes[:30], True, False  # include_news=True, include_ai=False (비용 절감)
+                score_themes, raw_themes[:30], True, False, pass_rates  # include_news=True, include_ai=False + 유동성
             )
             logger.info(f"   점수화 완료: {len(scored_themes)}개 테마")
 
@@ -2561,7 +2577,8 @@ class TradingSystem:
                                 + theme.get("news_score", 0)
                                 + theme["ai_score"]
                                 + theme.get("bonus_score", 0)
-                                + BASE_SCORE, 2
+                                + BASE_SCORE
+                                + theme.get("liquidity_penalty", 0), 2
                             )
                             theme["score"] = theme["total_score"]
                     # 재정렬

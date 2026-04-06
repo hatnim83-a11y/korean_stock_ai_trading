@@ -40,7 +40,7 @@ from config import now_kst
 # ===== 스크리닝 상수 =====
 MAX_STOCKS_PER_THEME = 10  # 테마당 최대 선정 종목 수
 MAX_TOTAL_CANDIDATES = 30  # 전체 최대 후보 종목 수
-MIN_FINAL_SCORE = 50.0  # 최소 최종 점수
+MIN_FINAL_SCORE = 45.0  # 최소 최종 점수 (50→45 완화, 경계선 종목 AI 검증 기회 부여)
 
 # 테마명 → 네이버 업종명 매핑 (테마 페이지에 없는 경우 업종 폴백용)
 _THEME_TO_UPJONG_ALIAS = {
