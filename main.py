@@ -1212,10 +1212,12 @@ class TradingSystem:
 
         if new_ai_stocks:
             # 가용현금 기반 슬롯 배분 (수익 재투자 반영)
-            per_slot_capital = available_cash // available_slots
+            # 종목당 상한: 총자본 균등배분 (빈 슬롯 적을 때 몰빵 방지)
+            max_per_stock = settings.TOTAL_CAPITAL // settings.MAX_POSITIONS
+            per_slot_capital = min(available_cash // available_slots, max_per_stock)
             target_capital = per_slot_capital * len(new_ai_stocks)
             capital_for_new = min(target_capital, available_cash)
-            logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 = {target_capital:,.0f}원 (가용현금÷빈슬롯)")
+            logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 (상한: {max_per_stock:,.0f}원)")
             logger.info(f"   실제 배분: {capital_for_new:,.0f}원 (가용: {available_cash:,.0f}원)")
 
             optimization_result = await asyncio.to_thread(
