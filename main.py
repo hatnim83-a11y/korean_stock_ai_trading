@@ -1061,6 +1061,7 @@ class TradingSystem:
 
         # 매수 요약용 상태 초기화 (이전 날 데이터 누출 방지)
         self._held_excluded = []
+        self._today_sold_excluded = []
         self._morning_excluded = []
         self._diversity_excluded = []
         self._slot_excluded = []
@@ -1128,10 +1129,15 @@ class TradingSystem:
             self._send_buy_summary(current_holdings, [], 0)
             return {"success": True, "held": held_count, "bought": 0}
 
-        # Phase 5: 신규 후보 필터링 (보유 종목 제외)
+        # Phase 5: 신규 후보 필터링 (보유 종목 + 당일 매도 종목 제외)
+        today_sold_codes = {t['stock_code'] for t in self.today_trades if t.get('action') == 'sell'}
+        exclude_codes = held_codes | today_sold_codes
         self._held_excluded = [c for c in self.today_candidates if c['stock_code'] in held_codes]
-        new_candidates = [c for c in self.today_candidates if c['stock_code'] not in held_codes]
+        self._today_sold_excluded = [c for c in self.today_candidates if c['stock_code'] in today_sold_codes and c['stock_code'] not in held_codes]
+        new_candidates = [c for c in self.today_candidates if c['stock_code'] not in exclude_codes]
         logger.info(f"   신규 후보 (보유 제외): {len(new_candidates)}개")
+        if today_sold_codes:
+            logger.info(f"   당일 매도 제외: {[c['stock_name'] for c in self._today_sold_excluded]}")
 
         # 모닝 필터 적용
         self._morning_excluded = []
@@ -1301,6 +1307,11 @@ class TradingSystem:
         for s in getattr(self, '_held_excluded', []):
             name = s.get('stock_name', s.get('name', s.get('stock_code', '?')))
             excluded_lines.append(f"  - {name} — 보유 중복")
+
+        # 1-1) 당일 매도 제외
+        for s in getattr(self, '_today_sold_excluded', []):
+            name = s.get('stock_name', s.get('name', s.get('stock_code', '?')))
+            excluded_lines.append(f"  - {name} — 당일 매도")
 
         # 2) 모닝필터 제외 (갭/수급/거래량/체결강도/트렌드)
         for s in getattr(self, '_morning_excluded', []):
