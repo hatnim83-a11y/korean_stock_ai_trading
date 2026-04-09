@@ -651,7 +651,7 @@ async function loadPortfolio() {
       <td>${fmt(h.eval_amount)}원</td>
       <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
       <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
-      <td>${h.hold_days}일</td>
+      <td>${h.hold_days}일<span style="color:var(--text-tertiary);font-size:0.72rem">(${h.hold_trading_days})</span></td>
       <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
     </tr>`).join('');
   }
@@ -958,7 +958,7 @@ function updatePortfolioTable(d) {
     <td>${fmt(h.eval_amount)}원</td>
     <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
     <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
-    <td>${h.hold_days}일</td>
+    <td>${h.hold_days}일<span style="color:var(--text-tertiary);font-size:0.72rem">(${h.hold_trading_days})</span></td>
     <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
   </tr>`).join('');
 }

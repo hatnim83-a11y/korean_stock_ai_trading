@@ -1856,6 +1856,14 @@ class TradingSystem:
                 selected=True,
             )
             logger.info(f"      ✅ DB themes 테이블에 {replacement['theme_name']} selected=1 마킹 완료")
+
+            # 탈락 테마 selected=0 마킹 (대시보드 표시용)
+            with self.db.get_cursor() as cursor:
+                cursor.execute(
+                    "UPDATE themes SET selected = 0 WHERE theme_name = ? AND selected = 1",
+                    (dropped_name,)
+                )
+            logger.info(f"      ✅ DB themes 테이블에서 {dropped_name} selected=0 마킹 완료")
         except Exception as e:
             logger.warning(f"      ⚠️ DB selected 마킹 실패 (기능 영향 없음): {e}")
 
@@ -2029,7 +2037,7 @@ class TradingSystem:
 
                 logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
 
-                # DB 기록 (profit_rate는 소수 형태로 저장 — 기존 패턴 일치)
+                # DB 기록 (profit_rate는 퍼센트 형태로 저장 — portfolio_monitor_v2와 일치)
                 reason = SellReason.MAX_HOLD_DAYS.value
                 self.db.close_position(stock_code, reason)
                 self.db.save_trade({
@@ -2040,7 +2048,7 @@ class TradingSystem:
                     "price": filled_price,
                     "amount": (filled_price or 0) * quantity,
                     "reason": reason,
-                    "profit_rate": actual_profit_rate,
+                    "profit_rate": actual_profit_rate * 100,
                     "profit_amount": actual_profit_amount,
                     "buy_price": buy_price,
                     "filled_price": filled_price,
@@ -2144,7 +2152,7 @@ class TradingSystem:
                     "price": filled_price,
                     "amount": (filled_price or 0) * quantity,
                     "reason": reason,
-                    "profit_rate": order.get("profit_rate", 0),
+                    "profit_rate": order.get("profit_rate", 0) * 100,
                     "profit_amount": order.get("profit_amount", 0),
                     "buy_price": order.get("buy_price", 0),
                     "filled_price": filled_price,
@@ -2227,7 +2235,7 @@ class TradingSystem:
                     "price": filled_price,
                     "amount": (filled_price or 0) * quantity,
                     "reason": reason,
-                    "profit_rate": order.get("profit_rate", 0),
+                    "profit_rate": order.get("profit_rate", 0) * 100,
                     "profit_amount": order.get("profit_amount", 0),
                     "buy_price": order.get("buy_price", 0),
                     "filled_price": filled_price,

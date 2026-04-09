@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from logger import logger
-from config import settings, now_kst, validate_stock_code, KST
+from config import settings, now_kst, validate_stock_code, KST, count_trading_days
 from database import Database
 from modules.reporter.performance_calculator import PerformanceCalculator
 
@@ -138,6 +138,7 @@ async def get_portfolio_data() -> dict:
             "profit_rate": round(profit_rate, 2),
             "buy_date": h.get("date", ""),
             "hold_days": _calc_hold_days(h.get("date")),
+            "hold_trading_days": _calc_hold_trading_days(h.get("date")),
             "trailing_level": ts.get("trailing_level", 0),
             "trailing_stop_price": ts.get("trailing_stop_price"),
             "highest_price": ts.get("highest_price"),
@@ -171,6 +172,16 @@ def _calc_hold_days(date_str) -> int:
     try:
         buy_date = datetime.strptime(str(date_str), "%Y-%m-%d")
         return (now_kst().replace(tzinfo=None) - buy_date).days
+    except Exception:
+        return 0
+
+
+def _calc_hold_trading_days(date_str) -> int:
+    if not date_str:
+        return 0
+    try:
+        buy_date = datetime.strptime(str(date_str), "%Y-%m-%d").date()
+        return count_trading_days(buy_date)
     except Exception:
         return 0
 
@@ -303,12 +314,24 @@ async def get_themes_data(days: int = 30) -> dict:
         )
         all_themes = [dict(r) for r in cursor.fetchall()]
 
-    # selected=1: 최신 날짜의 선정 테마
+    # selected=1: 현재 로테이션 기간의 선정 테마 (주간 선정 + 주중 교체 포함)
     selected_themes = []
     all_selected = [t for t in all_themes if t.get("selected") == 1]
     if all_selected:
-        latest_selected_date = all_selected[0]["date"]  # DESC 정렬
-        selected_themes = [dict(t) for t in all_selected if t["date"] == latest_selected_date]
+        # 주간 선정 날짜 찾기: selected 테마가 2개 이상인 가장 최근 날짜
+        from collections import Counter
+        date_counts = Counter(t["date"] for t in all_selected)
+        weekly_dates = [d for d, c in date_counts.items() if c >= 2]
+        weekly_date = max(weekly_dates) if weekly_dates else all_selected[0]["date"]
+        # 주간 선정 날짜 이후의 모든 선정 테마 (주중 교체 포함)
+        recent_selected = [dict(t) for t in all_selected if t["date"] >= weekly_date]
+        # 테마명별 최신 레코드만 유지 (DESC 정렬이므로 첫 번째가 최신)
+        seen = {}
+        for t in recent_selected:
+            name = t["theme_name"]
+            if name not in seen:
+                seen[name] = t
+        selected_themes = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
 
     # candidate: 최신 날짜의 미선정 테마 (selected=0)
     candidate_themes = []
