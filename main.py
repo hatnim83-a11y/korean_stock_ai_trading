@@ -419,6 +419,25 @@ class TradingSystem:
                     + f"\n\n📅 다음 재평가: {next_review.strftime('%m/%d')} (화) ({days_until_tuesday}일 후)"
                 )
 
+                # 서비스 재시작 시 테마 복원을 위해 당일 날짜로 DB 저장
+                try:
+                    themes_to_save = [
+                        {
+                            "theme": t.get("theme", t.get("name", "")),
+                            "score": t.get("score", 0),
+                            "momentum": t.get("momentum", 0),
+                            "supply_ratio": t.get("supply_ratio", 0),
+                            "news_count": t.get("news_count", 0),
+                            "ai_sentiment": t.get("ai_sentiment", 0),
+                            "category": t.get("category", "기타"),
+                            "url": t.get("url", ""),
+                        }
+                        for t in self.today_themes
+                    ]
+                    self.db.save_theme_scores(themes_to_save, today, selected=True)
+                except Exception as e:
+                    logger.warning(f"   ⚠️ 테마 DB 동기화 실패 (기능 영향 없음): {e}")
+
                 return {"success": True, "themes": len(self.today_themes), "reused": True}
 
         start_time = now_kst()
@@ -1852,31 +1871,31 @@ class TradingSystem:
             "url": replacement.get("url", ""),
         })
 
-        # DB themes 테이블에 교체 테마 selected=1 마킹
+        # DB themes 테이블에 전체 활성 테마 selected=1 마킹 (교체 결과 반영)
         try:
-            self.db.save_theme_scores(
-                [{
-                    "theme": replacement["theme_name"],
-                    "score": replacement["score"],
-                    "momentum": replacement.get("momentum", 0),
-                    "supply_ratio": replacement.get("supply_ratio", 0),
-                    "news_count": replacement.get("news_count", 0),
-                    "ai_sentiment": replacement.get("ai_sentiment", 0),
-                    "category": replacement.get("category", "기타"),
-                    "url": replacement.get("url", ""),
-                }],
-                target_date=today,
-                selected=True,
-            )
-            logger.info(f"      ✅ DB themes 테이블에 {replacement['theme_name']} selected=1 마킹 완료")
+            all_active = [
+                {
+                    "theme": t.get("theme", t.get("name", "")),
+                    "score": t.get("score", 0),
+                    "momentum": t.get("momentum", 0),
+                    "supply_ratio": t.get("supply_ratio", 0),
+                    "news_count": t.get("news_count", 0),
+                    "ai_sentiment": t.get("ai_sentiment", 0),
+                    "category": t.get("category", "기타"),
+                    "url": t.get("url", ""),
+                }
+                for t in self.today_themes
+            ]
+            self.db.save_theme_scores(all_active, target_date=today, selected=True)
+            logger.info(f"      ✅ DB themes 테이블에 전체 활성 테마 {len(all_active)}개 selected=1 마킹 완료")
 
-            # 탈락 테마 selected=0 마킹 (대시보드 표시용)
+            # 탈락 테마 이전 날짜 selected=0 마킹 (대시보드 표시용)
             with self.db.get_cursor() as cursor:
                 cursor.execute(
-                    "UPDATE themes SET selected = 0 WHERE theme_name = ? AND selected = 1",
-                    (dropped_name,)
+                    "UPDATE themes SET selected = 0 WHERE theme_name = ? AND date != ? AND selected = 1",
+                    (dropped_name, today)
                 )
-            logger.info(f"      ✅ DB themes 테이블에서 {dropped_name} selected=0 마킹 완료")
+            logger.info(f"      ✅ DB themes 테이블에서 {dropped_name} 이전 날짜 selected=0 마킹 완료")
         except Exception as e:
             logger.warning(f"      ⚠️ DB selected 마킹 실패 (기능 영향 없음): {e}")
 
