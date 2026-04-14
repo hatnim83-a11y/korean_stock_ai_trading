@@ -1127,20 +1127,26 @@ class TradingSystem:
             self._send_buy_summary(current_holdings, [], 0)
             return {"success": True, "held": held_count, "bought": 0}
 
-        # Phase 4: 현금 조회
+        # Phase 4: 현금 + 총자산 조회
         if self.test_mode:
             available_cash = settings.TOTAL_CAPITAL
+            total_capital = settings.TOTAL_CAPITAL
         else:
             available_cash = self.trading_engine.get_orderable_cash()
+            balance = self.trading_engine.get_balance()
             if available_cash <= 0:
-                balance = self.trading_engine.get_balance()
                 available_cash = balance.get("cash", 0)
-        # Market Guard 투자금 축소 적용
+            # 총자산: KIS 총평가액 (현금 + 보유 평가액 합산)
+            total_capital = balance.get("total_value", 0)
+            if total_capital <= 0:
+                # 폴백: 초기 자본 또는 가용현금 중 큰 값
+                total_capital = max(settings.TOTAL_CAPITAL, available_cash)
+        # Market Guard 투자금 축소 적용 (available_cash에만, total_capital은 객관 기준 유지)
         if cash_ratio < 1.0:
             available_cash = int(available_cash * cash_ratio)
             logger.info(f"   [MarketGuard] 투자금 {int(cash_ratio*100)}% 축소 적용")
 
-        logger.info(f"   가용 현금: {available_cash:,}원")
+        logger.info(f"   가용 현금: {available_cash:,}원 | 총자산: {total_capital:,}원")
 
         if available_cash < 100_000:
             logger.warning("   현금 부족 (<10만원) - 신규 매수 스킵")
@@ -1237,12 +1243,12 @@ class TradingSystem:
 
         if new_ai_stocks:
             # 가용현금 기반 슬롯 배분 (수익 재투자 반영)
-            # 종목당 상한: 총자본 균등배분 (빈 슬롯 적을 때 몰빵 방지)
-            max_per_stock = settings.TOTAL_CAPITAL // settings.MAX_POSITIONS
+            # 종목당 상한: 총자산 ÷ MAX_POSITIONS (동적 — 수익 누적 반영, 몰빵 방지)
+            max_per_stock = int(total_capital) // settings.MAX_POSITIONS
             per_slot_capital = min(available_cash // available_slots, max_per_stock)
             target_capital = per_slot_capital * len(new_ai_stocks)
             capital_for_new = min(target_capital, available_cash)
-            logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 (상한: {max_per_stock:,.0f}원)")
+            logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 (상한: {max_per_stock:,.0f}원, 총자산÷{settings.MAX_POSITIONS})")
             logger.info(f"   실제 배분: {capital_for_new:,.0f}원 (가용: {available_cash:,.0f}원)")
 
             optimization_result = await asyncio.to_thread(
