@@ -300,6 +300,19 @@ class Settings(BaseSettings):
         default=True,
         description="이익 추종 전략 활성화 (단계별 트레일링)"
     )
+    # ----- BE 손절 프리-트레일링 (+5~+8% 방어 공백 제거) -----
+    TRAIL_BE_ENABLED: bool = Field(
+        default=True,
+        description="BE 손절 프리-트레일링 활성화 (+5% 도달 시 매수가 -1% 손절로 상향)"
+    )
+    TRAIL_BE_ACTIVATE_PCT: float = Field(
+        default=0.05,
+        description="BE 손절 활성화 수익률 (기본 +5%)"
+    )
+    TRAIL_BE_STOP_PCT: float = Field(
+        default=-0.01,
+        description="BE 손절가 오프셋 (기본 매수가 -1%, 슬리피지 완충)"
+    )
     TRAIL_ACTIVATION_PCT: float = Field(
         default=0.08,
         description="트레일링 시작 수익률 (+8%)"

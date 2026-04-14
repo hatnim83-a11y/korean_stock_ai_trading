@@ -197,6 +197,32 @@ class PortfolioMonitorV2:
         self.trail_level3_threshold = getattr(settings, 'TRAIL_LEVEL3_THRESHOLD', 0.25)
         self.trail_level3_pct = getattr(settings, 'TRAIL_LEVEL3_PCT', 0.02)
 
+        # BE 손절 프리-트레일링 (+5% 도달 시 매수가 -1% 손절)
+        self.enable_be_stop = getattr(settings, 'TRAIL_BE_ENABLED', True)
+        self.trail_be_activate_pct = getattr(settings, 'TRAIL_BE_ACTIVATE_PCT', 0.05)
+        self.trail_be_stop_pct = getattr(settings, 'TRAIL_BE_STOP_PCT', -0.01)
+
+        # BE 설정값 방어 (설정 실수로 인한 대량 오청산 방지)
+        if self.enable_be_stop:
+            if self.trail_be_stop_pct >= 0:
+                logger.error(
+                    f"TRAIL_BE_STOP_PCT={self.trail_be_stop_pct}이 0 이상입니다. "
+                    f"양수이면 매수가 위로 손절가가 설정되어 즉시 청산 위험. BE 비활성화."
+                )
+                self.enable_be_stop = False
+            elif self.trail_be_activate_pct <= 0:
+                logger.error(
+                    f"TRAIL_BE_ACTIVATE_PCT={self.trail_be_activate_pct}이 0 이하입니다. "
+                    f"매수 즉시 BE 활성화됨. BE 비활성화."
+                )
+                self.enable_be_stop = False
+            elif self.trail_be_activate_pct >= self.trail_activation_pct:
+                logger.warning(
+                    f"TRAIL_BE_ACTIVATE_PCT({self.trail_be_activate_pct:.0%}) >= "
+                    f"TRAIL_ACTIVATION_PCT({self.trail_activation_pct:.0%}): "
+                    f"BE 활성화 즉시 L1이 덮어쓰므로 BE 효과 제한적"
+                )
+
         # 손절
         self.stop_loss = settings.DEFAULT_STOP_LOSS
         self.stop_loss_fast = settings.STOP_LOSS_FAST
@@ -408,6 +434,25 @@ class PortfolioMonitorV2:
                     f"(최고가 {pos.highest_price:,}원, 스탑 {stop_str}, "
                     f"현재가 {pos.current_price:,}원)"
                 )
+            else:
+                # BE only 상태 복원 (trailing_active=False지만 과거 +5% 이상 도달 이력 있음)
+                # → 재시작 후에도 BE 손절 유지
+                raw_rate = s.get("max_profit_rate", 0)
+                restored_rate = raw_rate if db_source else raw_rate / 100
+                if restored_rate > 0:
+                    pos.max_profit_rate = restored_rate
+                    saved_highest = s.get("highest_price", 0)
+                    if saved_highest > pos.highest_price:
+                        pos.highest_price = saved_highest
+                    # BE 손절가 즉시 재적용
+                    if self.enable_be_stop and pos.max_profit_rate >= self.trail_be_activate_pct:
+                        be_stop = pos.buy_price * (1 + self.trail_be_stop_pct)
+                        if pos.stop_loss_price < be_stop:
+                            pos.stop_loss_price = be_stop
+                            logger.info(
+                                f"   🛡️ BE 손절 복원: {pos.stock_name} "
+                                f"stop → {be_stop:,.0f}원 (max {pos.max_profit_rate:.1%})"
+                            )
 
         source_str = "DB" if db_source else "JSON"
         if restored:
@@ -826,13 +871,22 @@ class PortfolioMonitorV2:
             return False
 
         # 보호기간: hold_days <= GRACE_PERIOD_DAYS이면 넓은 손절선 적용
+        # 단 BE 활성화 후(+5% 도달 이력 있음)에는 BE 손절가가 우선
+        # — 당일 +5% 찍고 하락하는 케이스(오이솔루션 등)를 방어
         if pos.hold_days <= self.grace_period_days:
             grace_stop_price = pos.buy_price * (1 + self.grace_period_stop_loss)
-            if pos.current_price <= grace_stop_price:
+            be_active = (
+                self.enable_be_stop
+                and pos.max_profit_rate >= self.trail_be_activate_pct
+            )
+            # BE 활성 시 더 타이트한 BE 기준 적용, 아니면 넓은 grace 기준
+            effective_stop = max(grace_stop_price, pos.stop_loss_price) if be_active else grace_stop_price
+            if pos.current_price <= effective_stop:
+                label = "BE 손절" if be_active and effective_stop > grace_stop_price else "보호기간 비상 손절"
                 logger.info(
-                    f"   ⚠️ 보호기간 비상 손절: {pos.stock_name} "
-                    f"현재가 {pos.current_price:,} <= 보호손절가 {grace_stop_price:,.0f} "
-                    f"(보유 {pos.hold_days}일, 기준 {self.grace_period_stop_loss:.0%})"
+                    f"   ⚠️ {label}: {pos.stock_name} "
+                    f"현재가 {pos.current_price:,} <= 손절가 {effective_stop:,.0f} "
+                    f"(보유 {pos.hold_days}일)"
                 )
                 return True
             return False
@@ -1005,6 +1059,20 @@ class PortfolioMonitorV2:
         # 최대 수익률 기록
         if profit_rate > pos.max_profit_rate:
             pos.max_profit_rate = profit_rate
+
+        # ===== BE 손절 프리-트레일링 (+5% 도달 시 매수가 -1% 손절) =====
+        # max_profit_rate 기준 → +5% 터치 후 조정/재시작에도 유지됨
+        # L1(+8%) 활성화 시 stop_loss_price = buy_price(BE 0%)로 자연 상향 오버라이드
+        if self.enable_be_stop and pos.max_profit_rate >= self.trail_be_activate_pct:
+            be_stop = pos.buy_price * (1 + self.trail_be_stop_pct)
+            if pos.stop_loss_price < be_stop:
+                old_stop = pos.stop_loss_price
+                pos.stop_loss_price = be_stop
+                logger.info(
+                    f"🛡️ {pos.stock_name} BE 손절 활성화: "
+                    f"{old_stop:,.0f}원 → {be_stop:,.0f}원 "
+                    f"(매수가 {self.trail_be_stop_pct*100:+.1f}%)"
+                )
 
         # ===== 이익 추종 전략 (Let Profits Run) =====
         if self.enable_profit_trailing:
