@@ -173,6 +173,7 @@ class Database:
             (10, "themes에 category 컬럼 추가", self._migrate_v10),
             (11, "themes에 selected 컬럼 추가", self._migrate_v11),
             (12, "themes에 url 컬럼 추가", self._migrate_v12),
+            (13, "themes 산업재→금융 재분류", self._migrate_v13),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -416,6 +417,40 @@ class Database:
                 cursor.execute("ALTER TABLE themes ADD COLUMN url VARCHAR(200) DEFAULT ''")
             except Exception:
                 pass  # 이미 존재하면 무시
+
+    def _migrate_v13(self) -> None:
+        """산업재로 잘못 분류된 금융계 테마를 '금융' 카테고리로 이동.
+
+        기존 _CATEGORY_KEYWORDS에서 산업재에 섞여있던 보험/증권/은행/리츠/SPAC 등이
+        금융 카테고리로 분리되면서 과거 데이터를 일괄 재분류.
+        화이트리스트 방식: 현재 DB에 실제 존재하는 6개 테마명만 정확 매칭하여 거짓 양성 방지.
+        """
+        target_themes = [
+            '금융',
+            '생명보험',
+            '손해보험',
+            '기업인수목적회사(SPAC)',
+            '리츠(REITs)',
+            '화폐/금융자동화기기(디지털화폐 등)',
+        ]
+        placeholders = ','.join('?' * len(target_themes))
+        with self.get_cursor() as cursor:
+            # 1) 사전 감사: 영향 대상 로그
+            cursor.execute(
+                f"SELECT theme_name, COUNT(*) FROM themes "
+                f"WHERE category = '산업재' AND theme_name IN ({placeholders}) "
+                f"GROUP BY theme_name",
+                target_themes,
+            )
+            for row in cursor.fetchall():
+                logger.info(f"v13 재분류 대상: {row[0]} ({row[1]}행)")
+
+            # 2) 업데이트
+            cursor.execute(
+                f"UPDATE themes SET category = '금융' "
+                f"WHERE category = '산업재' AND theme_name IN ({placeholders})",
+                target_themes,
+            )
 
     def init_tables(self) -> None:
         """
