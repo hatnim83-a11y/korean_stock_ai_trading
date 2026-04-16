@@ -208,6 +208,28 @@
 - trailing_active=True + trailing_stop=None: 재시작 DB 복원 시 이론상 가능, 실질 영향 없음
   (트레일링 진입 = +8% 이상이므로 grace period 내 발생 가능성 극히 낮음)
 
+### BE 손절 프리-트레일링 (2026-04-13 검증)
+- config.py: TRAIL_BE_ENABLED/TRAIL_BE_ACTIVATE_PCT/TRAIL_BE_STOP_PCT 3개 Field 추가 (정상)
+- portfolio_monitor_v2.py _update_trailing_stop: max_profit_rate 갱신 직후, if enable_profit_trailing 블록 앞에 BE 블록 위치 (정상)
+- **심각 이슈**: TRAIL_BE_STOP_PCT 양수 설정 시 → be_stop이 매수가 위 → +5% 후 약간만 하락해도 즉시 손절. 설정 검증 없음
+- **중간 이슈**: 재시작 복원 불완전 — trailing_active=False인 BE 전용 상태는 복원 안됨. max_profit_rate, highest_price, stop_loss_price 모두 소실 (trailing_active 조건부 복원 경로만 존재)
+- **참고**: grace period(hold_days<=1) 중 BE 손절 무효 — _check_stop_loss가 grace_stop 기준만 평가
+- 로그 노이즈 없음: be_stop이 고정값이므로 1회성 출력 확인
+- 역행 없음: L1(+8%) 이후 stop_loss_price=buy_price(100%) > be_stop(99%) → BE 조건 불만족
+- TRAIL_LEVEL1_PCT 주석 불일치: config=0.04(4%), 코드 주석에 "5%"라고 기재 (버그 아님, 문서 오류)
+
+### 공격적 지정가(limit_aggressive) Phase 1~4 (2026-04-16 검증)
+- ORDER_TYPE_DEFAULT="market" 기본값: 배포 즉시 동작 변화 없음 (긴급 롤백 안전)
+- `_place_aggressive_limit_with_retry`: 재시도 루프 정상. fills 누적 가중평균 정상
+- **Medium**: 시장가 경로 가용현금 차감 시 `UPPER_LIMIT_RATIO(1.3)` 하드코딩 사용 (trading_engine.py:348)
+  → limit 경로인데도 1.3 배수 차감 → 다음 종목 슬롯 과소 산정 (기능은 동작, 정확도 문제)
+- **Medium**: `_compute_aggressive_limit_price` fallback 1.005 config화 미완료
+  → `settings.LIMIT_AGGRESSIVE_FALLBACK_RATIO` 없음 (낮은 우선순위)
+- **Low**: `get_orderable_cash` PDNO="005930" 더미 하드코딩 (시장가 ORD_DVSN=01 기준 조회, 기능 무관)
+- MockOrderApi.`get_orderable_cash` 메서드 없음: `TradingEngine._execute_buy_orders`에서 `hasattr` 가드로 보호됨 (안전)
+- 1.005 폴백: 호가단위 불일치 가능성 있으나 KIS가 지정가 수신 후 서버측 정규화하므로 실질 무해
+- `calculate_position_size(market_order=False)` → order_type="limit"(1.04배) 매핑 정상 확인
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`

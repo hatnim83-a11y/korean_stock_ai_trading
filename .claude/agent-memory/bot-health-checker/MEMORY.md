@@ -27,21 +27,17 @@
 - screening_log: id, date, stock_code, stock_name, theme, stage, passed, score, reject_reason, details_json, created_at
 - position_state: stock_code(PK), current_price, highest_price, trailing_active, trailing_level, trailing_stop_price, max_profit_rate, partial_1/2/3_executed, remaining_shares, last_updated (NO stock_name column)
 
-## Known Issues (as of 2026-04-06)
-- **RESOLVED: position_state HJ중공업 잔존**: 4/6 확인 시 정리 완료 (4/5 서비스 재시작 시 해소 추정).
-- **BUG: 주중 교체 테마 DB selected 미마킹**: 4/2 주중 교체로 '건설' 진입했으나 themes DB에서 selected=0 유지. 스크리닝은 메모리 기반으로 정상 작동하나 DB/대시보드 정합성 문제.
-- **BUG: 비화요일 테마 재사용 시 themes DB에 당일 selected=1 행 미저장**: 3/31 선정분만 존재, 4/6 행 없음. 대시보드 테마 표시에 영향 가능.
-- **BUG: LIG넥스원(079550) 매수 수량 0주**: 3/26 발생. 고가 종목 매수 수량 산정 방어 필요.
-- **BUG: 일별 수집이 주간 선정 점수를 덮어씀**: database.py에서 selected=False 저장 시 기존 selected=1 행 UPDATE.
-- **BUG: 삼성SDI 손절가 -11.1% 설정**: 4/2 매수, stop_loss=405,720 (매수가 456,500 대비 -11.12%). 기본 -7% 기준 대비 넓음. portfolio.highest_price=None vs position_state.highest_price=469,000 불일치.
-- **WARNING: asyncio Event loop closed 에러 (반복)**: 4/3, 4/6 확인. httpx AsyncClient.aclose() → RuntimeError('Event loop is closed'). 텔레그램 notifier 관련 추정. 기능 영향 없으나 로그 오염.
-- **WARNING: 대시보드 KIS API 토큰 403**: 4/6 09:43 KST, 대시보드 KISApi 싱글톤 최초 생성 시 메인 봇과 1분 내 중복 발급 → 403. 첫 발급은 성공.
-- **WARNING: 대시보드 로그 로테이션 FileNotFoundError**: UTC 자정 로그 압축 후 대시보드가 이전 파일 참조. 대시보드 재시작 전까지 반복.
-- **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError 계속 재현 (3/27, 3/30, 4/3, 4/6).
-- **WARNING: predefined 테마 네이버 미발견**: AI반도체, 수소 (4/6 기준). 기존 8개에서 축소됨.
+## Known Issues (as of 2026-04-10)
+- **RESOLVED: 삼성SDI 4/9 주중 교체 매도**: 수익 청산 +4.05%. 손절가 이상 문제는 더 이상 해당 없음.
+- **BUG: 테마 DB 동기화 문제 (수정 완료 4/10)**: 4/9 테마 3→1개 유실. DB selected 마킹 및 비화요일 복원 로직 수정.
+- **BUG: 손절가 비율 불균일**: HD한국조선해양 -8.47%, HPSP -9.52% (기준 -7%). 종목별 변동성 반영 또는 버그. HJ중공업 -6.39%는 정상 범위.
+- **WARNING: KRX theme index API broken**: `pykrx` '시장' KeyError 계속 재현 (3/27~4/10).
+- **WARNING: predefined 테마 네이버 미발견**: AI반도체, 수소 (4/10 기준).
+- **WARNING: KIS API 간헐적 연결 실패**: SSL EOF / Server disconnected 에러 반복 (장외 시간 대시보드 폴링 시). 자동 재시도로 복구됨.
+- **WARNING: 대시보드 KIS API 토큰 403**: 재시작 시 메인 봇과 1분 내 중복 발급 충돌.
 - **INFO: Telegram unreachable from GCP VM**: Persistent since 03-04.
 - **INFO: Log file date uses UTC**: 08:00-08:59 KST logs → previous day's file.
-- **INFO: trade_reviews 오이솔루션 ai_review 미완료**: 4/2 매도, D+5 = 4/7(화)에 분석 예정.
+- **INFO: Zombie processes (2 defunct)**: 4/9 이전 세션 좀비 프로세스 2개. 기능 무해하나 정리 필요.
 
 ## Scheduler (KST, CronTrigger timezone=Asia/Seoul, _skip_on_holiday)
 - 08:00 Theme rotation | 08:30 Theme analysis | 09:05 Screening | 09:15 Hold period sells | 09:25 Auto buy
@@ -68,9 +64,7 @@
 - Theme rotation: 7 days
 
 ## Recent Health Checks
-- **2026-04-06 10:13 KST (월)**: 전 서비스 정상. 포트폴리오 3종목(삼성SDI +1.86%, 클래시스 -3.19%, 삼성전기 -0.54%). MarketGuard NORMAL(KOSPI +1.70%). 삼성전기 1주 매수. HJ중공업 position_state 잔존 해소. 삼성SDI 손절가 -11.1% 이상 발견. 대시보드 토큰 403/로그 FileNotFoundError. asyncio 에러 반복. 디스크 58%. 누적 P&L +167,031원(+3.26%), 승률 67.6%.
-- **2026-04-05 20:47 KST (일)**: 전 서비스 정상 가동(4일째). 포트폴리오 2종목(클래시스 -0.94%, 삼성SDI -3.72%). position_state HJ중공업 잔존 재확인.
+- **2026-04-10 09:10 KST (금)**: 테마 DB 버그 수정 후 재시작(09:04). 금융 1개 테마 운영. 09:05 스크리닝 20종목 중 7개 필터 통과→AI 검증 0건 통과(전부 Hold). 포트폴리오 4종목(클래시스 -1.31%, HD한국조선해양 -0.51%, HJ중공업 -2.14%, HPSP -2.31%). 누적 P&L +332,031원(+6.60%), 승률 70%. 디스크 65%. 좀비 프로세스 2개.
+- **2026-04-06 10:13 KST (월)**: 전 서비스 정상. 포트폴리오 3종목. 삼성SDI 손절가 -11.1% 이상 발견. 누적 +167,031원(+3.26%), 승률 67.6%.
+- **2026-04-05 20:47 KST (일)**: 전 서비스 정상 가동(4일째). 포트폴리오 2종목.
 - **2026-03-30 10:22 KST (월)**: Market Crisis Guard CRISIS 연속. 포트폴리오 0종목. 누적 +185,881원(+4.22%), 승률 69.4%.
-- **2026-03-27 10:28 KST (금)**: CRISIS(KOSPI -3.68%). 매수 스킵.
-- **2026-03-17 19:30 KST**: Phase 2.5 점검. AI감성분석 정상.
-- **2026-03-16 10:01 KST**: 5 holdings. 전 스케줄 정상.
