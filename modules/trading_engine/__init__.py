@@ -33,7 +33,9 @@ from modules.trading_engine.kis_order_api import (
     MockOrderApi,
     # 상수
     ORDER_TYPE_MARKET,
-    ORDER_TYPE_LIMIT
+    ORDER_TYPE_LIMIT,
+    ORDER_TYPE_CONDITIONAL,
+    TR_ASKING_PRICE,
 )
 
 # WebSocket
@@ -75,6 +77,8 @@ __all__ = [
     "MockOrderApi",
     "ORDER_TYPE_MARKET",
     "ORDER_TYPE_LIMIT",
+    "ORDER_TYPE_CONDITIONAL",
+    "TR_ASKING_PRICE",
     # WebSocket
     "KISWebSocket",
     "MockWebSocket",

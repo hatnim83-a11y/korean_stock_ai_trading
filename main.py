@@ -1284,17 +1284,29 @@ class TradingSystem:
                     if order.get("success"):
                         bought_count += 1
                         filled_price = order.get("filled_price") or order.get("price", 0)
+                        quantity = order.get("quantity", 0)
+                        requested_qty = order.get("requested_quantity", quantity)
                         self.notifier.send_buy_alert(
                             order.get("stock_name", ""),
                             order.get("stock_code", ""),
-                            order.get("quantity", 0),
+                            quantity,
                             filled_price
                         )
+                        # limit_aggressive 부분체결 경고
+                        remaining = order.get("remaining_shares", 0)
+                        if remaining and remaining > 0:
+                            self.notifier.send_message(
+                                f"⚠️ 부분체결 경고\n"
+                                f"종목: {order.get('stock_name', '')} ({order.get('stock_code', '')})\n"
+                                f"요청: {requested_qty}주 / 체결: {quantity}주 / 미체결: {remaining}주\n"
+                                f"재시도: {order.get('retry_count', 0)}회 / 소요: {order.get('elapsed_seconds', 0)}s\n"
+                                f"메시지: {order.get('message', '')}"
+                            )
                         self.today_trades.append({
                             "action": "buy",
                             "stock_code": order.get("stock_code", ""),
                             "stock_name": order.get("stock_name", ""),
-                            "shares": order.get("quantity", 0),
+                            "shares": quantity,
                             "price": filled_price
                         })
 

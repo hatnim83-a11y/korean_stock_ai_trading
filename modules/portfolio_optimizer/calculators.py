@@ -44,7 +44,11 @@ MIN_TAKE_PROFIT_PCT = 0.08  # 최소 익절 +8%
 MAX_TAKE_PROFIT_PCT = 0.25  # 최대 익절 +25%
 
 # 시장가 주문 증거금 배수 (KIS API: 상한가 +30% 기준)
+# 주의: settings와 동기화 — settings.LIMIT_AGGRESSIVE_MARGIN_RATIO를 통해 runtime 변경 가능
 MARKET_ORDER_MARGIN_RATIO = 1.3
+# 이하 로컬 상수는 하위호환용 폴백. 런타임에는 settings.* 참조 (calculate_position_size 내부)
+LIMIT_AGGRESSIVE_MARGIN_RATIO = 1.04
+LIMIT_MARGIN_RATIO = 1.04
 
 
 # ===== 변동성 계산 =====
@@ -379,20 +383,24 @@ def calculate_position_size(
     weight: float,
     price: float,
     lot_size: int = 1,
-    market_order: bool = True
+    market_order: Optional[bool] = None,
+    order_type: Optional[str] = None,
 ) -> dict:
     """
     포지션 사이즈 (매수 수량) 계산
 
-    KIS API 시장가 주문 시 상한가(+30%) 기준으로 증거금이 잡히므로,
-    시장가 주문일 경우 상한가 기준으로 수량을 계산합니다.
+    KIS API는 주문 유형별로 증거금 차감 방식이 다르다 (2026-04-16 실측):
+    - market (시장가, 01): 상한가 ×1.30 기준
+    - limit_aggressive (매도 1호가 지정가): ×1.04 (2% 안전 마진)
+    - limit (일반 지정가, 00): ×1.04 (실측 기준, 이론 1.0)
 
     Args:
         capital: 총 자본금
         weight: 투자 비중 (0-1)
         price: 매수 가격
         lot_size: 매매 단위 (기본 1주)
-        market_order: 시장가 주문 여부 (기본 True)
+        market_order: [DEPRECATED] True=시장가, False=지정가. order_type 사용 권장
+        order_type: "market" | "limit_aggressive" | "limit". 미지정 시 market_order로부터 유추
 
     Returns:
         {
@@ -402,22 +410,36 @@ def calculate_position_size(
         }
 
     Example:
-        >>> result = calculate_position_size(10000000, 0.08, 75000)
+        >>> result = calculate_position_size(10000000, 0.08, 75000, order_type="limit_aggressive")
         >>> print(f"매수 수량: {result['shares']}주, 금액: {result['amount']:,}원")
-        매수 수량: 10주, 금액: 750,000원
     """
     if price <= 0 or capital <= 0 or weight <= 0:
         return {"shares": 0, "amount": 0, "actual_weight": 0}
 
+    # 주문 유형 결정 — order_type 우선, 없으면 market_order에서 유추 (하위호환)
+    if order_type is None:
+        if market_order is None or market_order:
+            order_type = "market"
+        else:
+            order_type = "limit"
+
+    # settings와 동기화 — .env 런타임 조정 즉시 반영
+    try:
+        from config import settings
+        aggr_ratio = settings.LIMIT_AGGRESSIVE_MARGIN_RATIO
+    except Exception:
+        aggr_ratio = LIMIT_AGGRESSIVE_MARGIN_RATIO
+
+    margin_ratio_map = {
+        "market": MARKET_ORDER_MARGIN_RATIO,   # 1.30 (고정 — KIS 상한가 규정)
+        "limit_aggressive": aggr_ratio,        # settings에서 로드 (기본 1.04)
+        "limit": aggr_ratio,                   # 동일 배수
+    }
+    margin_ratio = margin_ratio_map.get(order_type, MARKET_ORDER_MARGIN_RATIO)
+
     # 목표 투자 금액
     target_amount = capital * weight
-
-    # 시장가 주문: 상한가(+30%) 기준으로 증거금이 잡힘
-    # KIS API는 시장가 매수 시 "상한가 × 수량"으로 주문가능금액을 차감
-    if market_order:
-        margin_price = price * MARKET_ORDER_MARGIN_RATIO  # 상한가 기준
-    else:
-        margin_price = price
+    margin_price = price * margin_ratio
 
     # 매수 가능 수량 (증거금 기준으로 내림)
     shares = int(target_amount / margin_price)

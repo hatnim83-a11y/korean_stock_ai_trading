@@ -48,7 +48,7 @@ from modules.portfolio_optimizer.calculators import (
 MAX_POSITIONS = settings.MAX_POSITIONS  # 최대 보유 종목 수
 MIN_POSITION_WEIGHT = settings.MIN_POSITION_WEIGHT  # 최소 비중
 MAX_POSITION_WEIGHT = settings.MAX_POSITION_WEIGHT  # 최대 비중
-CASH_BUFFER = 0.10  # 현금 버퍼 10% (수수료/미결제 마진 포함)
+CASH_BUFFER = 0.05  # 현금 버퍼 5% (수수료 0.3% + 슬리피지 0.3~0.5% 대비 충분, 2026-04-16 공격적 충전)
 
 
 # ===== 가중치 계산 =====
@@ -302,11 +302,12 @@ def optimize_portfolio(
             ai_target_return=ai_target
         )
         
-        # 포지션 사이즈 계산
+        # 포지션 사이즈 계산 (주문 유형별 증거금 배수 반영)
         pos_size = calculate_position_size(
             capital=investable,
             weight=stock.get("weight", 0.1),
-            price=price
+            price=price,
+            order_type=settings.ORDER_TYPE_DEFAULT,
         )
         
         # 포지션 정보 구성
@@ -362,17 +363,23 @@ def optimize_portfolio(
 
 # ===== 매수 주문 생성 =====
 
+def _default_order_type() -> str:
+    """settings.ORDER_TYPE_DEFAULT 지연 로드 (순환 참조 방지)"""
+    return settings.ORDER_TYPE_DEFAULT
+
+
 def generate_buy_orders(
     portfolio: dict,
-    order_type: str = "market"
+    order_type: Optional[str] = None,
 ) -> list[dict]:
     """
     매수 주문 리스트 생성
-    
+
     Args:
         portfolio: 최적화된 포트폴리오
-        order_type: 주문 유형 ("market" 또는 "limit")
-    
+        order_type: 주문 유형. None이면 settings.ORDER_TYPE_DEFAULT 사용
+                    ("market" / "limit_aggressive" / "limit")
+
     Returns:
         [
             {
@@ -380,23 +387,36 @@ def generate_buy_orders(
                 'stock_name': '삼성전자',
                 'order_type': 'market',
                 'quantity': 45,
-                'price': 0,  # 시장가는 0
+                'price': 0,  # 시장가 / limit_aggressive는 0
+                'expected_price': 75000,  # 슬리피지 계산 기준
                 'stop_loss': 69500,
                 'take_profit': 86000
             },
             ...
         ]
     """
+    if order_type is None:
+        order_type = _default_order_type()
+
     orders = []
-    
+
     for pos in portfolio.get("positions", []):
+        # 주문 가격 결정:
+        # - market: 0 (시장가는 KIS가 체결가 결정)
+        # - limit_aggressive: 0 (실시간 매도 1호가를 재시도 루프에서 재조회하여 사용)
+        # - limit: pos["price"] (현재가)
+        if order_type == "market" or order_type == "limit_aggressive":
+            order_price = 0
+        else:
+            order_price = pos["price"]
+
         order = {
             "stock_code": pos["code"],
             "stock_name": pos["name"],
             "order_type": order_type,
             "quantity": pos["shares"],
-            "price": 0 if order_type == "market" else pos["price"],
-            "expected_price": pos["price"],  # 시장가 주문에서도 예상 가격 보존
+            "price": order_price,
+            "expected_price": pos["price"],  # 슬리피지 계산 기준값, 모든 주문 유형에서 보존
             "amount": pos["amount"],
             "stop_loss": pos["stop_loss_price"],
             "take_profit": pos["take_profit_price"],
@@ -499,8 +519,8 @@ def run_daily_optimization(
         use_mock_data=use_mock_data
     )
     
-    # 2. 매수 주문 생성
-    orders = generate_buy_orders(portfolio, order_type="market")
+    # 2. 매수 주문 생성 (order_type은 settings.ORDER_TYPE_DEFAULT에서 결정)
+    orders = generate_buy_orders(portfolio)
     
     # 3. DB 저장
     saved = False

@@ -20,6 +20,7 @@ kis_order_api.py - 한국투자증권 주문 API 모듈
 """
 
 import time
+import threading
 import hashlib
 import json
 from datetime import datetime, date
@@ -79,6 +80,7 @@ TR_BALANCE = "TTTC8434R"      # 잔고 조회 (실전)
 TR_BALANCE_MOCK = "VTTC8434R"  # 잔고 조회 (모의)
 TR_ORDER_STATUS = "TTTC8001R"  # 주문 상태 조회 (실전)
 TR_ORDER_STATUS_MOCK = "VTTC8001R"
+TR_ASKING_PRICE = "FHKST01010200"  # 호가창 조회 (실전/모의 공용)
 
 
 class KISOrderApi:
@@ -140,15 +142,17 @@ class KISOrderApi:
         # API 호출 간격 (초당 20회 제한)
         self._last_call_time: float = 0
         self._min_interval: float = 0.06  # 60ms = 초당 약 16회
-    
+        self._rate_limit_lock = threading.Lock()  # 재시도 루프 병렬화 대비
+
     # ===== 인증 관련 =====
-    
+
     def _rate_limit(self) -> None:
-        """API 호출 속도 제한"""
-        elapsed = time.time() - self._last_call_time
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_call_time = time.time()
+        """API 호출 속도 제한 (스레드 안전)"""
+        with self._rate_limit_lock:
+            elapsed = time.time() - self._last_call_time
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_call_time = time.time()
     
     def get_access_token(self) -> str:
         """
@@ -809,9 +813,81 @@ class KISOrderApi:
         except Exception as e:
             logger.error(f"잔고 조회 중 오류: {e}")
             return {"positions": [], "total_value": 0, "cash": 0}
-    
+
+    # ===== 호가 조회 =====
+
+    def inquire_asking_price(self, stock_code: str) -> dict:
+        """
+        호가창(매도/매수 1~10단계) 조회
+
+        공격적 지정가 주문 시 매도 1호가를 가격으로 사용하기 위해 호출한다.
+        최유리지정가(ORD_DVSN=03)가 1.3배 증거금을 적용하는 문제를 우회하기 위한 보조 API.
+
+        Args:
+            stock_code: 종목코드 (6자리)
+
+        Returns:
+            {
+                "ask1": int,          # 매도 1호가 (가장 낮은 매도 희망가)
+                "bid1": int,          # 매수 1호가
+                "ask_volume1": int,   # 매도 1호가 잔량
+                "bid_volume1": int,   # 매수 1호가 잔량
+                "current_price": int, # 현재가 (폴백용)
+                "success": bool,
+                "message": str
+            }
+            실패 시 success=False, 가격 0
+        """
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",  # 주식
+            "FID_INPUT_ISCD": stock_code,
+        }
+
+        headers = self._get_headers(TR_ASKING_PRICE)
+
+        try:
+            self._rate_limit()
+            response = httpx.get(url, headers=headers, params=params, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("rt_cd") != "0":
+                logger.warning(f"호가 조회 실패 ({stock_code}): {data.get('msg1', '')}")
+                return {
+                    "success": False,
+                    "ask1": 0, "bid1": 0,
+                    "ask_volume1": 0, "bid_volume1": 0,
+                    "current_price": 0,
+                    "message": data.get("msg1", "호가 조회 실패"),
+                }
+
+            # output1: 10단계 호가, output2: 현재가 등
+            output1 = data.get("output1", {})
+            output2 = data.get("output2", {})
+
+            return {
+                "success": True,
+                "ask1": _safe_int(output1.get("askp1")),
+                "bid1": _safe_int(output1.get("bidp1")),
+                "ask_volume1": _safe_int(output1.get("askp_rsqn1")),
+                "bid_volume1": _safe_int(output1.get("bidp_rsqn1")),
+                "current_price": _safe_int(output2.get("stck_prpr")),
+                "message": "",
+            }
+        except Exception as e:
+            logger.error(f"호가 조회 중 오류 ({stock_code}): {e}")
+            return {
+                "success": False,
+                "ask1": 0, "bid1": 0,
+                "ask_volume1": 0, "bid_volume1": 0,
+                "current_price": 0,
+                "message": str(e),
+            }
+
     # ===== 일괄 주문 =====
-    
+
     def execute_buy_orders(
         self,
         orders: list[dict],
@@ -909,8 +985,14 @@ class MockOrderApi:
         self.positions: dict = {}
         self.cash = 10_000_000
         self._order_id_counter = 1000
+        # 지정가 재시도 루프 테스트용 시나리오 제어
+        self._pending_orders: dict = {}  # order_id -> {stock_code, qty, price, filled_qty, filled_price}
+        self.scenario_fill_ratio: float = 1.0  # 0.0 ~ 1.0 (buy_limit_order 1회 호출당 체결 비율)
+        self.scenario_ask1_offset: int = 0  # inquire_asking_price의 ask1에 더할 오프셋 (급등 시뮬레이션)
+        self.scenario_cancel_race_qty: int = 0  # 취소 직전 추가 체결 수량 (엣지케이스)
+        self.scenario_next_error: Optional[str] = None  # 다음 주문에서 발생시킬 에러 메시지
         logger.info("모의 주문 API 초기화")
-    
+
     def _generate_order_id(self) -> str:
         self._order_id_counter += 1
         return str(self._order_id_counter)
@@ -1024,8 +1106,150 @@ class MockOrderApi:
         }
     
     def get_order_status(self, order_id: Optional[str] = None, order_date: Optional[str] = None) -> list[dict]:
-        """모의 주문 상태 조회"""
+        """모의 주문 상태 조회 — _pending_orders에서 해당 order_id를 찾아 반환"""
+        if order_id and order_id in self._pending_orders:
+            po = self._pending_orders[order_id]
+            return [{
+                "order_id": order_id,
+                "stock_code": po["stock_code"],
+                "order_qty": po["quantity"],
+                "filled_qty": po["filled_qty"],
+                "order_price": po["price"],
+                "filled_price": po["filled_price"],
+                "status": "체결" if po["filled_qty"] >= po["quantity"] else "미체결",
+            }]
         return []
+
+    def inquire_asking_price(self, stock_code: str) -> dict:
+        """모의 호가 조회 — scenario_ask1_offset으로 급등 시뮬 가능"""
+        base_price = 75000 + self.scenario_ask1_offset
+        return {
+            "success": True,
+            "ask1": base_price,
+            "bid1": base_price - 100,
+            "ask_volume1": 1000,
+            "bid_volume1": 1000,
+            "current_price": base_price - 50,
+            "message": "",
+        }
+
+    def buy_limit_order(self, stock_code: str, quantity: int, price: int) -> dict:
+        """
+        모의 지정가 매수 — scenario_fill_ratio 기반 부분체결 시뮬레이션
+
+        시나리오:
+        - scenario_next_error가 설정되어 있으면 해당 에러 반환 (수량/증거금 시나리오용)
+        - scenario_fill_ratio만큼만 즉시 체결, 나머지는 _pending_orders에 미체결로 대기
+        - 체결된 수량은 positions/cash에 즉시 반영
+        """
+        if self.scenario_next_error:
+            err = self.scenario_next_error
+            self.scenario_next_error = None  # 1회성 소비
+            return {
+                "success": False,
+                "order_id": "",
+                "stock_code": stock_code,
+                "message": err,
+            }
+
+        order_id = self._generate_order_id()
+        filled_qty = int(quantity * self.scenario_fill_ratio)
+        filled_price = price if filled_qty > 0 else 0
+
+        # 체결된 수량만큼 포지션/현금 반영
+        if filled_qty > 0:
+            amount = filled_price * filled_qty
+            if amount > self.cash:
+                return {
+                    "success": False,
+                    "order_id": "",
+                    "stock_code": stock_code,
+                    "message": "주문가능금액 초과",
+                }
+            self.cash -= amount
+            if stock_code in self.positions:
+                self.positions[stock_code]["quantity"] += filled_qty
+            else:
+                self.positions[stock_code] = {
+                    "quantity": filled_qty,
+                    "buy_price": filled_price,
+                }
+
+        self._pending_orders[order_id] = {
+            "stock_code": stock_code,
+            "quantity": quantity,
+            "price": price,
+            "filled_qty": filled_qty,
+            "filled_price": filled_price,
+        }
+
+        order = {
+            "success": True,
+            "order_id": order_id,
+            "order_time": now_kst().strftime("%H%M%S"),
+            "stock_code": stock_code,
+            "quantity": quantity,
+            "price": price,
+            "action": "매수",
+            "order_type": "지정가",
+            "message": "모의 지정가 주문 접수",
+        }
+        self.orders.append(order)
+        logger.info(
+            f"[모의] 지정가 매수: {stock_code} {quantity}주 @ {price:,}원 "
+            f"(시나리오 체결 {filled_qty}주, {self.scenario_fill_ratio:.0%})"
+        )
+        return order
+
+    def cancel_order(self, order_id: str, stock_code: str, quantity: int) -> dict:
+        """
+        모의 주문 취소 — scenario_cancel_race_qty로 취소 직전 추가 체결 시뮬 가능
+        """
+        if order_id not in self._pending_orders:
+            return {
+                "success": False,
+                "order_id": order_id,
+                "stock_code": stock_code,
+                "message": "주문번호를 찾을 수 없음",
+            }
+
+        po = self._pending_orders[order_id]
+
+        # 이미 전량 체결된 상태에서 취소 요청 → KIS 에러 시뮬레이션
+        if po["filled_qty"] >= po["quantity"]:
+            return {
+                "success": False,
+                "order_id": order_id,
+                "stock_code": stock_code,
+                "message": "취소가능수량 초과 (이미 전량 체결)",
+            }
+
+        # 취소 직전 추가 체결 시나리오 (race condition 검증용)
+        if self.scenario_cancel_race_qty > 0:
+            extra_fill = min(self.scenario_cancel_race_qty, po["quantity"] - po["filled_qty"])
+            po["filled_qty"] += extra_fill
+            # 포지션 반영
+            if extra_fill > 0:
+                amount = po["price"] * extra_fill
+                self.cash -= amount
+                if stock_code in self.positions:
+                    self.positions[stock_code]["quantity"] += extra_fill
+                else:
+                    self.positions[stock_code] = {
+                        "quantity": extra_fill,
+                        "buy_price": po["price"],
+                    }
+            self.scenario_cancel_race_qty = 0  # 1회성 소비
+
+        logger.info(
+            f"[모의] 취소 성공: {order_id} {stock_code} (체결 {po['filled_qty']}/{po['quantity']})"
+        )
+        return {
+            "success": True,
+            "order_id": order_id,
+            "stock_code": stock_code,
+            "message": "취소 성공",
+        }
 
     def execute_buy_orders(self, orders: list[dict], delay: float = 0) -> list[dict]:
         results = []

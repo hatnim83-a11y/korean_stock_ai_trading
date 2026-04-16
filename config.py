@@ -194,7 +194,45 @@ class Settings(BaseSettings):
         default=0.03,
         description="일일 최대 손실률 (3% = 0.03, 추가 매매 중단)"
     )
-    
+
+    # ===== 주문 실행 설정 (2026-04-16 공격적 지정가 도입) =====
+    ORDER_TYPE_DEFAULT: str = Field(
+        default="market",
+        description="기본 주문 유형: market(시장가) / limit_aggressive(지정가+매도1호가) / limit(일반지정가). 긴급 롤백은 market으로 복귀"
+    )
+    LIMIT_AGGRESSIVE_RETRY_TIMEOUT: int = Field(
+        default=10,
+        description="공격적 지정가: 주문 후 체결 대기 타임아웃 (초)"
+    )
+    LIMIT_AGGRESSIVE_POLL_INTERVAL: int = Field(
+        default=3,
+        description="공격적 지정가: 체결 상태 폴링 간격 (초). TIMEOUT 내 ~3회 체크"
+    )
+    LIMIT_AGGRESSIVE_MAX_RETRIES: int = Field(
+        default=12,
+        description="공격적 지정가: 최대 재시도 횟수 상한 (TOTAL_TIMEOUT 60s가 먼저 적용되어 실질 최대 6라운드)"
+    )
+    LIMIT_AGGRESSIVE_TOTAL_TIMEOUT: int = Field(
+        default=60,
+        description="공격적 지정가: 종목당 총 체결 상한 (초). 5종목 × 60s = 최악 5분 (09:26 모니터링 충돌 방지)"
+    )
+    LIMIT_AGGRESSIVE_MARGIN_RATIO: float = Field(
+        default=1.04,
+        description="공격적 지정가 증거금 안전 마진 (실측 1.04배, 4% 여유)"
+    )
+    LIMIT_AGGRESSIVE_CANCEL_DELAY: float = Field(
+        default=0.5,
+        description="공격적 지정가: cancel_order 후 상태 재조회까지 대기 (초)"
+    )
+    LIMIT_AGGRESSIVE_FALLBACK_PREMIUM: float = Field(
+        default=1.005,
+        description="호가 조회 실패 시 폴백 가격 배수 (expected_price × 배수). Phase 5 관찰 후 조정"
+    )
+    ABNORMAL_RETRY_WARN_THRESHOLD: int = Field(
+        default=5,
+        description="재시도가 이 횟수 이상이면 WARN 로그 (이상 징후 탐지)"
+    )
+
     # ===== 포트폴리오 제약 조건 =====
     MIN_POSITION_WEIGHT: float = Field(
         default=0.05,
