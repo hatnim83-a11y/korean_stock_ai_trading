@@ -48,7 +48,7 @@ from modules.portfolio_optimizer.calculators import (
 MAX_POSITIONS = settings.MAX_POSITIONS  # 최대 보유 종목 수
 MIN_POSITION_WEIGHT = settings.MIN_POSITION_WEIGHT  # 최소 비중
 MAX_POSITION_WEIGHT = settings.MAX_POSITION_WEIGHT  # 최대 비중
-CASH_BUFFER = 0.05  # 현금 버퍼 5% (수수료 0.3% + 슬리피지 0.3~0.5% 대비 충분, 2026-04-16 공격적 충전)
+CASH_BUFFER = 0.02  # 현금 버퍼 2% — 슬롯 한도가 1.04배 증거금 마진 포함, 추가로는 수수료(0.3%)+슬리피지(0.5%)만 커버 (2026-04-20)
 
 
 # ===== 가중치 계산 =====
