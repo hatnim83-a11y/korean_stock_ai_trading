@@ -22,15 +22,15 @@
 
 - [x] `python -m py_compile scheduler.py modules/reporter/telegram_notifier.py` 통과 (초회 + 수정 후 재컴파일 모두 통과)
 - [x] code-tester 에이전트 검증 — 심각 0 / 주의 3건 모두 수정 완료 (반환값 체크, 주말 발동 명시, 09:00→09:02)
-- [ ] `sudo systemctl restart trading_system` 정상 기동 — **장 마감(15:30) 이후 사용자 수행 필요**
-- [ ] 시작 로그에 추가된 잡 2개 등록 확인 (재시작 후 확인)
-- [ ] 이중 실행 방지 확인 (재시작 직전 `ps aux | grep main.py | grep -v grep`)
+- [x] `sudo systemctl restart trading_system` 정상 기동 — 2026-04-21 05:07 UTC / KST 14:07 재시작, PID 484162 active
+- [x] 시작 로그에 추가된 잡 2개 등록 확인 — journalctl에서 "주간 개선 제안서 리마인더 cron[day_of_week='fri', hour='17', minute='45']", "월간 개선 제안서 리마인더 cron[day='1', hour='9', minute='2']" 확인
+- [x] 이중 실행 방지 확인 (재시작 직전 `ps aux | grep main.py | grep -v grep`) — 기존 PID 396260 단일, 이중 실행 없음
 
 ## 배포 항목
 
-- [ ] 장 마감(15:30 KST) 이후 서비스 재시작 — 사용자 수행 필요
-- [ ] 잡 등록 완료 텔레그램 알림 (시작 시 자동 발송 확인)
-- [ ] 첫 금요일(2026-04-24) 17:45 실제 리마인더 수신 확인 — 대화 종료 후 사용자 후속 확인
+- [x] 서비스 재시작 완료 — 2026-04-21 14:07 KST (사용자 명시 지시로 장중 재시작)
+- [x] 잡 등록 확인 (재시작 로그 "등록된 스케줄" 섹션에 리마인더 2건 모두 출력됨)
+- [ ] 첫 금요일(2026-04-24) 17:45 실제 리마인더 수신 확인 — 대화 종료 후 사용자 후속 확인 (실전 관찰 항목)
 
 ## 문서 업데이트 항목
 
