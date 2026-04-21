@@ -58,6 +58,12 @@ ORDER BY sell_date DESC;
 
 ## 2. 파라미터 집중 분석
 
+> ⚠️ **전쟁 오염 주의 (2026-04-21 추가)**
+>
+> 2026-03-03 이란 전쟁 개전 → 2026-04-08 휴전 기간의 매매는 V자 급락-반등 특수 패턴에 오염됨. 손절 후 D+N 반등 분석 시 평시 일반화 **불가능**. 본 섹션 쿼리 실행 시 아래 필터 중 하나를 적용하여 전쟁 기간을 제외하거나 평시 표본만 추출할 것.
+>
+> 상세 배경: `memory/project_stop_loss_review.md` "focus:stop_loss 제안서 표본 오염 경고" 섹션 참조.
+
 ### 2-1. 손절 관련 — 조기 매도 후 반등 케이스 (`focus:stop_loss`)
 매도 후 D+5에서 +3% 이상 상승한 건수 (기회비용 발생 케이스):
 ```sql
@@ -73,6 +79,32 @@ WHERE tr.sell_date >= date('now','-30 days','localtime')
   AND ptp.change_from_sell >= 3.0
 ORDER BY ptp.change_from_sell DESC;
 ```
+
+#### 2-1-A. 전쟁 기간(2026-03-03 ~ 2026-04-08) 제외 필터
+이란 전쟁 기간을 명시적으로 제외하여 손절-반등 패턴을 재검증:
+```sql
+SELECT tr.id, tr.stock_code, tr.sell_date, tr.profit_rate,
+       ptp.days_after_sell,
+       ptp.change_from_sell AS change_pct
+FROM trade_reviews tr
+JOIN post_trade_prices ptp ON ptp.review_id = tr.id
+WHERE tr.sell_reason = '손절'
+  AND tr.sell_date NOT BETWEEN '2026-03-03' AND '2026-04-08'
+  AND ptp.days_after_sell IN (1, 2, 5)
+ORDER BY tr.sell_date, ptp.days_after_sell;
+```
+
+#### 2-1-B. 평시(휴전 다음날 이후) 표본만 추출 (Phase B 재착수 트리거 판단용)
+5/1 재평가 시 평시 손절 매매 10건 이상 누적 여부 확인:
+```sql
+SELECT COUNT(*) AS peacetime_stop_loss_count,
+       MIN(sell_date) AS earliest,
+       MAX(sell_date) AS latest
+FROM trade_reviews
+WHERE sell_reason = '손절'
+  AND sell_date >= '2026-04-09';
+```
+10건 이상이면 `memory/project_stop_loss_review.md`의 "Phase B 착수 트리거" 첫 조건 충족.
 
 ### 2-2. 손절 발동 후 실제 하락 지속 여부
 손절(-7% 전후) 건이 D+5에도 여전히 음수인지:
