@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "python3",
+      "args": ["/home/hatni/korean_stock_ai_trading/scripts/mcp_sqlite.py"]
+    },
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-server-fetch"]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    }
+  }
+}

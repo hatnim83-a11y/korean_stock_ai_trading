@@ -5,8 +5,11 @@
 ## 프로젝트 규칙
 | 문서 | 설명 | 언제 보는가 |
 |------|------|------------|
-| `CLAUDE.md` (프로젝트 루트) | 프로젝트별 규칙 (서비스 운영, 코드 규칙, 테스트) | 항상 (자동 로드됨) |
 | `~/.claude/CLAUDE.md` | 글로벌 규칙 (워크플로우, 품질검사, 단축명령어) | 항상 (자동 로드됨) |
+| `CLAUDE.md` (프로젝트 루트) | 프로젝트 규칙 (서비스 운영, 코드 규칙, 테스트) | 항상 (자동 로드됨) |
+| `web/CLAUDE.md` | 대시보드 시스템 규칙 (FastAPI/JWT/SSE, 읽기 전용) | web/ 내 파일 수정 시 |
+| `modules/CLAUDE.md` | 전략/스코어링 모듈 규칙 (KST, NaN 방어, 점수체계) | modules/ 내 파일 수정 시 |
+| `docs/mcp-usage.md` | MCP 서버 3종 상세 사용법 (SQLite/Fetch/Sequential) | MCP 활용 시 |
 
 ## 아키텍처 & 운영
 | 문서 | 설명 | 언제 보는가 |
@@ -23,6 +26,15 @@
 | `docs/backtest_turtle_results.md` | 한국 주식 터틀 전략 백테스트 | 터틀 전략 비교 참고 |
 | `docs/backtest_us_turtle_results.md` | 미국 주식 터틀 전략 백테스트 | 해외 전략 비교 참고 |
 
+## 거래 개선 제안서
+| 문서 | 설명 | 언제 보는가 |
+|------|------|------------|
+| `docs/improvements/README.md` | 제안서 관리 규칙 (민감 데이터 정책, 승인→구현 플로우) | 에이전트/명령 이해 시 |
+| `docs/improvements/_TEMPLATE.md` | 제안서 템플릿 (섹션 구조, frontmatter) | 제안서 작성 규칙 참고 |
+| `docs/improvements/queries.md` | 표준 SQL 쿼리 세트 (손절/트레일링/보유기간/갭/전략별) | 에이전트 쿼리 레퍼런스 |
+| `docs/improvements/change_log.md` | 파라미터 변경 이력 (before/after 추적) | 변경 이력 확인/추가 시 |
+| `docs/improvements/YYYY-Www-weekly.md` 등 | 주기별 거래 개선 제안서 (에이전트 생성) | 제안 검토 시 |
+
 ## 버그 & 이슈
 | 문서 | 설명 | 언제 보는가 |
 |------|------|------------|
@@ -35,9 +47,10 @@
 | `docs/work-plans/completed/` | 완료된 작업 아카이브 |
 
 ### 진행 중 작업
-- (없음)
+- `trade-improvement-analyst/` — 거래 개선 전문 에이전트 도입 (Phase 1: 에이전트 정의 + 주간 모드 + change_log)
 
 ### 완료된 작업
+- `20260416_claude-md-cleanup/` — CLAUDE.md 3계층 분배(Global/Project/System) 및 슬림화
 - `20260315_dashboard-mobile-responsive/` — 모바일 반응형 + Cloudflare Tunnel
 - `20260314_dashboard-theme-supply-fix/` — 테마 수급비율 표시 버그 수정
 - `20260313_api-fallback-bugfix/` — API 폴백 버그 수정

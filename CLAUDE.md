@@ -22,37 +22,31 @@
 ## 코드 규칙
 - KIS API 응답 파싱 시 `_safe_int()`/`_safe_float()` 사용 (빈 문자열 방어)
 - pandas 값 → float 변환 전 `pd.isna()` 체크 필수
+- KST 타임존: `datetime.now()` 대신 `from config import now_kst` 사용 (서버가 UTC)
 
-## MCP 서버 활용 지침
+## MCP 서버
+프로젝트에 3개 MCP 서버(`SQLite`, `Fetch`, `Sequential Thinking`)가 `.mcp.json`에 등록되어 있다.
+**상세 사용법**: [`docs/mcp-usage.md`](docs/mcp-usage.md) 참조.
 
-프로젝트에 3개 MCP 서버가 `.mcp.json`에 등록되어 있다. 적극적으로 활용할 것.
+> 요약: 봇 상태/DB 조회는 Python 실행 대신 SQLite MCP 우선, 복잡 분석은 Sequential Thinking 활용.
 
-### 1. SQLite (`mcp__sqlite__*`) — DB 조회/수정
-- **DB 경로**: `data/trading.db` (래퍼: `scripts/mcp_sqlite.py`)
-- **용도**: 포트폴리오, 거래내역, 테마, 성과 등 트레이딩 DB 직접 조회/수정
-- **도구 목록**:
-  - `list_tables` — 전체 테이블 목록
-  - `describe_table` — 테이블 스키마 확인
-  - `read_query` — SELECT 쿼리 (조회 전용)
-  - `write_query` — INSERT/UPDATE/DELETE 쿼리
-  - `create_table` — 테이블 생성
-  - `append_insight` — 분석 인사이트 메모 저장
-- **사용 시점**: 봇 상태 확인, 거래 분석, 데이터 검증, 스키마 확인 시 Python 코드 실행 대신 MCP로 직접 조회
-- **주의**: write_query 실행 전 반드시 사용자 확인. 실서비스 DB이므로 함부로 수정 금지
-
-### 2. Fetch (`mcp__fetch__fetch`) — 웹 페이지 조회
-- **용도**: URL의 웹 페이지 내용을 마크다운으로 변환하여 조회
-- **파라미터**: `url`(필수), `max_length`(기본 5000), `start_index`(이어읽기), `raw`(HTML 원본)
-- **사용 시점**: API 문서 확인, 외부 참고자료 조회, 에러 관련 GitHub 이슈 확인 등
-- **주의**: 사용자가 제공한 URL 또는 프로그래밍 관련 URL만 사용
-
-### 3. Sequential Thinking (`mcp__sequential-thinking__sequentialthinking`) — 구조적 사고
-- **용도**: 복잡한 문제를 단계별로 분석, 가설 생성 및 검증
-- **사용 시점**: 복잡한 버그 원인 분석, 전략 설계, 아키텍처 결정 등 다단계 추론 필요 시
-- **특징**: 중간에 이전 사고 수정, 분기, 추가 확장 가능
+## 시스템별 규칙
+- **웹 대시보드** (`web/`): [`web/CLAUDE.md`](web/CLAUDE.md)
+- **전략/스코어링 모듈** (`modules/`): [`modules/CLAUDE.md`](modules/CLAUDE.md)
 
 ## 코드 변경 후 필수 프로세스
 - **코드를 작성하거나 수정한 뒤 반드시 code-tester 에이전트로 검증**
 - 에이전트 정의: `.claude/agents/code-tester.md`
 - 수정된 파일을 대상으로 code-tester 에이전트 실행 → 심각/주의 이슈 발견 시 즉시 수정
 - py_compile + 기존 테스트 통과 확인 후 서비스 재시작
+
+## 전략/파라미터 변경 시 필수 프로세스
+- 파라미터(손절/익절/트레일링/보유기간/테마 점수 등) 변경은 **`trade-improvement-analyst` 에이전트의 제안서 근거**가 있어야 한다 (`/improve` 명령)
+- 에이전트 정의: `.claude/agents/trade-improvement-analyst.md`
+- 구현 완료 후 **반드시 `docs/improvements/change_log.md`에 1줄 추가** (before/after 추적용) — CHECKLIST 배포 항목에 포함
+
+## 문서 갱신 대상 (작업 완료 시)
+- `CLAUDE.md` (이 파일) — 새 규칙/교훈 발견 시
+- `memory/MEMORY.md` — 중요 결과/설정 변경 시
+- `docs/INDEX.md` — 새 문서 추가 시
+- 해당 시스템의 `CLAUDE.md` — 시스템 특화 변경 시
