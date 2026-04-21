@@ -146,7 +146,45 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"텔레그램 전송 오류: {e}")
             return False
-    
+
+    def send_improvement_reminder(self, mode: str) -> bool:
+        """
+        거래 개선 제안서 생성 시점 리마인더.
+
+        봇 자체는 에이전트를 직접 호출할 수 없으므로
+        Claude Code 세션에서 사용자가 `/improve` 를 수동 실행하도록 안내한다.
+
+        Args:
+            mode: "weekly" | "monthly"
+
+        Returns:
+            전송 성공 여부
+        """
+        now_str = now_kst().strftime("%Y-%m-%d %H:%M KST")
+        if mode == "weekly":
+            title = "주간 개선 제안서 생성 시점"
+            command = "/improve weekly"
+            period = "지난 7일 매매 데이터"
+            output = "docs/improvements/YYYY-Www-weekly.md"
+        elif mode == "monthly":
+            title = "월간 개선 제안서 생성 시점"
+            command = "/improve monthly"
+            period = "지난 30일 매매 데이터"
+            output = "docs/improvements/YYYY-MM-monthly.md"
+        else:
+            logger.warning(f"알 수 없는 리마인더 모드: {mode}")
+            return False
+
+        text = (
+            f"📊 *{title}*\n"
+            f"`{now_str}`\n\n"
+            f"Claude Code 세션에서 다음 명령을 실행하세요:\n"
+            f"`{command}`\n\n"
+            f"- 기간: {period}\n"
+            f"- 산출물: `{output}`"
+        )
+        return self.send_message(text, parse_mode="Markdown")
+
     def send_photo(
         self,
         photo_path: str,

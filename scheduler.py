@@ -253,6 +253,27 @@ class TradingScheduler:
             replace_existing=True
         )
 
+        # 14. 주간 개선 제안서 리마인더 (KST 금요일 17:45 - 17:30 주간 복기 이후)
+        # 봇이 직접 에이전트 호출 불가 → 사용자에게 수동 실행 안내
+        self.scheduler.add_job(
+            self._run_improvement_reminder_weekly,
+            CronTrigger(hour=17, minute=45, day_of_week='fri', timezone=_KST_TZ),
+            id='improvement_reminder_weekly',
+            name='주간 개선 제안서 리마인더',
+            replace_existing=True
+        )
+
+        # 15. 월간 개선 제안서 리마인더 (KST 매월 1일 09:02, 주말/공휴일 포함)
+        # - 평일 09:00 midweek_sell_profit 매도 잡과 로그 혼선 방지 위해 09:02로 오프셋
+        # - 1일이 주말/공휴일이어도 발송 (사용자가 수동 실행 여부를 판단)
+        self.scheduler.add_job(
+            self._run_improvement_reminder_monthly,
+            CronTrigger(day='1', hour=9, minute=2, timezone=_KST_TZ),
+            id='improvement_reminder_monthly',
+            name='월간 개선 제안서 리마인더',
+            replace_existing=True
+        )
+
         logger.info("스케줄 등록 완료")
         self._print_schedules()
     
@@ -485,6 +506,30 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"주간 매매 복기 실패: {e}")
             self._send_error_notification("주간 매매 복기", str(e))
+
+    async def _run_improvement_reminder_weekly(self) -> None:
+        """금요일 17:45 - 주간 개선 제안서 리마인더 (공휴일에도 발송)"""
+        logger.info("📣 주간 개선 제안서 리마인더 (금 17:45)")
+        try:
+            from modules.reporter.telegram_notifier import TelegramNotifier
+            ok = TelegramNotifier().send_improvement_reminder("weekly")
+            if not ok:
+                logger.warning("주간 개선 리마인더 전송 실패 (텔레그램 응답 오류)")
+        except Exception as e:
+            logger.error(f"주간 개선 리마인더 전송 실패: {e}")
+            self._send_error_notification("주간 개선 리마인더", str(e))
+
+    async def _run_improvement_reminder_monthly(self) -> None:
+        """매월 1일 09:02 - 월간 개선 제안서 리마인더 (주말/공휴일 포함 발송)"""
+        logger.info("📣 월간 개선 제안서 리마인더 (매월 1일 09:02)")
+        try:
+            from modules.reporter.telegram_notifier import TelegramNotifier
+            ok = TelegramNotifier().send_improvement_reminder("monthly")
+            if not ok:
+                logger.warning("월간 개선 리마인더 전송 실패 (텔레그램 응답 오류)")
+        except Exception as e:
+            logger.error(f"월간 개선 리마인더 전송 실패: {e}")
+            self._send_error_notification("월간 개선 리마인더", str(e))
 
     def _send_error_notification(self, task: str, error: str) -> None:
         """에러 알림 전송"""
