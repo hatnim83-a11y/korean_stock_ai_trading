@@ -39,6 +39,23 @@ GROUP BY strategy, grade
 ORDER BY strategy, grade;
 ```
 
+### 1-4. ai_review NULL 대기 상태 판정 (정상 대기 vs 시스템 이슈 구분)
+`modules/post_trade_analyzer/analyzer.py`의 `MIN_CALENDAR_DAYS_WAIT=8` 조건 때문에 D+8 미만 매도건은 ai_review가 정상적으로 NULL. 본 쿼리로 "대기 중"과 "실제 분석 지연"을 구분:
+```sql
+SELECT id, stock_code, sell_date,
+       CAST(julianday('now','localtime') - julianday(sell_date) AS INTEGER) AS days_since_sell,
+       CASE
+         WHEN CAST(julianday('now','localtime') - julianday(sell_date) AS INTEGER) < 8
+         THEN '대기중(D+8미만)'
+         ELSE '분석지연(조사필요)'
+       END AS status
+FROM trade_reviews
+WHERE ai_review IS NULL
+  AND sell_date >= date('now','-30 days','localtime')
+ORDER BY sell_date DESC;
+```
+'분석지연' 행이 발견되면 제안서 섹션 9 메타에 원인 조사 권고를 필수 포함.
+
 ## 2. 파라미터 집중 분석
 
 ### 2-1. 손절 관련 — 조기 매도 후 반등 케이스 (`focus:stop_loss`)

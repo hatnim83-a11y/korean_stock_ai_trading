@@ -24,7 +24,7 @@
   - `.claude/agents/trade-improvement-analyst.md` (에이전트 정의)
   - `docs/improvements/README.md` (관리 규칙)
   - `CLAUDE.md` 루트 ("전략/파라미터 변경 시 필수 프로세스" 섹션)
-- [ ] `git status`로 모든 변경 파일 확인 후 커밋 (사용자 승인 필요)
+- [x] `git status`로 모든 변경 파일 확인 후 커밋 (사용자 승인 필요) — 커밋 `2ed8d5d` (2026-04-21)
 
 ## 문서 업데이트
 - [x] `docs/INDEX.md` — `docs/improvements/` 섹션 추가 + 진행 중 작업 등록

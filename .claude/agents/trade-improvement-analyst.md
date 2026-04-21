@@ -188,6 +188,7 @@ generated_at: YYYY-MM-DD HH:MM KST
 | Python 폴백도 실패 | 제안서 생성 중단, 에러 메시지를 메인 에이전트로 리턴 |
 | 표본 < 임계값 | "판단 유보" 섹션으로 제출 (섹션 5 파라미터 제안 생략) |
 | JSON 파싱 실패 다수(>20%) | 제안서 경고 박스로 강조, 원인 조사 권고 |
+| `ai_review` NULL 다수 | `queries.md` 쿼리 1-4로 "대기중(D+8미만)"과 "분석지연" 구분. 전자는 시스템 이슈 아님 — 섹션 9 메타에 명시하고 제안서 본문에 조사 권고 불필요. 후자만 조사 권고 대상. |
 | `change_log.md` 부재 | "초기 상태, 변경 이력 없음"으로 섹션 2 기록 |
 | 같은 파일명 제안서 이미 존재 | 접미사 `-v2`, `-v3` 붙여 저장 |
 
@@ -203,6 +204,8 @@ generated_at: YYYY-MM-DD HH:MM KST
 - [ ] 메인 에이전트로 리턴할 3줄 요약 준비
 
 ## 참고 자료
+
+> **메모리 실제 경로**: `memory/` 심볼릭 링크가 없을 수 있다. 실제 저장 경로는 `/home/hatni/.claude/projects/-home-hatni-korean-stock-ai-trading/memory/`. 아래 `memory/<file>.md` 표기는 이 디렉토리 기준이며, Read 도구로 절대경로를 직접 사용하라.
 
 - **현재 운용 전략**: `memory/project_strategy.md`
 - **미결 검토 항목**:
