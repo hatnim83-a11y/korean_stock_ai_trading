@@ -533,7 +533,25 @@ class Settings(BaseSettings):
         ],
         description="제외할 테마 목록 (블랙리스트)"
     )
-    
+
+    # ===== 테마 재선정 안전장치 (2026-04-21 회전문 사건 대응) =====
+    THEME_MOMENTUM_BOOST_FACTOR: float = Field(
+        default=0.7,
+        description="화요일 실시간 보강 시 모멘텀 delta → 점수 조정 계수 (기존 하드코딩 1.5)"
+    )
+    THEME_MOMENTUM_BOOST_CLAMP: float = Field(
+        default=8.0,
+        description="보강 1회당 총점 변동 상한 (양방향 ±)"
+    )
+    THEME_ENRICH_TOP_K: int = Field(
+        default=30,
+        description="화요일 실시간 보강 대상 상위 N개 테마 (기존 15)"
+    )
+    THEME_DROP_COOLDOWN_ENABLED: bool = Field(
+        default=True,
+        description="화요일 재선정 시 retention 탈락 테마의 동일 세션 재진입 금지"
+    )
+
     # ===== 장 초반 관찰 설정 (Morning Filter) =====
     ENABLE_MORNING_FILTER: bool = Field(
         default=True,

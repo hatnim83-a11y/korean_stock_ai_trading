@@ -2471,11 +2471,12 @@ class TradingSystem:
         """
         화요일 08:30 실시간 보강: DB 가중평균에 실시간 모멘텀·뉴스·AI를 반영
 
-        상위 15개 테마에 대해:
+        상위 settings.THEME_ENRICH_TOP_K(기본 30)개 테마에 대해:
         1. URL 확보 (DB → 크롤링 보충)
         2. 종목 매핑 → KIS API 5일 수익률
         3. 뉴스 수집 → AI 감성분석
         4. DB 점수와 차이가 크면 조건부 보정
+           - 모멘텀 delta × THEME_MOMENTUM_BOOST_FACTOR → ±THEME_MOMENTUM_BOOST_CLAMP 클램프
 
         실패 시 원본 scored_themes 그대로 반환 (폴백 안전).
         """
@@ -2487,11 +2488,16 @@ class TradingSystem:
             from modules.theme_analyzer.ai_analyzer import analyze_themes_sync
             from modules.theme_analyzer.scorer import calculate_ai_sentiment_score
 
-            top_15 = scored_themes[:15]
-            logger.info(f"\n🔄 Step 1-B: 화요일 실시간 보강 ({len(top_15)}개 테마)")
+            top_k = scored_themes[:settings.THEME_ENRICH_TOP_K]
+            logger.info(
+                f"\n🔄 Step 1-B: 화요일 실시간 보강 ({len(top_k)}개 테마, "
+                f"factor={settings.THEME_MOMENTUM_BOOST_FACTOR}, "
+                f"clamp=±{settings.THEME_MOMENTUM_BOOST_CLAMP})"
+            )
+            enrich_start = now_kst()
 
             # 1. URL 없는 테마 보충
-            for t in top_15:
+            for t in top_k:
                 if not t.get("url"):
                     result = await asyncio.to_thread(
                         search_naver_theme, t.get("theme", t.get("name", ""))
@@ -2502,7 +2508,9 @@ class TradingSystem:
             # 2. 종목 매핑 + KIS API 모멘텀
             kis = _get_kis_api()
             momentum_updates = 0
-            for t in top_15:
+            adjustments_log: list[float] = []
+            clamped_count = 0
+            for t in top_k:
                 url = t.get("url", "")
                 if not url:
                     continue
@@ -2516,22 +2524,28 @@ class TradingSystem:
                         db_momentum = t.get("momentum", 0) or 0
                         momentum_delta = realtime_momentum - db_momentum
                         if abs(momentum_delta) > 3.0:
-                            adjustment = momentum_delta * 1.5
+                            raw_adjustment = momentum_delta * settings.THEME_MOMENTUM_BOOST_FACTOR
+                            clamp = settings.THEME_MOMENTUM_BOOST_CLAMP
+                            adjustment = max(-clamp, min(clamp, raw_adjustment))
+                            if adjustment != raw_adjustment:
+                                clamped_count += 1
                             t["total_score"] = round(t.get("total_score", 0) + adjustment, 2)
                             t["score"] = t["total_score"]
                             t["momentum_realtime"] = round(realtime_momentum, 2)
                             momentum_updates += 1
+                            adjustments_log.append(adjustment)
                             logger.info(
                                 f"   [{t.get('theme', '')}] 모멘텀 보정: "
                                 f"DB {db_momentum:+.1f} → 실시간 {realtime_momentum:+.1f} "
-                                f"(delta {momentum_delta:+.1f}, 점수 {adjustment:+.1f})"
+                                f"(delta {momentum_delta:+.1f}, raw {raw_adjustment:+.1f}, "
+                                f"적용 {adjustment:+.1f})"
                             )
                 except Exception as e:
                     logger.debug(f"   [{t.get('theme', '')}] 종목 매핑/모멘텀 실패: {e}")
 
             # 3. 뉴스 수집 + AI 감성분석
             ai_updates = 0
-            for t in top_15:
+            for t in top_k:
                 t_name = t.get("theme", t.get("name", ""))
                 try:
                     news_data = await asyncio.to_thread(crawl_theme_news, t_name)
@@ -2542,13 +2556,13 @@ class TradingSystem:
                     logger.debug(f"   [{t_name}] 뉴스 수집 실패: {e}")
 
             # AI 일괄 분석 (news 텍스트가 있는 테마만)
-            themes_for_ai = [t for t in top_15 if t.get("news") and len(t["news"]) >= 50]
+            themes_for_ai = [t for t in top_k if t.get("news") and len(t["news"]) >= 50]
             if themes_for_ai:
                 try:
                     ai_results = await asyncio.to_thread(analyze_themes_sync, themes_for_ai)
                     if ai_results:
                         ai_map = {r["theme_name"]: r for r in ai_results if r and "theme_name" in r}
-                        for t in top_15:
+                        for t in top_k:
                             t_name = t.get("theme", t.get("name", ""))
                             if t_name in ai_map:
                                 realtime_ai = ai_map[t_name].get("score", 0)
@@ -2573,8 +2587,18 @@ class TradingSystem:
 
             # 재정렬
             scored_themes.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+            elapsed = (now_kst() - enrich_start).total_seconds()
+            if adjustments_log:
+                avg_adj = sum(adjustments_log) / len(adjustments_log)
+                min_adj = min(adjustments_log)
+                max_adj = max(adjustments_log)
+                logger.info(
+                    f"   [Enrich] 모멘텀 조정: avg={avg_adj:+.2f}, "
+                    f"min={min_adj:+.2f}, max={max_adj:+.2f}, clamped={clamped_count}"
+                )
             logger.info(
-                f"   실시간 보강 완료: 모멘텀 {momentum_updates}건, AI {ai_updates}건 보정"
+                f"   실시간 보강 완료: 모멘텀 {momentum_updates}건, "
+                f"AI {ai_updates}건 보정 ({elapsed:.1f}초)"
             )
 
         except Exception as e:

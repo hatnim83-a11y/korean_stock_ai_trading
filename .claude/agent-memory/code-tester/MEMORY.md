@@ -103,13 +103,22 @@
 - `_crawl_theme_news_count_scrape`: 변경 없음, now_kst() 사용 확인
 - API 키 없을 때만 _crawl_theme_news_count_scrape(days 사용)로 폴백
 
-### _enrich_tuesday_themes 패턴 (2026-03-13)
-- main.py:1517 정의, main.py:420 호출 (run_theme_analysis 내 화요일 경로)
+### _enrich_tuesday_themes 패턴 (2026-04-21 업데이트)
+- main.py:2470 정의, main.py:472 호출 (run_theme_analysis 내 화요일 경로)
 - 섹션 헤더 '17:05 일별 테마 데이터 수집' 아래에 위치하지만 08:30 화요일 경로용 메서드
-- BASE_SCORE import(line 1533): _enrich_tuesday_themes 내부에서 미사용 (dead import)
-- top_15 = scored_themes[:15]: 슬라이스이므로 dict 수정이 원본에 반영됨 (의도된 side-effect)
+- top_k = scored_themes[:THEME_ENRICH_TOP_K(30)]: 슬라이스이므로 dict 수정이 원본에 반영됨 (의도된 side-effect)
+- 모멘텀 보정: delta * THEME_MOMENTUM_BOOST_FACTOR(0.7) → clamp ±THEME_MOMENTUM_BOOST_CLAMP(8.0) 적용
+- AI 보정 경로: calculate_ai_sentiment_score 결과 차이 직접 적용 (클램프 없음, max ±10점)
+- scored_themes.sort() line 2588: top_k 밖 요소(31번~)도 재정렬 대상 (의도된 동작)
+- docstring에 "상위 15개" 잔존 (실제는 30개, 설명 불일치 — 기능 무관)
 - asyncio.to_thread 대상 함수: 모두 동기 함수 (확인됨)
-- 모멘텀 보정: delta*1.5 적용, 하한 없음 (실용 범위 내 허용)
+
+### 쿨다운 로직 패턴 (2026-04-21 Phase 2)
+- selector.py select_themes_with_retention: dropped 리스트 동일 세션 재진입 차단
+- `cooldown_enabled = getattr(settings, "THEME_DROP_COOLDOWN_ENABLED", False)` — 방어적 기본값 False
+  → settings에 항상 존재하므로 getattr fallback 실제 미사용, 하지만 fallback=False는 기능 미활성화 방향 (롤백 친화적)
+- dropped=[] 빈 리스트 케이스: 안전 (cooldown_skipped=[] 로그 스킵)
+- select_themes_with_retention 시그니처 변경 없음: 기존 호출 100% 호환
 
 ### aggregate_weekly_scores 결과 키 구조 (v12 업데이트, 2026-03-13)
 - 포함: name, theme, total_score, score, momentum, momentum_score, news_count, ai_sentiment, category, days_found, daily_scores, selection_reason, grade, **url** (신규)

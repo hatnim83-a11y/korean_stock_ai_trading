@@ -207,17 +207,41 @@ def select_themes_with_retention(
     remaining_slots = count - len(retained)
     retained_names = {t.get("theme", t.get("name", "")) for t in retained}
 
+    # 쿨다운: 동일 세션에서 drop된 테마는 신규 후보에서 제외
+    # 기본값 True — 회전문 방지가 이 로직의 기본 동작. 롤백 시만 설정에서 False로 내림
+    cooldown_enabled = getattr(settings, "THEME_DROP_COOLDOWN_ENABLED", True)
+    cooldown_skipped: list[str] = []
+
     if remaining_slots > 0:
         # 이미 유지된 테마 제외한 후보에서 선정
-        candidates = [
-            t for t in scored_themes
-            if t.get("theme", t.get("name", "")) not in retained_names
-        ]
+        candidates = []
+        for t in scored_themes:
+            t_name = t.get("theme", t.get("name", ""))
+            if t_name in retained_names:
+                continue
+            if cooldown_enabled and t_name in dropped:
+                cooldown_skipped.append(t_name)
+                continue
+            candidates.append(t)
+
+        if cooldown_skipped:
+            logger.info(
+                f"  🔒 쿨다운: 동일 세션 drop 테마 {len(cooldown_skipped)}개 후보 제외 "
+                f"({', '.join(cooldown_skipped)})"
+            )
+
         new_themes = select_top_themes(
             candidates, count=remaining_slots, blacklist=blacklist
         )
         for t in new_themes:
             t["retained"] = False
+
+        # 후보 풀 고갈 경고
+        if len(new_themes) < remaining_slots:
+            logger.warning(
+                f"  ⚠️  신규 후보 부족: {len(new_themes)}/{remaining_slots}개 선정 "
+                f"(최종 {len(retained) + len(new_themes)}/{count}개 — 빈 슬롯 발생)"
+            )
     else:
         new_themes = []
         # 유지 테마가 count보다 많으면 점수순 상위만 유지
@@ -236,7 +260,8 @@ def select_themes_with_retention(
     n_new = len(final) - n_retained
     logger.info(
         f"🎯 테마 선정 완료: {len(final)}개 "
-        f"(유지 {n_retained}개 + 신규 {n_new}개, 교체 {len(dropped)}개)"
+        f"(유지 {n_retained}개 + 신규 {n_new}개, 교체 {len(dropped)}개, "
+        f"쿨다운 스킵 {len(cooldown_skipped)}개)"
     )
     if dropped:
         logger.info(f"   교체된 테마: {', '.join(dropped)}")
