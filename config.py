@@ -386,13 +386,43 @@ class Settings(BaseSettings):
         default=5_000_000_000,
         description="최소 거래대금 (50억원)"
     )
-    RSI_UPPER_LIMIT: float = Field(
-        default=70.0,
-        description="RSI 상한선 (과열 방지, 백테스트 정합)"
-    )
     RSI_LOWER_LIMIT: float = Field(
         default=30.0,
         description="RSI 하한선 (과매도)"
+    )
+    # ===== RSI 동적 조정 (2026-04-24, 제안 #2 Phase A) =====
+    RSI_DYNAMIC_ENABLED: bool = Field(
+        default=True,
+        description="강세장/약세장 RSI 상한 동적 조정 ON/OFF"
+    )
+    RSI_BULL_THRESHOLD: float = Field(
+        default=1.0,
+        description="KOSPI 전일 종가 등락률 이 값 이상 → 강세장 판정 (%)"
+    )
+    RSI_BEAR_THRESHOLD: float = Field(
+        default=-1.0,
+        description="KOSPI 전일 종가 등락률 이 값 이하 → 약세장 판정 (%)"
+    )
+    RSI_UPPER_BULL: float = Field(
+        default=75.0,
+        description="강세장 RSI 상한 (주도주 탈락 방지)"
+    )
+    RSI_UPPER_NORMAL: float = Field(
+        default=70.0,
+        description="평시 RSI 상한 (기존 RSI_UPPER_LIMIT와 동일)"
+    )
+    RSI_UPPER_BEAR: float = Field(
+        default=65.0,
+        description="약세장 RSI 상한 (보수적 진입)"
+    )
+    # ===== 테마 슬롯 보장 (2026-04-24, 제안 #3 Phase A) =====
+    THEME_MIN_SLOT_ENABLED: bool = Field(
+        default=True,
+        description="테마당 최소 1개 AI 검증 보장 ON/OFF"
+    )
+    THEME_SAFETY_FLOOR: float = Field(
+        default=25.0,
+        description="테마 슬롯 보장 최저 점수 (이 미만이면 보장 없음)"
     )
     VOLUME_RATIO_MIN: float = Field(
         default=1.2,

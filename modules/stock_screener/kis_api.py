@@ -332,6 +332,91 @@ class KISApi:
             logger.error(f"[{index_code}] 지수 조회 중 오류: {e}")
             return None
 
+    def get_prev_index_change_rate(self, index_code: str = "0001") -> Optional[float]:
+        """
+        전일 종가의 전전일 대비 등락률 조회 (KOSPI 기본값).
+
+        Phase A 매수필터 개선(2026-04-24)의 강세장/약세장 판정용.
+        당일 장중 변동성을 배제하기 위해 T-1 종가와 T-2 종가로만 계산.
+
+        Args:
+            index_code: 지수코드 ("0001"=KOSPI, "1001"=KOSDAQ)
+
+        Returns:
+            전일 등락률 (%) 또는 None (조회 실패 시 폴백용)
+            예: 1.68 = KOSPI 전일 종가가 전전일 대비 +1.68% 상승
+        """
+        self._rate_limit()
+
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice"
+        tr_id = "FHKUP03500100"
+        headers = self._get_headers(tr_id)
+
+        today = now_kst().date()
+        start = (today - timedelta(days=10)).strftime("%Y%m%d")
+        end = today.strftime("%Y%m%d")
+
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "U",
+            "FID_INPUT_ISCD": index_code,
+            "FID_INPUT_DATE_1": start,
+            "FID_INPUT_DATE_2": end,
+            "FID_PERIOD_DIV_CODE": "D",
+        }
+
+        try:
+            response = self.client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+            data = response.json()
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    f"[{index_code}] 전일 지수 조회 실패: {data.get('msg1')} "
+                    f"(tr_id={tr_id})"
+                )
+                return None
+
+            output2 = data.get("output2", [])
+            if not isinstance(output2, list) or not output2:
+                logger.warning(f"[{index_code}] 전일 지수 응답 output2 비어있음")
+                return None
+
+            today_str = today.strftime("%Y%m%d")
+            closes = []
+            for row in output2:
+                date_str = str(row.get("stck_bsop_date", ""))
+                close = _safe_float(row.get("bstp_nmix_prpr"))
+                if not date_str or close <= 0:
+                    continue
+                if date_str == today_str:
+                    continue
+                closes.append((date_str, close))
+
+            # 최신순 정렬 방어 (KIS API가 순서를 바꿔도 T-1/T-2 보장)
+            closes.sort(key=lambda x: x[0], reverse=True)
+            closes = closes[:2]
+
+            if len(closes) < 2:
+                logger.warning(
+                    f"[{index_code}] 전일/전전일 종가 2건 확보 실패 "
+                    f"(확보 {len(closes)}건)"
+                )
+                return None
+
+            t_minus_1_close = closes[0][1]
+            t_minus_2_close = closes[1][1]
+            change_rate = (t_minus_1_close - t_minus_2_close) / t_minus_2_close * 100
+
+            logger.info(
+                f"[{index_code}] 전일 등락률 {change_rate:+.2f}% "
+                f"({closes[1][0]} {t_minus_2_close:.2f} → {closes[0][0]} {t_minus_1_close:.2f})"
+            )
+            return round(change_rate, 2)
+
+        except Exception as e:
+            logger.error(f"[{index_code}] 전일 지수 조회 중 오류: {e}")
+            return None
+
     # ===== 현재가/시세 조회 =====
 
     def get_current_price(self, stock_code: str) -> Optional[dict]:

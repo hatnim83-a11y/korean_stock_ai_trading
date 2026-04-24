@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
+from config import settings
 
 
 # ===== 필터 기준 상수 =====
@@ -37,7 +38,9 @@ MIN_INSTITUTION_NET_BUY = 0  # 기관 순매수 최소 (원)
 REQUIRE_BOTH_BUYING = False  # True면 외국인+기관 모두 매수여야 함
 
 # 기술적 필터 기준
-RSI_UPPER_LIMIT = 70.0  # RSI 상한 (과열 방지, 백테스트 정합)
+# 평시/폴백 RSI 상한. 동적 조정은 run_daily_screening에서 rsi_upper 파라미터로 주입.
+# (2026-04-24 Phase A) config의 RSI_UPPER_NORMAL 단일 소스 참조.
+RSI_UPPER_LIMIT = settings.RSI_UPPER_NORMAL
 RSI_LOWER_LIMIT = 30.0  # RSI 하한 (과매도)
 VOLUME_RATIO_MIN = 0.7  # 거래량 비율 하한 (20일 평균 대비)
 REQUIRE_MA_BULLISH = False  # 정배열 가점만 (탈락 아님, 백테스트 정합)

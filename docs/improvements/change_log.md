@@ -18,6 +18,7 @@
 | 2026-04-14 | TRAIL_BE_ACTIVATION / TRAIL_BE_STOP | (미구현) | +5% 도달 시 매수가 -1% 손절 | commit:562e1d5 | hatni | 소급 기록. +5% 도달 후 하락 케이스(오이솔루션형) 방어. Phase 1 focus:stop_loss 제안서가 효과 측정 대기 중 |
 | 2026-04-16 | ORDER_TYPE_DEFAULT | "market" (시장가 01) | "limit_aggressive" (지정가 00 + 매도 1호가) | commit:7161210 | hatni | 소급 기록. 증거금 1.3→1.04배로 슬롯당 실제 투자금 73→91% 확대 목표. Phase 5 실전 관찰 중 |
 | 2026-04-21 | THEME_MOMENTUM_BOOST_FACTOR / CLAMP / DROP_COOLDOWN | (기존 ×1.5 무제한, 쿨다운 없음) | factor 0.7 / clamp ±8 / top_k 30 / cooldown ON | commit:d820638 | hatni | 소급 기록. 화요일 테마 재선정 회전문 방지 Phase 1+2 |
+| 2026-04-24 | RSI_DYNAMIC (RSI_UPPER_BULL/NORMAL/BEAR) + THEME_MIN_SLOT | RSI 70 고정 / 테마 슬롯 보장 없음 | 강세장 75 / 평시 70 / 약세장 65, 테마당 최소 1개(≥25점) AI 검증 보장 | docs/improvements/2026-04-23_buy_filter_proposal.md | hatni | Phase A 제안 #2+#3 동시 배포. DB v14 마이그레이션 (rsi_at_screen, theme_slot_protected 컬럼). 1주 관찰 후 롤백 트리거 체크 |
 
 <!--
 예시 행 (실제 변경 시 이런 형식으로 추가):

@@ -174,6 +174,7 @@ class Database:
             (11, "themes에 selected 컬럼 추가", self._migrate_v11),
             (12, "themes에 url 컬럼 추가", self._migrate_v12),
             (13, "themes 산업재→금융 재분류", self._migrate_v13),
+            (14, "screening_log 관찰 컬럼 2개 추가 (RSI·슬롯 보호)", self._migrate_v14),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -451,6 +452,28 @@ class Database:
                 f"WHERE category = '산업재' AND theme_name IN ({placeholders})",
                 target_themes,
             )
+
+    def _migrate_v14(self) -> None:
+        """screening_log 관찰용 컬럼 2개 추가 (Phase A 매수필터 개선).
+
+        - rsi_at_screen: 스크리닝 시점 RSI 값 (RSI 75 동적 통과 종목 사후 추적용)
+        - theme_slot_protected: 테마 슬롯 보장에 의해 보존된 종목 플래그 (0/1)
+
+        기본값 NULL/0이라 기존 레코드 영향 없음. 재실행 시 duplicate column 예외는 ignore.
+        """
+        with self.get_cursor() as cursor:
+            try:
+                cursor.execute(
+                    "ALTER TABLE screening_log ADD COLUMN rsi_at_screen REAL DEFAULT NULL"
+                )
+            except Exception:
+                pass  # 이미 존재하면 무시
+            try:
+                cursor.execute(
+                    "ALTER TABLE screening_log ADD COLUMN theme_slot_protected INTEGER DEFAULT 0"
+                )
+            except Exception:
+                pass
 
     def init_tables(self) -> None:
         """
@@ -1341,13 +1364,19 @@ class Database:
     # ===== screening_log =====
 
     def save_screening_log(self, log: dict) -> None:
-        """스크리닝 로그 저장"""
+        """스크리닝 로그 저장
+
+        log 딕셔너리 선택 키:
+            rsi_at_screen (float): 스크리닝 시점 RSI 값 (v14 추가)
+            theme_slot_protected (bool/int): 테마 슬롯 보장 플래그 (v14 추가)
+        """
         with self.get_cursor() as cursor:
             cursor.execute("""
                 INSERT OR IGNORE INTO screening_log (
                     date, stock_code, stock_name, theme, stage,
-                    passed, score, reject_reason, details_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    passed, score, reject_reason, details_json,
+                    rsi_at_screen, theme_slot_protected
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 log['date'],
                 log['stock_code'],
@@ -1358,6 +1387,8 @@ class Database:
                 log.get('score'),
                 log.get('reject_reason'),
                 log.get('details_json'),
+                log.get('rsi_at_screen'),
+                int(bool(log.get('theme_slot_protected', 0))),
             ))
 
     # ===== 시스템 상태 관련 메서드 =====
