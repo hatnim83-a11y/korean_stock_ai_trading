@@ -21,6 +21,7 @@ verifier.py - AI 검증 파이프라인
 """
 
 import asyncio
+import json
 from datetime import date, datetime
 from typing import Optional
 
@@ -204,6 +205,9 @@ async def verify_stocks_async(
             result["ai_sentiment"] = 5.0
             result["ai_recommend"] = "Hold"
             result["ai_confidence"] = 0.0
+            result["ai_target_return"] = 0
+            result["ai_reason"] = ""
+            result["ai_risk"] = ""
         
         # 통과 여부
         result["ai_passed"] = (
@@ -215,7 +219,10 @@ async def verify_stocks_async(
     
     passed = sum(1 for v in verified if v.get("ai_passed"))
     logger.info(f"✅ AI 검증 완료: {passed}/{len(stocks)}개 통과")
-    
+
+    # screening_log에 stage="ai_verify" 일괄 저장 (예외 격리)
+    _save_ai_verify_logs(verified)
+
     return verified
 
 
@@ -429,8 +436,84 @@ def _mock_verification(stocks: list[dict]) -> list[dict]:
         result["ai_passed"] = ai_score >= MIN_AI_SCORE and recommend not in EXCLUDE_RECOMMENDATIONS
         
         verified.append(result)
-    
+
     return verified
+
+
+# ===== screening_log 저장 헬퍼 =====
+
+def _save_ai_verify_logs(verified: list[dict]) -> None:
+    """AI 검증 단계 결과를 screening_log에 stage='ai_verify'로 일괄 저장.
+
+    매수 흐름에 영향이 가지 않도록 try/except로 격리한다.
+    UNIQUE(date, stock_code, stage) + INSERT OR IGNORE라 중복은 안전하게 무시된다.
+    """
+    if not verified:
+        return
+
+    try:
+        from database import Database
+    except Exception as e:
+        logger.warning(f"AI 검증 로그 저장 import 실패 (무시): {e}")
+        return
+
+    db = None
+    try:
+        db = Database()
+        db.connect()
+        today_iso = now_kst().date().isoformat()
+        passed_count = 0
+        rejected_count = 0
+        for v in verified:
+            try:
+                code = v.get("stock_code") or v.get("code")
+                if not code:
+                    continue
+                is_passed = bool(v.get("ai_passed"))
+                recommend = v.get("ai_recommend", "") or ""
+                sentiment = v.get("ai_sentiment", 0) or 0
+                if is_passed:
+                    reject_reason = None
+                elif recommend in EXCLUDE_RECOMMENDATIONS:
+                    reject_reason = f"recommend={recommend}"
+                else:
+                    reject_reason = "low_score"
+                try:
+                    details_json = json.dumps({
+                        "recommend": recommend,
+                        "confidence": v.get("ai_confidence"),
+                        "target_return": v.get("ai_target_return"),
+                    }, ensure_ascii=False)
+                except Exception:
+                    details_json = None
+                db.save_screening_log({
+                    "date": today_iso,
+                    "stock_code": code,
+                    "stock_name": v.get("stock_name") or v.get("name", ""),
+                    "theme": v.get("theme"),
+                    "stage": "ai_verify",
+                    "passed": is_passed,
+                    "score": sentiment,
+                    "reject_reason": reject_reason,
+                    "details_json": details_json,
+                })
+                if is_passed:
+                    passed_count += 1
+                else:
+                    rejected_count += 1
+            except Exception as inner:
+                logger.debug(f"AI 검증 로그 1건 저장 실패 (무시): {inner}")
+        logger.info(
+            f"💾 screening_log[ai_verify] 저장: 통과 {passed_count}건, 탈락 {rejected_count}건"
+        )
+    except Exception as e:
+        logger.warning(f"AI 검증 로그 저장 실패 (무시): {e}")
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 # ===== 직접 실행 시 테스트 =====

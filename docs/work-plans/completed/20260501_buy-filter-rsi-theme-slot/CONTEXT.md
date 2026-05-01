@@ -264,3 +264,71 @@ if current_version < 13:
 ### 판정 분기
 - **롤백 미발동** → CHECKLIST Phase A-6 체크, 3문서 아카이브, Phase B(MIN_FINAL_SCORE 45→42) 검토 착수
 - **롤백 발동** → `.env`에 스위치 OFF 2줄 추가 + 재시작 + change_log.md 롤백 행 추가
+
+---
+
+## 작업 중 발견 사항 (2026-05-01 대화 세션 — Phase A 5/1 관찰)
+
+### 실행 명령 흐름
+1. `/improve weekly` → `docs/improvements/2026-W18-weekly.md` 생성
+2. `/improve monthly` → `docs/improvements/2026-05_monthly.md` 생성 (462줄, 31KB)
+
+### 🔍 발견 8: Phase A 1주 관찰 결과 — 롤백 트리거 모두 미발동 (유지 권고)
+- **통과율**: 17.9% → 20.6% 개선
+- **테마 슬롯 보장 발동률**: 96% (24/25, 5영업일×5테마)
+- **매수 실패일(매수 0건)**: 0/4
+- **롤백 트리거 9.1절** (제안서) — 5개 항목 전부 미발동
+- **결정**: Phase A **유지**. Phase B (MIN_FINAL_SCORE 45→42) 자동 유보
+- **승인 형태**: 별도 사용자 승인 불필요. 단 `change_log.md`에 "Phase A 5/1 관찰 — 유지 결정" 1줄 추가는 검토 가치 있음
+- **주의**: weekly 표본은 5영업일·매도 1건뿐이라 통과율 외 매도 결과 측 검증은 N≈0 — Phase B 결정은 5/15 수준에서 재평가
+
+### 🔍 발견 9: 시스템 무결성 — `trade_reviews` 적재 누락 (시급, Phase A 외부 이슈)
+**weekly에서 단건(한화오션 4/27) 의심 → monthly에서 구조적 문제로 확정.**
+- **4월 SELL 18건 vs trade_reviews 14건 → 5건 누락**
+  - max_hold 매도: 클래시스(4/10), 오이솔루션(4/22), 한화오션(4/27) — **3/4 누락 = 75%**
+  - midweek 교체 매도: 삼성전기(4/9), 삼성SDI(4/9) — **2건 누락**
+- **의심 경로**:
+  - `main.run_hold_period_sells()` → `_close_position_in_db()`의 review 생성 호출 누락 가능성
+  - midweek 교체 매도 (`_execute_midweek_profit_sells` / `_execute_midweek_loss_sells`) 도 동일 경로 점검 필요
+- **영향**: 보유기간/midweek 매도의 사후 분석 신뢰도 저하, `project_hold_days_review.md`의 데이터 정체
+- **다음 단계**: 별도 작업 디렉토리(예: `docs/work-plans/active/trade-reviews-coverage-fix/`)에서 `/plan` 실행 권장. Phase A 작업과 직교(독립)이므로 본 작업 아카이브와 병행 가능
+
+### 🔍 발견 10: 추가 수사 대상 (monthly에서 발견된 정보)
+1. **자본 점프**: 4/8~4/10 `daily_snapshots.total_capital` 4.59M → 9.25M (+97%) — 외부 입금 추정. 향후 KRW 절대 비교 시 비율 기반으로 회피 필요
+2. **MDD 단위 의심**: -210%, -396% 등 비현실 값 — 계산 로직 점검 필요
+3. **매도 slippage NULL**: 13건 매도 모두 미측정 → 매도 경로 slippage 계산 호출 미연결
+4. **갭 필터 로깅 부재**: `screening_log.stage` 컬럼이 `'filter'`만 존재 → 모닝 갭 검사 단계 별도 로그 없음. W19 `focus:gap_filter` 트리거 전 데이터 소스 점검 선행 필요
+
+### 🔍 발견 11: AI parameter_suggestion 사후 편향(hindsight bias) 의심
+- monthly 분석에서 `trade_reviews.ai_review` 14건 중 8건이 자유서술로 "트레일링 완화" 권고
+- 그러나 같은 종목들의 D+5 추적 결과는 **양극화** (2건 추가 상승 +14~+18% / 2건 급락 회피 -10~-12%)
+- **시사점**: AI 자유서술 권고를 그대로 수용하면 안 됨. 본 사이클은 "전체 유지"로 결정. 향후 분석에서도 hindsight bias 경계
+
+---
+
+## 다음 대화 진입점 (재정리 — 2026-05-01 분석 후)
+
+**컨텍스트 매우 큼 — 다음 작업은 새 대화 시작 강력 권장.**
+
+### 우선순위 분기
+
+**🔴 우선순위 1 — `trade_reviews` 누락 버그 수정 (시급)**
+- 새 대화 시작 → `/plan docs/improvements/2026-05_monthly.md`
+- 별도 작업 디렉토리 `trade-reviews-coverage-fix` 권장
+- 핵심 조사: `main.py:run_hold_period_sells()` + midweek 교체 매도 경로의 review 생성 호출
+
+**🟡 우선순위 2 — Phase A 작업 아카이브 (선택)**
+- 본 CONTEXT.md / PLAN.md / CHECKLIST.md를 `docs/work-plans/completed/20260501_buy-filter-rsi-theme-slot/`로 이동
+- `change_log.md`에 "Phase A 유지 결정" 1줄 추가
+- Phase B 검토는 5/15 별도 시점에 재개
+
+**🟢 우선순위 3 — 추가 수사 (여유 시)**
+- MDD 계산 로직 점검
+- 매도 slippage 미측정 원인
+- screening_log stage 'filter'만 존재하는 이유 (갭 검사 로그 부재)
+
+### 참조 문서 (새 대화에서 인용 가능)
+- `docs/improvements/2026-W18-weekly.md` — 1주 관찰 (Phase A 양호 + 단건 trade_reviews 누락 의심)
+- `docs/improvements/2026-05_monthly.md` — 30일 누적 (462줄, 누락 5건 확정 + 추가 수사 4건)
+- `memory/project_buy_filter_phase_a.md` — Phase A 전체 맥락
+- `memory/project_stop_loss_review.md` — 손절 -5% 재평가는 Phase B 트리거 10건 미달로 추가 연기

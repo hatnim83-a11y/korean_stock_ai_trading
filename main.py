@@ -1932,6 +1932,7 @@ class TradingSystem:
                 "buy_price": h.get("buy_price", 0),
                 "profit_rate": profit_rate,
                 "theme": dropped_name,
+                "buy_date": h.get("buy_date") or h.get("date"),  # trade_review hold_days 계산용
             }
 
             if profit_rate > 0:
@@ -1961,6 +1962,66 @@ class TradingSystem:
             f"빈 슬롯은 09:25에 {replacement['theme_name']} 종목으로 채움"
         )
     
+    # ===== trade_review 적재 헬퍼 (monitor 우회 매도용) =====
+
+    @staticmethod
+    def _compute_hold_days(buy_date_str: str, today_date) -> int:
+        """buy_date 문자열 → 영업일 보유기간 계산 (실패 시 0 반환)."""
+        if not buy_date_str:
+            return 0
+        try:
+            buy_d = datetime.strptime(str(buy_date_str), "%Y-%m-%d").date()
+            return count_trading_days(buy_d, today_date)
+        except Exception:
+            return 0
+
+    def _save_trade_review_for_main_sell(
+        self,
+        *,
+        trade_id: Optional[int],
+        stock_code: str,
+        stock_name: str,
+        buy_price: float,
+        sell_price: float,
+        shares: int,
+        profit_rate_pct: float,
+        profit_amount: float,
+        sell_reason: str,
+        buy_date: str,
+        theme: str,
+        hold_days: int,
+        position_states: dict,
+    ) -> None:
+        """monitor를 우회하는 매도 경로(보유기간/midweek)용 trade_review 적재.
+
+        portfolio_monitor_v2._close_position_in_db 와 동일한 컬럼 셋으로 INSERT.
+        실패해도 매도 자체는 영향받지 않도록 try/except로 격리.
+        """
+        try:
+            state = position_states.get(stock_code, {}) or {}
+            max_profit = state.get("max_profit_rate") or 0
+            trailing_lv = state.get("trailing_level") or 0
+            self.db.save_trade_review({
+                "trade_id": trade_id,
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "buy_date": buy_date,
+                "sell_date": str(now_kst().date()),
+                "buy_price": buy_price,
+                "sell_price": sell_price,
+                "shares": shares,
+                "hold_days": hold_days,
+                "profit_rate": profit_rate_pct,
+                "profit_amount": profit_amount,
+                "sell_reason": sell_reason,
+                "strategy_type": PortfolioMonitorV2._classify_strategy(sell_reason),
+                "trailing_level": trailing_lv,
+                "max_profit_during_hold": round(max_profit * 100, 2),
+                "theme": theme,
+            })
+        except Exception as e:
+            logger.error(f"trade_review 저장 실패 ({stock_name}): {e}")
+
     # ===== 보유기간 만료 매도 (09:15) =====
 
     async def run_hold_period_sells(self) -> None:
@@ -2045,6 +2106,8 @@ class TradingSystem:
                     "max_days": max_days,
                     "profit_rate": profit_rate,
                     "reason": SellReason.MAX_HOLD_DAYS.value,
+                    "buy_date": str(buy_date),  # trade_review용
+                    "theme": pos.get("theme", ""),  # trade_review용
                 })
 
         if not sell_targets:
@@ -2089,8 +2152,9 @@ class TradingSystem:
 
                 # DB 기록 (profit_rate는 퍼센트 형태로 저장 — portfolio_monitor_v2와 일치)
                 reason = SellReason.MAX_HOLD_DAYS.value
+                target = next((t for t in sell_targets if t["stock_code"] == stock_code), {})
                 self.db.close_position(stock_code, reason)
-                self.db.save_trade({
+                trade_id = self.db.save_trade({
                     "stock_code": stock_code,
                     "stock_name": stock_name,
                     "action": "sell",
@@ -2104,13 +2168,29 @@ class TradingSystem:
                     "filled_price": filled_price,
                 })
 
+                # trade_review 적재 (portfolio_monitor_v2._close_position_in_db와 동일 패턴)
+                self._save_trade_review_for_main_sell(
+                    trade_id=trade_id,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    buy_price=buy_price,
+                    sell_price=filled_price,
+                    shares=quantity,
+                    profit_rate_pct=actual_profit_rate * 100,
+                    profit_amount=actual_profit_amount,
+                    sell_reason=reason,
+                    buy_date=target.get("buy_date", ""),
+                    theme=target.get("theme", ""),
+                    hold_days=target.get("hold_days", 0),
+                    position_states=position_states,
+                )
+
                 # 모니터 포지션 제거 (09:15는 모니터 시작 전이므로 보통 None)
                 if self.monitor:
                     self.monitor.remove_position(stock_code)
 
                 # 텔레그램 알림
                 pnl_emoji = "🔺" if actual_profit_rate >= 0 else "🔻"
-                target = next((t for t in sell_targets if t["stock_code"] == stock_code), {})
                 self.notifier.send_message(
                     f"⏰ 보유기간 초과 매도 (09:15)\n\n"
                     f"📊 {stock_name} ({stock_code})\n"
@@ -2172,6 +2252,11 @@ class TradingSystem:
             for s in self._midweek_sell_queue
         ]
 
+        # 매도 전 큐 스냅샷 (review 메타 보강용)
+        queue_snapshot = {s["stock_code"]: s for s in self._midweek_sell_queue}
+        position_states = self.db.get_all_position_states()
+        today = now_kst().date()
+
         try:
             result = await asyncio.to_thread(
                 self.trading_engine.execute_sell_orders,
@@ -2190,11 +2275,14 @@ class TradingSystem:
                 sold_count += 1
                 filled_price = order.get("filled_price", order.get("price", 0))
                 quantity = order.get("quantity", 0)
+                buy_price = order.get("buy_price", 0)
+                profit_rate_pct = (order.get("profit_rate", 0) or 0) * 100
+                profit_amount = order.get("profit_amount", 0) or 0
                 logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
 
                 # DB 기록
                 self.db.close_position(stock_code, reason)
-                self.db.save_trade({
+                trade_id = self.db.save_trade({
                     "stock_code": stock_code,
                     "stock_name": stock_name,
                     "action": "sell",
@@ -2202,11 +2290,31 @@ class TradingSystem:
                     "price": filled_price,
                     "amount": (filled_price or 0) * quantity,
                     "reason": reason,
-                    "profit_rate": order.get("profit_rate", 0) * 100,
-                    "profit_amount": order.get("profit_amount", 0),
-                    "buy_price": order.get("buy_price", 0),
+                    "profit_rate": profit_rate_pct,
+                    "profit_amount": profit_amount,
+                    "buy_price": buy_price,
                     "filled_price": filled_price,
                 })
+
+                # trade_review 적재
+                snap = queue_snapshot.get(stock_code, {})
+                buy_date_str = snap.get("buy_date", "") or ""
+                hold_days = self._compute_hold_days(buy_date_str, today)
+                self._save_trade_review_for_main_sell(
+                    trade_id=trade_id,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    buy_price=buy_price,
+                    sell_price=filled_price,
+                    shares=quantity,
+                    profit_rate_pct=profit_rate_pct,
+                    profit_amount=profit_amount,
+                    sell_reason=reason,
+                    buy_date=buy_date_str,
+                    theme=snap.get("theme", ""),
+                    hold_days=hold_days,
+                    position_states=position_states,
+                )
 
                 # 모니터 포지션 제거
                 if self.monitor:
@@ -2256,6 +2364,11 @@ class TradingSystem:
             for s in self._midweek_loss_queue
         ]
 
+        # 매도 전 큐 스냅샷 (review 메타 보강용)
+        queue_snapshot = {s["stock_code"]: s for s in self._midweek_loss_queue}
+        position_states = self.db.get_all_position_states()
+        today = now_kst().date()
+
         try:
             result = await asyncio.to_thread(
                 self.trading_engine.execute_sell_orders,
@@ -2274,10 +2387,13 @@ class TradingSystem:
                 sold_count += 1
                 filled_price = order.get("filled_price", order.get("price", 0))
                 quantity = order.get("quantity", 0)
+                buy_price = order.get("buy_price", 0)
+                profit_rate_pct = (order.get("profit_rate", 0) or 0) * 100
+                profit_amount = order.get("profit_amount", 0) or 0
                 logger.info(f"   ✅ {stock_name} {quantity}주 매도 완료 (@{filled_price:,})")
 
                 self.db.close_position(stock_code, reason)
-                self.db.save_trade({
+                trade_id = self.db.save_trade({
                     "stock_code": stock_code,
                     "stock_name": stock_name,
                     "action": "sell",
@@ -2285,11 +2401,31 @@ class TradingSystem:
                     "price": filled_price,
                     "amount": (filled_price or 0) * quantity,
                     "reason": reason,
-                    "profit_rate": order.get("profit_rate", 0) * 100,
-                    "profit_amount": order.get("profit_amount", 0),
-                    "buy_price": order.get("buy_price", 0),
+                    "profit_rate": profit_rate_pct,
+                    "profit_amount": profit_amount,
+                    "buy_price": buy_price,
                     "filled_price": filled_price,
                 })
+
+                # trade_review 적재
+                snap = queue_snapshot.get(stock_code, {})
+                buy_date_str = snap.get("buy_date", "") or ""
+                hold_days = self._compute_hold_days(buy_date_str, today)
+                self._save_trade_review_for_main_sell(
+                    trade_id=trade_id,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    buy_price=buy_price,
+                    sell_price=filled_price,
+                    shares=quantity,
+                    profit_rate_pct=profit_rate_pct,
+                    profit_amount=profit_amount,
+                    sell_reason=reason,
+                    buy_date=buy_date_str,
+                    theme=snap.get("theme", ""),
+                    hold_days=hold_days,
+                    position_states=position_states,
+                )
 
                 if self.monitor:
                     self.monitor.remove_position(stock_code)

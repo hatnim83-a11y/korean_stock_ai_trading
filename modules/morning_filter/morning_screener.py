@@ -23,6 +23,7 @@ morning_screener.py - 장 초반 통합 스크리너
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from datetime import datetime, time as dtime
@@ -248,6 +249,9 @@ class MorningScreener:
             current_stocks = passed
             logger.info(f"   결과: {len(passed)}개 통과, {gap_excluded}개 제외")
 
+            # screening_log에 stage="gap_filter" 일괄 저장 (예외 격리)
+            _save_gap_filter_logs(passed, excluded)
+
         # 2. 당일 수급 필터
         if self.supply_filter and current_stocks:
             logger.info("\n📊 Step 2: 당일 수급 필터")
@@ -439,6 +443,71 @@ def run_morning_observation(
     )
     
     return screener.filter_candidates(candidates, trading_minutes)
+
+
+# ===== screening_log 저장 헬퍼 =====
+
+def _save_gap_filter_logs(passed: list[dict], excluded: list[dict]) -> None:
+    """갭 필터 단계 결과를 screening_log에 stage='gap_filter'로 일괄 저장.
+
+    매수 흐름에 영향이 가지 않도록 try/except로 격리한다.
+    UNIQUE(date, stock_code, stage) + INSERT OR IGNORE라 중복은 안전하게 무시된다.
+    """
+    try:
+        from database import Database
+    except Exception as e:
+        logger.warning(f"갭 필터 로그 저장 import 실패 (무시): {e}")
+        return
+
+    db = None
+    try:
+        db = Database()
+        db.connect()
+        today_iso = now_kst().date().isoformat()
+        for stock, is_passed in [(s, True) for s in passed] + [(s, False) for s in excluded]:
+            try:
+                code = stock.get("stock_code") or stock.get("code")
+                if not code:
+                    continue
+                gap_r = stock.get("gap_result")
+                if is_passed:
+                    reject_reason = None
+                else:
+                    reject_reason = gap_r.reason if gap_r else "갭 필터"
+                details_json = None
+                if gap_r is not None:
+                    try:
+                        details_json = json.dumps({
+                            "gap_percent": getattr(gap_r, "gap_percent", None),
+                            "prev_close": getattr(gap_r, "prev_close", None),
+                            "open_price": getattr(gap_r, "open_price", None),
+                        }, ensure_ascii=False)
+                    except Exception:
+                        details_json = None
+                db.save_screening_log({
+                    "date": today_iso,
+                    "stock_code": code,
+                    "stock_name": stock.get("stock_name") or stock.get("name", ""),
+                    "theme": stock.get("theme"),
+                    "stage": "gap_filter",
+                    "passed": is_passed,
+                    "score": None,
+                    "reject_reason": reject_reason,
+                    "details_json": details_json,
+                })
+            except Exception as inner:
+                logger.debug(f"갭 필터 로그 1건 저장 실패 (무시): {inner}")
+        logger.info(
+            f"💾 screening_log[gap_filter] 저장: 통과 {len(passed)}건, 탈락 {len(excluded)}건"
+        )
+    except Exception as e:
+        logger.warning(f"갭 필터 로그 저장 실패 (무시): {e}")
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 # ===== 테스트 =====

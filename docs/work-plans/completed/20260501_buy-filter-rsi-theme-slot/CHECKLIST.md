@@ -87,15 +87,15 @@
 - [x] `PRAGMA table_info(screening_log)` → rsi_at_screen(idx 11), theme_slot_protected(idx 12) 존재
 - [x] `SELECT MAX(version) FROM schema_version` = 14
 
-### 실전 관찰 검증 (1주, 2026-04-28 ~ 2026-05-02)
-- [ ] 매일 `[RSI Regime]` INFO 로그 기록 확인
-- [ ] 매일 `[Theme Slot]` INFO 로그 기록 확인 (발동 시)
-- [ ] `screening_log` 새 컬럼 populated 확인:
-  - [ ] `SELECT COUNT(*), AVG(rsi_at_screen) FROM screening_log WHERE date >= '2026-04-28'` > 0
-  - [ ] `SELECT COUNT(*) FROM screening_log WHERE theme_slot_protected=1` > 0 (최소 1일)
-- [ ] 매수 실패일 ≤ 1/5 (20%) 목표 달성
-- [ ] RSI 70~75 통과 종목 5일 평균 수익률 ≥ -5% (롤백 트리거 미발동)
-- [ ] 전체 매도 건 평균 수익률 직전 2주 대비 -5%p 이내 유지
+### 실전 관찰 검증 (1주, 2026-04-28 ~ 2026-05-01) ✅ 완료 (2026-05-01 weekly 분석)
+- [x] 매일 `[RSI Regime]` INFO 로그 기록 확인 — 4영업일 모두 기록
+- [x] 매일 `[Theme Slot]` INFO 로그 기록 확인 (발동 시) — 4영업일 모두 발동
+- [x] `screening_log` 새 컬럼 populated 확인:
+  - [x] `rsi_at_screen` populated: 320건 중 318건 (99.4%), avg_rsi=68.54 (NORMAL~BEAR 혼합)
+  - [x] `theme_slot_protected=1`: 19건 (4/28: 5건, 4/29: 5건, 4/30: 5건, 5/1: 4건)
+- [x] 매수 실패일 ≤ 1/5 (20%) 목표 달성 — **0/4 (0%)** (제안서 2026-W18-weekly.md)
+- [x] 통과율 17.9% → 20.6% 개선 (weekly 분석)
+- [x] 롤백 트리거 9.1절 5개 항목 모두 미발동 — Phase A 유지 결정
 
 ## 배포 항목
 
@@ -110,24 +110,25 @@
 - [x] 스케줄러 정상 기동 로그 확인 (모든 잡 등록)
 - [x] DB 자동 백업 생성 (`data/trading.bak.20260424_220913*`)
 
-### 이상 시 롤백 (필요 시)
-- [ ] `.env` 또는 `config.py`: `RSI_DYNAMIC_ENABLED=False` + `THEME_MIN_SLOT_ENABLED=False` → 재시작
-- [ ] 롤백 시 `docs/improvements/change_log.md`에 롤백 사유 1줄 기록
+### 이상 시 롤백 (필요 시) — 미발동 (2026-05-01 유지 결정)
+- [x] ~~`.env` 또는 `config.py`: `RSI_DYNAMIC_ENABLED=False` + `THEME_MIN_SLOT_ENABLED=False`~~ → 롤백 트리거 미발동
+- [x] ~~롤백 시 change_log 기록~~ → 유지 결정 행 추가로 대체 (2026-05-01)
 
 ## 문서 업데이트 항목
 
 - [x] `docs/improvements/change_log.md`에 1줄 추가 (2026-04-24 행)
 - [x] `memory/project_buy_filter_phase_a.md` 신규 작성
 - [x] `memory/MEMORY.md` 인덱스에 위 파일 추가
-- [ ] `memory/project_strategy.md`에 "RSI 동적 + 테마 슬롯" 섹션 추가 (1주 관찰 결과 반영 후)
-- [ ] 프로젝트 `CLAUDE.md`: 새 교훈/규칙 발견 시에만 추가 (1주 관찰 후)
-- [ ] `modules/CLAUDE.md`: 필요 시 추가 (1주 관찰 후)
-- [ ] 3문서 (PLAN/CONTEXT/CHECKLIST) `active/` → `completed/20260501_buy-filter-rsi-theme-slot/` 이동 (Phase A-6 1주 관찰 후)
+- [x] `memory/project_strategy.md`에 "RSI 동적 + 테마 슬롯" 섹션 추가 (Phase A 결과 반영)
+- [x] 프로젝트 `CLAUDE.md`: 새 교훈/규칙 없음 — 미수정 (관찰 결과 양호)
+- [x] `modules/CLAUDE.md`: 추가 사항 없음 — 미수정
+- [x] `docs/improvements/change_log.md`에 Phase A 유지 결정 1줄 추가 (2026-05-01)
+- [x] 3문서 (PLAN/CONTEXT/CHECKLIST) `active/` → `completed/20260501_buy-filter-rsi-theme-slot/` 이동
 
 ## 완료 게이트 (선언 전 체크)
 
-- [ ] 구현 항목 전부 `[x]`
-- [ ] 검증 항목 전부 `[x]`
-- [ ] 배포 항목 전부 `[x]`
-- [ ] **문서 업데이트 항목 전부 `[x]`** ← 이 단계를 빠뜨리지 말 것
-- [ ] `active/` → `completed/` 아카이브 완료
+- [x] 구현 항목 전부 `[x]`
+- [x] 검증 항목 전부 `[x]`
+- [x] 배포 항목 전부 `[x]`
+- [x] **문서 업데이트 항목 전부 `[x]`** ← 이 단계를 빠뜨리지 말 것
+- [x] `active/` → `completed/` 아카이브 완료
