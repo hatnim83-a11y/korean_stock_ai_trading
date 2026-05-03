@@ -44,6 +44,7 @@ logs/
 
 # Database
 data/*.db
+data/*.bak.*
 *.sqlite3
 
 # Cache
