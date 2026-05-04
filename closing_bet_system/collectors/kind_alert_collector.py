@@ -43,12 +43,14 @@ from config import now_kst
 # ===== 모듈 상수 =====
 
 # KIND 경보 단계 → severity 정수 매핑
-# severity 0 = 정상 (dict 미존재 시 default), 1 = 주의, 2 = 경고, 3 = 위험/정지
+# severity 0 = 정상 (dict 미존재 시 default), 1 = 주의, 2 = 경고, 3 = 위험/정지/관리
+# PRD 4-1 명시: "관리/투자경고/거래정지 → 제외" — 관리종목은 거래정지와 동급 severity
 ALERT_LEVEL_TO_SEVERITY: dict[str, int] = {
     "투자주의": 1, "주의": 1,
     "투자경고": 2, "경고": 2,
     "투자위험": 3, "위험": 3,
     "매매거래정지": 3, "거래정지": 3, "정지": 3,
+    "관리종목": 3, "관리": 3,
 }
 
 # OvernightRiskFilter 통합 시 사용하는 임계값

@@ -204,9 +204,16 @@ class MainOrchestrator:
     def kind_collector(self):
         if self._kind_collector is None:
             from closing_bet_system.collectors.kind_alert_collector import KindAlertCollector
-            # Phase 2-2 1단계: provider 미주입 → 빈 dict 반환 (인터페이스만 활성)
-            # Phase 2-2 2단계 (별도 단위) 에서 KindHttpProvider 주입 예정
-            self._kind_collector = KindAlertCollector()
+            # 단위 2-2b (2026-05-04): KindNaverProvider 주입 — 네이버 금융 시장경보 5 페이지 fetch.
+            # provider 호출 실패 시 KindAlertCollector 가 빈 dict + is_valid=False 폴백.
+            try:
+                from closing_bet_system.collectors.kind_naver_provider import fetch_kind_alerts
+                self._kind_collector = KindAlertCollector(provider=fetch_kind_alerts)
+            except Exception as e:
+                logger.warning(
+                    f"[orchestrator] KindNaverProvider import 실패 — provider 미주입 폴백: {e}"
+                )
+                self._kind_collector = KindAlertCollector()
         return self._kind_collector
 
     # ===== 메인 파이프라인 =====
@@ -224,12 +231,42 @@ class MainOrchestrator:
             logger.info(f"[orchestrator] {today} 휴장일 — 파이프라인 스킵")
             return {"date": str(today), "skipped": "non-trading-day"}
 
-        tickers = list(self._safe_call(self._universe_provider, default=[]))
+        # 단위 2-2b: KIND 시장경보 우선 수집 (universe 전) — severity ≥ 3 사전 제외용.
+        # Phase 2-2 인터페이스 + KindNaverProvider 주입 시 활성. 실패는 graceful (severity_map={}).
+        kind_snapshot = None
+        kind_severity_map: dict[str, int] = {}
+        try:
+            kind_snapshot = await asyncio.to_thread(self.kind_collector.collect)
+            if kind_snapshot is not None and getattr(kind_snapshot, "severity_map", None):
+                kind_severity_map = dict(kind_snapshot.severity_map)
+        except Exception as e:
+            logger.error(f"[orchestrator] kind_collector 예외 (빈 폴백 진행): {e}")
+
+        # universe_provider 호출 — severity_map 인자를 지원하면 전달, 미지원 시 무인자 호출 폴백.
+        # `_safe_call` 시그니처 보존 위해 lambda 로 wrap.
+        # TypeError 폴백 발동 시 KIND 필터가 무력화되므로 warning 로그로 명시적 알림 (운영 관찰성).
+        def _call_universe_provider() -> list:
+            if self._universe_provider is None:
+                return []
+            try:
+                return self._universe_provider(severity_map=kind_severity_map)
+            except TypeError as e:
+                # severity_map 인자 미지원 (v1 호환) — 무인자 호출 + KIND 무력화 경고
+                logger.warning(
+                    f"[orchestrator] universe_provider severity_map 미지원 — "
+                    f"KIND 사전 제외 비활성 (v1 호환 폴백): {e}"
+                )
+                return self._universe_provider()
+
+        tickers = list(self._safe_call(_call_universe_provider, default=[]))
         if not tickers:
             logger.warning("[orchestrator] universe 비어있음 — 파이프라인 스킵")
             return {"date": str(today), "tickers": 0}
 
-        logger.info(f"[orchestrator] 일일 파이프라인 시작 — universe {len(tickers)}건")
+        logger.info(
+            f"[orchestrator] 일일 파이프라인 시작 — universe {len(tickers)}건"
+            + (f" (KIND 사전 제외 candidates {len(kind_severity_map)}종목)" if kind_severity_map else "")
+        )
 
         # ===== 1. 데이터 수집 (병렬 to_thread + return_exceptions) =====
         # KIS rate_limit 으로 인해 collector 내부에서 순차 처리 → 외부에서는 단순 to_thread.
@@ -279,12 +316,8 @@ class MainOrchestrator:
             self._safe_call, self._market_data_provider, {}
         )
 
-        # Phase 2-2: KIND 시장경보 수집 (1회, universe 무관)
-        try:
-            kind_snapshot = await asyncio.to_thread(self.kind_collector.collect)
-        except Exception as e:
-            logger.error(f"[orchestrator] kind_collector 예외 (빈 폴백 진행): {e}")
-            kind_snapshot = None
+        # 단위 2-2b: KIND 시장경보 스냅샷 — 이미 universe_provider 호출 전에 수집됨.
+        # 종목별 OvernightRiskFilter 단계에서 그대로 활용 (kind_snapshot 변수 재사용).
 
         # ===== 2. 종목별 스코어링 + DB + 알림 후보 수집 =====
         # snapshot 인덱싱

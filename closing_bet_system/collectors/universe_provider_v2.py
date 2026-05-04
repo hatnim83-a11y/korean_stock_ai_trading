@@ -409,14 +409,20 @@ def get_universe_v2_filtered(
     top_foreign_count: int = DEFAULT_TOP_FOREIGN_COUNT,
     hard_cap: int = DEFAULT_UNIVERSE_HARD_CAP_V2,
     exclude_swing_holdings: bool = True,
+    severity_map: Optional[dict[str, int]] = None,
 ) -> list[str]:
     """**최종 universe 산출** — v2 4 출처 합집합 → PRD 4-1/4-4 하드 필터 적용.
 
     내부 흐름:
         1) :func:`get_universe_v2` — 4 출처 합집합 (스윙 테마 + pykrx 3종)
         2) :func:`universe_filters.apply_all_filters` — PRD 4-1 속성 + 4-4 유동성
+           (severity_map 주입 시 KIND severity ≥ 3 사전 제외)
 
     실패 격리: 필터 모듈 import/실행 실패 시 unfiltered universe 반환 (graceful).
+
+    Args:
+        severity_map: KIND 시장경보 ``{ticker: severity}``. None 시 KIND 사전 제외 스킵
+            (기존 동작 유지 — 회귀).
 
     Returns:
         최종 universe 종목코드 리스트 (필터 통과).
@@ -436,7 +442,7 @@ def get_universe_v2_filtered(
 
     try:
         from closing_bet_system.collectors.universe_filters import apply_all_filters
-        passed, rejected = apply_all_filters(universe_pool)
+        passed, rejected = apply_all_filters(universe_pool, severity_map=severity_map)
         logger.info(
             f"[universe_v2] 필터 후 최종 universe: {len(passed)}/{len(universe_pool)}"
             f" (탈락 {len(rejected)})"

@@ -5,8 +5,9 @@ PRD 4-1 종목 속성 + 4-4 유동성 하드 필터 모듈.
 PRD 의도: 스코어링 이전에 적용하는 **무조건 제외** 조건 — 점수와 무관하게 진입 금지.
 universe_provider_v2 가 산출한 풀(pool)에서 PRD 하드 필터를 적용해 최종 universe 산출.
 
-본 단위(2-9b) 적용 항목
+본 단위(2-9b + 2-2b 추가) 적용 항목
     - PRD 4-1 (속성):
+        - **KIND severity ≥ 3 (관리/거래정지/투자위험) 사전 제외** (단위 2-2b, severity_map 인자 주입 시)
         - 시가총액 < 500억 제외
         - 주가 < 1,000원 제외
         - 당일 상한가 종목 제외 (등락률 +29.5% 이상 — 정확한 +30% 매칭 어려움)
@@ -17,8 +18,7 @@ universe_provider_v2 가 산출한 풀(pool)에서 PRD 하드 필터를 적용�
 
 후속 단위로 분리 (별도 데이터 출처 필요)
     - PRD 4-1: 보호예수/의무보유 D-7 (SEIBro 데이터)
-    - PRD 4-1: 관리/투자경고/거래정지 (KIND severity, 단위 2-2 의 KindHttpProvider 활성 후)
-    - PRD 4-4: 호가 스프레드 1.5배 (orderbook 누적 후)
+    - PRD 4-4: 호가 스프레드 1.5배 (orderbook 20일 평균 누적 후)
     - PRD 4-4: 주문금액 vs 유동성 3% (실시간 주문 시점)
 
 설계 결정
@@ -71,6 +71,12 @@ LOOKBACK_20D_DAYS = 30
 
 # pykrx market 코드
 _PYKRX_MARKETS = ("KOSPI", "KOSDAQ")
+
+# PRD 4-1 KIND severity 사전 제외 임계값 — kind_alert_collector 단방향 import (순환 없음).
+# kind_alert_collector 가 본 모듈을 import 하지 않으므로 안전.
+from closing_bet_system.collectors.kind_alert_collector import (
+    SEVERITY_EXCLUDE_THRESHOLD,
+)
 
 
 # ===== 캐시 (같은 거래일 1회만 bulk + 종목별 fetch) =====
@@ -303,13 +309,18 @@ def apply_attribute_filters(
     *,
     today: Optional[date_cls] = None,
     config: Optional[dict] = None,
+    severity_map: Optional[dict[str, int]] = None,
 ) -> tuple[list[str], dict[str, str]]:
-    """PRD 4-1 속성 기반 필터 적용 — 시총/주가/상한가/52주 고점.
+    """PRD 4-1 속성 기반 필터 적용 — KIND severity / 시총/주가/상한가/52주 고점.
+
+    KIND severity ≥ 3 (관리/거래정지/투자위험) → PRD 4-1 명시 "제외" 하드 룰로
+    속성 필터 첫 단계에서 사전 차단 (first-rejection-only 정합).
 
     Args:
         tickers: 6자리 종목코드 리스트.
         today: 평가 기준 거래일. None 시 KST 오늘.
         config: 필터 임계값 dict (None 시 settings.yaml 로드).
+        severity_map: KIND 시장경보 ``{ticker: severity}``. None/빈 dict 시 KIND 사전 제외 스킵.
 
     Returns:
         (passed, rejected) — passed: list[str], rejected: ``{ticker: reason}``
@@ -321,10 +332,32 @@ def apply_attribute_filters(
     today_str = today.strftime("%Y%m%d")
     cfg = config or _load_filter_config()
 
-    market_data = _fetch_market_data_bulk(today_str)
-
     passed: list[str] = []
     rejected: dict[str, str] = {}
+    original_total = len(tickers)
+    kind_rejected_count = 0  # 로그 분해용 (속성 탈락과 분리 표시)
+
+    # 0. KIND severity ≥ 3 사전 제외 (PRD 4-1 — "관리/투자경고/거래정지 제외")
+    # 속성 필터 첫 단계에서 차단해 후속 fetch 비용 절감.
+    if severity_map:
+        survivors: list[str] = []
+        for t in tickers:
+            sev = int(severity_map.get(t, 0) or 0)
+            if sev >= SEVERITY_EXCLUDE_THRESHOLD:
+                rejected[t] = f"kind_severity_{sev}"
+            else:
+                survivors.append(t)
+        kind_rejected_count = len(rejected)
+        if kind_rejected_count:
+            logger.info(
+                f"[universe_filters] KIND severity ≥ {SEVERITY_EXCLUDE_THRESHOLD} 사전 제외 — "
+                f"{kind_rejected_count}/{original_total} 탈락"
+            )
+        tickers = survivors
+        if not tickers:
+            return [], rejected
+
+    market_data = _fetch_market_data_bulk(today_str)
 
     for ticker in tickers:
         data = market_data.get(ticker)
@@ -362,9 +395,10 @@ def apply_attribute_filters(
 
         passed.append(ticker)
 
+    attr_rejected_count = len(rejected) - kind_rejected_count
     logger.info(
-        f"[universe_filters] 속성 필터: {len(passed)}/{len(tickers)} 통과 "
-        f"({len(rejected)} 탈락)"
+        f"[universe_filters] 속성 필터: {len(passed)}/{original_total} 통과 "
+        f"(KIND 사전 제외 {kind_rejected_count} + 속성 탈락 {attr_rejected_count})"
     )
     return passed, rejected
 
@@ -429,15 +463,18 @@ def apply_all_filters(
     *,
     today: Optional[date_cls] = None,
     config: Optional[dict] = None,
+    severity_map: Optional[dict[str, int]] = None,
 ) -> tuple[list[str], dict[str, str]]:
     """PRD 4-1 속성 + 4-4 유동성 통합 필터.
 
-    속성 → 유동성 순으로 적용. 한 종목이 여러 필터 위반 시 첫 위반만 기록.
+    KIND severity → 속성 → 유동성 순으로 적용. 한 종목이 여러 필터 위반 시 첫 위반만 기록.
 
     Args:
         tickers: 6자리 종목코드 리스트.
         today: 평가 기준 거래일.
         config: 필터 임계값 dict.
+        severity_map: KIND 시장경보 ``{ticker: severity}``. severity ≥ 3 사전 제외 (PRD 4-1).
+            None/빈 dict 시 KIND 단계 스킵 (기존 동작 유지 — 회귀).
 
     Returns:
         (passed, rejected) — 두 단계 통합 dict
@@ -448,7 +485,9 @@ def apply_all_filters(
     today = today or now_kst().date()
     cfg = config or _load_filter_config()
 
-    after_attr, rejected_attr = apply_attribute_filters(tickers, today=today, config=cfg)
+    after_attr, rejected_attr = apply_attribute_filters(
+        tickers, today=today, config=cfg, severity_map=severity_map
+    )
     after_liq, rejected_liq = apply_liquidity_filters(after_attr, today=today, config=cfg)
 
     # 통합 rejected — 속성 단계 사유가 우선 (첫 위반)
