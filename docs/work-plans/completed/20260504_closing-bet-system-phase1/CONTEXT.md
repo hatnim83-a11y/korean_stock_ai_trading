@@ -182,19 +182,73 @@ CREATE TABLE flow_data_reliability (
 
 ---
 
-## 현재 단위 (0-A) 작업 범위
+## 현재 상태 (2026-05-04)
 
-1. `closing_bet_system/` 디렉토리 트리 + 빈 모듈 시그니처
-2. `closing_bet_system/storage/db.py` — `_migrate_v1()` 4테이블 + schema_version
-3. `closing_bet_system/config/settings.yaml`
-4. `data/closing_bet.db` 초기화
-5. SQLite MCP로 테이블 생성 검증
-6. code-tester 에이전트로 검증
+### Phase 1 (알림형) 9/9 단위 모두 완료 + main.py 통합 완료
 
-**다음 단위(0-B)에서 할 일**:
-- wrapper 3종 (kis_client, telegram_client, swing_db_reader)
-- **fund_guard 미들웨어** (P0 핵심) — 주문 직전 자금/비중/종목 한도 검사
-- TelegramNotifier 부모 클래스 __init__ 토큰 인자 주입
+**완료 모듈 (200+ 테스트 PASS, 모두 code-tester 통과)**:
+- 0-A: 디렉토리 + DB 스키마 v1 + settings.yaml
+- 0-B: wrapper 4종 + fund_guard 미들웨어
+- 0-C/D: Pre-Phase 1 Layer 2 sanity check 백테스트 (19종목 × 3년)
+- 1-1 cost_slippage_engine: PRD 7-2 순수익률
+- 1-2 kis_intraday_flow_collector: Layer 1 4지표 (가용 2)
+- 1-3 kis_price_volume_collector: Layer 2 6지표 (가용 4)
+- 1-4 signal_score_engine: PRD 6-1 11점 + atr_overheat>1.8 하드 필터
+- 1-5a dart_disclosure_collector: PRD 8-2 키워드 매트릭스
+- 1-5b overnight_risk_filter: PRD 4-2/4-3 + DART 통합
+- 1-6 candidate_logger: 라이프사이클 + 1-9 검증 헬퍼
+- 1-7 telegram_review_bot: 알림형 + 신규 봇 분리
+- 1-8 main_orchestrator: 통합 + APScheduler 3 잡
+
+**main.py 통합** (`scheduler.py:_setup_closing_bet_jobs`):
+- `MainOrchestrator(universe_provider=lambda:[], market_data_provider=lambda:{}, name_lookup=lambda t:"(미상)")`
+- placeholder providers → 잡 등록되지만 무동작 (안전)
+- systemd 재시작 시 자동 적용 (사용자 결정)
+
+### Phase 2 진입 전 처리 권장 (이월 항목)
+
+1. **universe_provider 실제 구현** — PRD 5-Layer 3 테마 모멘텀 후보 산출
+2. **market_data_provider 실제 구현** — 미국선물/V-KOSPI/USD-KRW/KOSPI HTTP 수집
+3. **name_lookup 실제 구현** — KIS API 또는 종목 마스터
+4. **label_provider 실제 구현** — T+1 09:30 KIS get_daily_price 첫 행 → label_dict
+5. **weekly_loss_limit 검사** — settings.yaml 정의됨, fund_guard 미구현
+6. **1-7 부모 클래스 결합 약화** — telegram_client.py:78 silent break 위험
+
+### Phase 1-9 검증 (운영 시작 후)
+
+- 추천 후보 30건 누적 (운영 점검 게이트)
+- 15영업일 이상 경과
+- 서로 다른 종목 20개 이상
+- CRISIS/DANGER 일에 진입 0건 (필터 작동)
+- **30건 운영 점검 게이트 자동 리포트 생성** → 사용자 검토
+
+### 최근 이슈 fix (2026-05-04)
+
+- `db.py` `get_cursor` rollback 범위 확장 (`sqlite3.Error` → `Exception`) — LookupError 시 트랜잭션 정리 보장
+- `overnight_risk_filter.py` `decision_reason` DART 중복 prefix 제거
+- "조사" 단독 키워드 제거 → 구체 패턴 (FP 방지: 기업실태조사/시장조사 등 5건)
+- `atr_overheat_value` 정규화 (DB REAL 컬럼 안전성)
+- 텔레그램 봇 토큰/chat_id .env 주입 + 실제 sendMessage 1건 발송 확인
+
+---
+
+## 다음 대화에서 이어가기
+
+새 대화 시작 시 첫 발화로 다음 중 택 1:
+
+### 옵션 1: Phase 2 진입 (반자동 시스템)
+> "종가베팅 Phase 2 시작. CONTEXT.md 참고해서 universe_provider 구현부터 시작해줘"
+- Phase 2 첫 단위: 2-1 kis_orderbook_collector (호가 데이터)
+- 또는 universe_provider 우선 구현 (Phase 1 활성화 → 1-9 게이트 데이터 누적 시작)
+
+### 옵션 2: Phase 1-9 운영 시작
+> "현재 main.py 통합된 종가베팅 시스템 활성화. universe_provider 실 구현해서 1-9 게이트 데이터 수집 시작"
+- placeholder universe → 실제 종목 리스트 connector
+- systemd 재시작 → 15:10 첫 파이프라인 실행
+- 30건 누적까지 매일 모니터링
+
+### 옵션 3: 다른 작업
+> 종가베팅 외 다른 우선순위 작업이 있으면 그걸 먼저
 
 ---
 
