@@ -59,8 +59,25 @@
 
 ### Phase 1. 데이터 수집 + 알림형
 
-- [ ] **1-1.** `engines/cost_slippage_engine.py`
-- [ ] **1-2.** `collectors/kis_intraday_flow_collector.py`
+- [x] **1-1.** `engines/cost_slippage_engine.py` *(2026-05-03 완료)*
+  - [x] PRD 7-2 순수익률 공식 정확 구현 (break-even 검증 -0.0012% 오차)
+  - [x] `CostBreakdown` dataclass (frozen, 14필드)
+  - [x] `round_trip_cost()` / `minimum_target_return()` / `compute_pnl()` / `to_db_payload()`
+  - [x] 슬리피지 3가지 모드 (None=추정/0=실거래/명시값=사후측정)
+  - [x] 싱글톤 + Thread-safe (`threading.Lock` double-checked locking)
+  - [x] 단위 테스트 12케이스 (PRD 공식 검증/break-even/슬리피지 모드/입력 검증/싱글톤 thread safety)
+  - [x] code-tester 검증 → 심각 0건, 주의 2건 즉시 수정 (bool shares 차단 + Lock 추가)
+- [x] **1-2.** `collectors/kis_intraday_flow_collector.py` *(2026-05-03 완료)*
+  - [x] `IntradayFlowSnapshot` frozen dataclass (`is_today` + `foreign_days_collected` 추가)
+  - [x] `KisIntradayFlowCollector` (의존성 주입 + 지연 로딩)
+  - [x] PRD 5-Layer 1 4지표 중 가용 2개 + Phase 2 placeholder 2개
+  - [x] `to_layer1_features()` candidate_features schema 일치
+  - [x] **날짜 검증** (daily[0] vs today KST → is_today)
+  - [x] **close_price=0 가드** (장 시작 직후 미체결 처리)
+  - [x] **frozen + dict field hash 안전성** (`field(hash=False, compare=False)`)
+  - [x] **asyncio.to_thread 권고** docstring 명시 (1-8 통합용)
+  - [x] 단위 테스트 14케이스 통과 (정상/Phase2 placeholder/잘못된 ticker/빈응답/1일치/stale_date/close=0/손상필드/API예외/다종목격리/_to_float/snapshot_time/empty universe/hash 안전성)
+  - [x] code-tester 검증 → 심각 2건 + 주의 3건 즉시 수정
 - [ ] **1-3.** `collectors/kis_price_volume_collector.py`
 - [ ] **1-4.** `engines/signal_score_engine.py` (Layer 1 가중치 0)
 - [ ] **1-5a.** `collectors/dart_disclosure_collector.py`
