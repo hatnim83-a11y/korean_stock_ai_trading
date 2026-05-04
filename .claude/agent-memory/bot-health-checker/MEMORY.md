@@ -63,7 +63,15 @@
 - Trailing: L1(+8%, -5%), L2(+15%, -3%), L3(+25%, -2%)
 - Theme rotation: 7 days
 
+## Phase A 매수 필터 (2026-04-24 배포, DB v14)
+- **screener.py:134** `_get_market_regime_rsi()` — KOSPI 전일 등락률 → RSI 상한 동적(BULL ≥+1% =75 / NORMAL =70 / BEAR ≤-1% =65)
+- **screener.py:189** `_apply_theme_min_slot(min_score, safety_floor)` — 테마별 최상위 1개가 ≥THEME_SAFETY_FLOOR(25점)면 MIN_FINAL_SCORE 컷 면제, protected_codes set 반환
+- **screener.py:721-734** Phase A 3단 컷: ① 슬롯 보장 → ② min_score 컷 → ③ max_total 컷(보장 종목 우선). screening_log.theme_slot_protected=1로 반영.
+- **config.py:394-426** 신규 파라미터 7개: RSI_DYNAMIC_ENABLED=True, RSI_BULL_THRESHOLD=1.0, RSI_BEAR_THRESHOLD=-1.0, RSI_UPPER_BULL=75, RSI_UPPER_NORMAL=70, RSI_UPPER_BEAR=65, THEME_MIN_SLOT_ENABLED=True, THEME_SAFETY_FLOOR=25.0
+- **screening_log v14 컬럼**: rsi_at_screen, theme_slot_protected (집계 가능)
+
 ## Recent Health Checks
+- **2026-04-27 10:50 KST (월)**: Phase A 첫 실전일. uptime 2일 정상. 09:05 스크리닝 78종목 중 12개 필터 통과(슬롯 보장 5건 첫 기록), AI 검증 5종목 → Yes 1건(한화오션 7.5점)/Hold 4건. 한화오션은 보유 종목이라 후보풀에서 제외 → 매수 후보 0개. 09:15 한화오션 보유기간 만료 매도(+2.24%). 09:25 매수 잡 정상 실행, MarketGuard NORMAL(+1.15%/+0.94%), 매수 후보 없어 스킵. 현 포트폴리오 LG디스플레이 1종목(-1.09%). KIS API 500 에러 2건/403 1건(자동 회복). Phase A 의도대로 작동 중.
 - **2026-04-10 09:10 KST (금)**: 테마 DB 버그 수정 후 재시작(09:04). 금융 1개 테마 운영. 09:05 스크리닝 20종목 중 7개 필터 통과→AI 검증 0건 통과(전부 Hold). 포트폴리오 4종목(클래시스 -1.31%, HD한국조선해양 -0.51%, HJ중공업 -2.14%, HPSP -2.31%). 누적 P&L +332,031원(+6.60%), 승률 70%. 디스크 65%. 좀비 프로세스 2개.
 - **2026-04-06 10:13 KST (월)**: 전 서비스 정상. 포트폴리오 3종목. 삼성SDI 손절가 -11.1% 이상 발견. 누적 +167,031원(+3.26%), 승률 67.6%.
 - **2026-04-05 20:47 KST (일)**: 전 서비스 정상 가동(4일째). 포트폴리오 2종목.

@@ -239,8 +239,14 @@
 - 1.005 폴백: 호가단위 불일치 가능성 있으나 KIS가 지정가 수신 후 서버측 정규화하므로 실질 무해
 - `calculate_position_size(market_order=False)` → order_type="limit"(1.04배) 매핑 정상 확인
 
+### 매도 슬리피지 측정 시스템 (2026-05-04, 상세: sell-slippage-review.md)
+- 4파일 + 테스트 스크립트 11시나리오 전체 PASS, 배포 가능 판정
+- SELL_SLIPPAGE_WARN_THRESHOLD: config.py (default=2.0%) — 하드코딩 없음
+- _save_trades is_sell 분기: 매수/매도 완전 분리, 기존 매수 경로 무영향
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`
 - 대시보드 상세: `dashboard-review.md`
 - screener 폴백 상세: `screener-review.md`
+- 슬리피지 상세: `sell-slippage-review.md`
