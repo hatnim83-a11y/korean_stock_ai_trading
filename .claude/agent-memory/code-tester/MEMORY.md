@@ -308,6 +308,19 @@
 - send_batch_alert 헤더 발송 실패 시 개별 알림 계속 진행 (의도된 설계, 헤더 결과 무시)
 - 21개 mock 테스트 전체 PASS 확인 (2026-05-04)
 
+### universe_provider_v2.py 패턴 (2026-05-04 검증, 단위 2-9a)
+- **수정 버그**: `_fetch_top_foreign_buy_codes` 에서 `"거래대금"` 컬럼 참조
+  → pykrx `get_market_net_purchases_of_equities_by_ticker` 실제 컬럼은 `"순매수거래대금"`
+  → `"거래대금"` not in df.columns → 외국인 출처 항상 빈 리스트 (PRD Layer 1 수급 무력화)
+  → UV2-10 테스트도 mock에 `"거래대금"` 컬럼 사용해 버그 미탐지 → mock은 실제 pykrx 컬럼명 사용 필수
+  → 수정: `_FOREIGN_COL = "순매수거래대금"` 로 교체 (pykrx wrap.py 라인 868 컬럼 정의 기준)
+- pykrx OHLCV(`get_market_ohlcv_by_ticker`) 컬럼: `거래대금`(str 인덱스) — 정상
+- pykrx 등락률(`get_market_price_change_by_ticker`) 컬럼: `등락률` — 정상
+- pykrx 외국인 순매수 컬럼 목록: 종목명/매도거래량/매수거래량/순매수거래량/매도거래대금/매수거래대금/순매수거래대금
+- 더블체크 lock 패턴: v1과 동일, race condition 없음 확인
+- isinstance(t, str) 필터: pykrx str 인덱스 → 항상 True (no-op이지만 방어 목적으로 유지)
+- 18개 단위 테스트 전체 PASS 확인 (2026-05-04, 수정 후 재실행)
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`
