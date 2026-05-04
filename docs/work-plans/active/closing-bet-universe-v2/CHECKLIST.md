@@ -91,30 +91,32 @@
 ## 검증 항목
 
 ### 단위 검증
-- [ ] py_compile 2~3 파일 통과
-- [ ] 단위 테스트 27+ 시나리오 PASS
-- [ ] code-tester 심각 0건
+- [x] py_compile 3 파일 통과 (universe_provider_v2 / universe_filters / scheduler)
+- [x] 단위 테스트 33 시나리오 PASS (2-9a 18 + 2-9b 15)
+- [x] code-tester 심각 0건 (2-9a 1건 발견 즉시 수정 완료, 2-9b 0건)
 
-### 통합 검증
-- [ ] scheduler.py 교체 후 import 성공
-- [ ] 단발 트리거 (providers 주입) — universe 30~80 산출 확인
-- [ ] 필터 통과율 60~80% 분포 확인 (너무 강하면 universe 0 위험)
-- [ ] candidate_features INSERT 정상 (기존 흐름 영향 없음)
-- [ ] orderbook_snapshots INSERT 정상
+### 통합 검증 (2026-05-04 KST 20:25 단발 — pykrx 야간 차단으로 부분 검증)
+- [x] scheduler.py 교체 후 import 성공 (`universe_provider_v2.get_universe_v2_filtered`)
+- [x] 단발 트리거 — graceful 폴백 정상 작동 (예외 0건, 호출 6.41초 < 10초 목표 충족)
+- [x] 출처 1 (스윙 테마) 정상 — 19종목 산출
+- [ ] 출처 2~4 (pykrx 거래대금/등락률/외국인) — **야간 KRX 사이트 차단으로 0건** (CONTEXT.md 기록 패턴 그대로 재현, 5/6 15:10 자연 트리거에서 재검증)
+- [ ] 필터 통과율 60~80% 분포 확인 (5/6 15:10 자연 트리거 후)
+- [ ] candidate_features INSERT 정상 (기존 흐름 영향 없음, 5/6 15:10 후)
+- [ ] orderbook_snapshots INSERT 정상 (5/6 15:10 후)
 
-### 실전 검증 (배포 후 1일)
+### 실전 검증 (배포 후 1일 — 5/6 수요일 15:10 KST 첫 자연 트리거)
 - [ ] 15:10 잡 트리거 시 universe v2 산출 + 4 출처 로그 확인
 - [ ] pykrx 호출 시간 모니터링 (< 10초)
 - [ ] candidates 테이블 일일 30~80건 누적 확인
 - [ ] 운영 점검 게이트 진척도 가속 (1주 이내 30건 도달 가능)
 
-## 배포 항목
-- [ ] systemd 재시작 전 선행 체크
-- [ ] 장 마감 후 또는 장 시작 전 권장
-- [ ] `sudo systemctl restart trading_system`
-- [ ] active(running) 확인
-- [ ] 종가베팅 잡 3건 + universe v2 활성 로그 확인
-- [ ] 첫 15:10 잡 트리거 결과 관찰 (universe 종목 수)
+## 배포 항목 ✅ (2026-05-04 KST 20:28 완료)
+- [x] systemd 재시작 전 선행 체크 (단일 PID 2540234, PID 파일 매칭, 이중 실행 없음)
+- [x] 장 마감 후 (KST 20:28, 5/4 월요일 장 마감 후 약 5시간)
+- [x] `sudo systemctl restart trading_system` (PID 2540234 → 2695913)
+- [x] active(running) 확인 (재시작 후 5초 경과 정상)
+- [x] 종가베팅 잡 3건 + **universe v2 활성 로그 확인** ("Phase 1 알림형, universe v2 + providers 4종 활성")
+- [ ] 첫 15:10 잡 트리거 결과 관찰 (**5/6 수요일** — 5/5 어린이날 휴일 건너뜀)
 
 ## 문서 업데이트 항목
 - [ ] `docs/improvements/change_log.md` 1줄 추가

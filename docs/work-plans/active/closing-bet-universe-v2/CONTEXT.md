@@ -267,3 +267,119 @@ APScheduler 15:10 KST
 1. 본 PLAN.md 단위 2-9a 섹션 확인
 2. `closing_bet_system/collectors/universe_provider_v2.py` 신규 작성
 3. 패턴 참조: 기존 `universe_provider.py` v1 + Phase 2 옵션 A `kis_orderbook_collector.py`
+
+---
+
+## 작업 중 발견 사항 (2026-05-04 — 단위 2-9a/2-9b 구현 세션)
+
+### 이번 세션 진행 흐름 (요약)
+
+새 대화에서 `/resume` 호출 → 본 3문서 자동 로드 → 단위 2-9a 시작 → 단위 2-9b 진입 → 커밋/푸시까지 한 세션에서 처리.
+
+진행 단계:
+1. **/resume + PRD 재독**: 사용자 요청으로 PRD v2.0(777줄) 전체 다시 읽음 → 단위 2-9a/2-9b 설계가 PRD 16-3 / 4-1 / 4-4 / 11-1 / 5장 Layer 1+3 과 정확히 정합함을 재확인 (변경 사항 없음)
+2. **단위 2-9a — universe_provider_v2.py (~330줄)**: 4 출처 합집합 구현 → 단위 테스트 18 시나리오 PASS → code-tester 심각 1건 발견 → 즉시 수정 → 재실행 PASS
+3. **단위 2-9b — universe_filters.py (~440줄)**: PRD 4-1 + 4-4 하드 필터 구현 + `get_universe_v2_filtered()` 통합 함수 → 단위 테스트 15 시나리오 PASS → code-tester 심각 0건 / 주의 2건 즉시 반영
+4. **커밋/푸시**: `d02ad7e` (origin/main 푸시 완료, +1,973 / -107)
+
+### 무엇을 발견했는가 (이번 세션의 핵심)
+
+**1. pykrx 외국인 컬럼명 오류 (심각 버그 차단)** — code-tester 검증으로 발견
+- **잘못된 가정**: PLAN.md / CONTEXT.md 코드 예시에서 `get_market_net_purchases_of_equities_by_ticker` 결과 컬럼을 `"거래대금"` 으로 가정
+- **실제 pykrx**: 해당 함수 결과 컬럼은 `"순매수거래대금"` (pykrx `wrap.py:868` 정의 기준 — 종목명/매도거래량/매수거래량/순매수거래량/매도거래대금/매수거래대금/**순매수거래대금**)
+- **영향**: 수정 전이면 외국인 출처가 **항상 빈 리스트 반환** → PRD 5장 Layer 1 수급 시그니처 완전 무력화 → 단위 2-9a의 핵심 의의(거래대금/외국인/모멘텀 통합) 중 외국인이 빠짐
+- **추가 의의**: 단위 테스트 mock도 `"거래대금"` 컬럼을 사용해 버그를 가렸음. 둘 다 동시 수정 — **mock fixture는 실제 pykrx 컬럼명 그대로 사용해야 한다**는 패턴 확립
+
+**2. pykrx 'ALL' market 미지원** — 사전 점검에서 발견
+- `get_market_ohlcv_by_ticker(date, market='ALL')` 호출 시 KeyError 발생 (pykrx 라이브러리 결함 — KOSPI/KOSDAQ/KONEX 만 지원)
+- **대응**: 모든 시장 함수를 KOSPI / KOSDAQ 분리 호출 후 합산 (pd.concat) 패턴
+- 모듈 상수 `_PYKRX_MARKETS = ("KOSPI", "KOSDAQ")` 로 명시
+
+**3. pykrx 일시 차단 시 KeyError 폴백** — 단위 2-9a 사전 점검에서 발견
+- 현재 시점(KST 2026-05-04 17:18)에 pykrx KRX 사이트가 빈 응답 → 라이브러리 내부에서 KeyError 발생 (`"None of [Index(['시가', '고가', '저가', '종가'])] are in the [columns]"`)
+- **대응**: `_safe_call` 헬퍼로 모든 예외 흡수 → 빈 리스트 반환 (graceful 폴백). 실전 운영 시간(15:10 KST = 06:10 UTC)에는 정상 동작 예상
+
+**4. NaN 값 가드 부재 (CLAUDE.md `pd.isna()` 규칙 위반)** — code-tester 단위 2-9b 검증으로 발견
+- `float(NaN)` 은 예외 없이 NaN 반환 → 비교 연산에서 항상 False → 하드 필터가 미적용 → universe에 잘못 통과되는 위험
+- **대응**: `_safe_float()` 헬퍼 추가 (None / NaN / inf 가드) + 모든 pandas → float 변환 3곳에 적용 (시가총액 / 종가 / 등락률 / 거래대금 / 52주 고가 / 20일 평균)
+
+**5. v1 한계 재확인 — PRD 16-3 본래 의도 회복**
+- v1 = 스윙 top_themes 5개에서만 추출 (PRD 16-3 Layer 3 부분만)
+- universe v2 도입으로 PRD 5장의 Layer 1 수급 + Layer 3 모멘텀 + Layer 3 테마 통합 → 30/100 게이트가 PRD 시그니처 데이터로 채워짐
+
+### 무엇을 작성/수정했는가
+
+**신규 파일 (4개)**:
+- `closing_bet_system/collectors/universe_provider_v2.py` (~330줄, 4 출처 합집합 + 통합 함수)
+  - `get_universe_v2()` 메인 진입점 (출처별 try/except 격리, in-memory 캐시 lock 더블체크)
+  - `get_universe_v2_filtered()` 통합 함수 (v2 산출 → 필터 → 최종 universe, 필터 import/실행 실패 graceful 폴백)
+  - `get_universe()` v1 alias (단위 2-9b 시점부터 PRD 4-1/4-4 적용)
+  - `_fetch_theme_codes_v2` (v1 헬퍼 재사용), `_fetch_top_value_codes`, `_fetch_top_change_codes`, `_fetch_top_foreign_buy_codes` (pykrx lazy import)
+  - `_safe_call` 헬퍼 (4 출처 격리)
+  - 캐시: `_cache_lock` + `_cache` (v1과 분리)
+- `closing_bet_system/collectors/universe_filters.py` (~440줄, PRD 4-1 + 4-4)
+  - `apply_attribute_filters` (시총/주가/상한가/52주 고점)
+  - `apply_liquidity_filters` (당일/20일 평균 거래대금)
+  - `apply_all_filters` 통합 + first-rejection-only
+  - `_load_filter_config` (settings.yaml + default 폴백 — `closing_bet_system.storage.db._load_settings()` 재사용)
+  - `_fetch_market_data_bulk` (시장당 1회 시총/OHLCV bulk fetch + 캐시)
+  - `_fetch_52w_high`, `_fetch_avg_value_20d` (종목별 fetch + 캐시)
+  - `_safe_float` (NaN/inf/None 가드)
+- `scripts/test_closing_bet_unit_2_9a.py` (~430줄, 18 시나리오)
+- `scripts/test_closing_bet_unit_2_9b.py` (~370줄, 15 시나리오)
+
+**수정 파일 (3개)**:
+- `docs/improvements/change_log.md` — 1줄 추가 (universe v2 단위 2-9a/2-9b 완료 기록)
+- `docs/work-plans/active/closing-bet-universe-v2/CHECKLIST.md` — 단위 2-9a/2-9b 항목 모두 [x] + 검증 결과 기록
+- `.claude/agent-memory/code-tester/MEMORY.md` — universe_provider_v2 패턴 + pykrx 외국인 컬럼명 버그 차단 학습 추가
+
+**memory 갱신** (사용자 ~/.claude/projects/.../memory):
+- `project_closing_bet_system.md` — universe v2 섹션 신규 추가 (4 출처 / 6 필터 / 통합 함수 / 안전성 / 남은 단계)
+
+### 왜 그렇게 판단했는가
+
+**별도 파일 vs 통합 (universe_provider_v2 + universe_filters 분리)**: PLAN.md 권고대로 별도 파일 채택. 단위 테스트 분리 + 롤백 단위 명확 + 후속 단위(보호예수/호가 스프레드)에서 universe_filters 확장이 자연스러움.
+
+**bulk fetch 우선 + 종목별 fetch 최소화**: 50종목 × 종목별 4-5 호출 = 250 호출 시 시간 폭발. 시총/OHLCV는 시장 단위 일괄 호출이 가능해 4 호출(~5초)로 처리. 종목별 호출은 52주 고점 / 20일 평균만 필요(~30초). 합 < 60초 → 15:10 → 15:35 잡 25분 여유 안에 충분.
+
+**보수적 하드 필터 (`data_not_found` 탈락)**: PRD 4-1/4-4 는 "무조건 제외" 하드 룰. 데이터 없으면 안전 측에서 제외하는 것이 PRD 의도와 정합. graceful 통과(필터 미적용)은 PRD 위반 위험.
+
+**first-rejection-only**: PRD 11-1 candidates 스키마의 `rejection_reason` 컬럼이 단일 TEXT. 첫 위반만 기록하는 것이 자연스럽고, `apply_all_filters`의 파이프라인 구조(속성 → 유동성)로 자연 보장.
+
+**v1 인터페이스 alias 라우팅 변경 (단위 2-9b 시점)**: scheduler.py 한 줄 교체로 v1↔v2 즉시 전환 가능하도록 alias 유지. 단위 2-9b 완료 시점부터 alias가 자동으로 PRD 4-1/4-4 필터까지 적용 → scheduler.py 수정 안 해도 사실상 활성됨 (v1 import는 그대로 v1, v2 import는 필터 포함).
+
+**code-tester 주의 2건 즉시 반영**: docstring 정정(기능 무관)과 `pd.isna()` 가드(NaN 통과 위험 방지). 둘 다 push 전 반영하는 게 합리적이라 즉시 처리.
+
+### 다음 단계 (배포 + 검증) 시작 전 주의
+
+1. **scheduler.py 교체 시점 — main.py 통합 검토**: `scheduler.py:286-321` MainOrchestrator 생성 시 `universe_provider=_cb_get_universe` (v1) → `_cb_get_universe_v2_filtered` 또는 `_cb_get_universe`(v2 alias로 자동 라우팅) 중 선택.
+   - 옵션 A (명시적): `from closing_bet_system.collectors.universe_provider_v2 import get_universe_v2_filtered as _cb_get_universe_v2`
+   - 옵션 B (alias 활용): `from closing_bet_system.collectors.universe_provider_v2 import get_universe as _cb_get_universe` (이미 단위 2-9b에서 v2_filtered 라우팅)
+   - **권장**: 옵션 A — 의도가 명확하고 grep 가능. v1 코드는 그대로 보존(롤백 1줄)
+2. **단발 검증 시점**: pykrx 호출이 KRX 사이트 응답 정상 여부에 의존. 현재 KST 17:18 시점은 pykrx 일시 차단 가능 — 실제 검증은 다음 영업일 15:10 트리거 또는 장중 호출 시점에 권장
+3. **알림 0건 유지 (정상)**: settings.yaml `score.layer1_weight=0.0` 이라 사실상 만점 7점 → 임계값 7점 도달이 어려움 → 알림 0건이 의도된 동작 (Phase 1 보수적 시작). universe v2 도입으로 알림이 발생하면 오히려 비정상 (재검토 필요)
+4. **pykrx 호출 시간 모니터링**: 첫 자연 트리거 시 `[universe_v2] 산출 완료` + `[universe_filters] bulk market data 캐시 저장` + `[universe_filters] 통합 필터` 로그에서 pykrx 호출 누적 시간 확인. > 60초이면 캐시 + 종목별 호출 최적화 필요
+5. **universe v2 종목 수 분포 검증**: 첫 트리거 후 30~80종목 산출 확인. >100이면 hard_cap 작동, <20이면 출처 다수 실패 의심
+6. **rejected_filter 사유 분포**: candidates 테이블에서 `rejection_reason` 분포 확인. 모두 `data_not_found` 면 pykrx 차단 의심, 모두 같은 사유면 필터 임계값 검토
+7. **롤백 트리거**:
+   - pykrx 응답 30초+ 지연 → 15:10 잡 timeout
+   - universe >200종목 폭주 → KIS API 부담
+   - 필터 오작동으로 정상 종목 잘못 제외 (통과율 < 30%)
+   - 한 줄 교체로 v1 즉시 복원
+
+### 현재 시스템 상태 (KST 17:18 시점, 커밋 푸시 후)
+
+- `trading_system` PID 2540234 (이전 세션부터 active 유지) — universe v2 코드는 **import 가능 상태** 이지만 scheduler.py 가 여전히 v1 호출 중 → **재시작 전까지 v2 미활성**
+- `trading_dashboard` PID 2533412 (active)
+- 종가베팅 잡 3건 등록 (15:10/15:35/10:00) — 오늘 자연 트리거 1회 완료 (universe 19, candidates 18, orderbook 19)
+- 커밋 `d02ad7e` 푸시 완료 (origin/main)
+- universe v2 활성을 위해 다음 단계 필요: scheduler.py 교체 + systemd 재시작
+
+### 컨텍스트 사이즈 안내
+
+이번 대화는 **/resume + PRD 재독 + 단위 2-9a 완료 + 단위 2-9b 완료 + code-tester 2회 + 커밋/푸시** 까지 처리한 큰 세션이었다. 다음 작업은 **scheduler.py 교체 + 단발 검증 + systemd 재시작 + 1일 관찰** 이며, 별도 단계 (사용자 컨펌 필요).
+
+**다음 대화 시작 권장**:
+- `/resume` 호출 → 본 3문서 자동 로드
+- 첫 작업: scheduler.py 한 줄 교체 + 단발 트리거 검증 + systemd 재시작 + 1일 자연 트리거 결과 관찰
+- 1일 관찰 통과 후: `active/` → `completed/20260504_closing-bet-universe-v2/` 아카이브
