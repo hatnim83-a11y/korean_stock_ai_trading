@@ -1073,11 +1073,12 @@ class MockOrderApi:
             "stock_code": stock_code,
             "quantity": quantity,
             "price": mock_price,
+            "filled_price": mock_price,
             "action": "매도",
             "message": "모의 주문 성공"
         }
         self.orders.append(order)
-        
+
         logger.info(f"[모의] 매도 주문: {stock_code} {quantity}주 @ {mock_price:,}원")
         return order
     

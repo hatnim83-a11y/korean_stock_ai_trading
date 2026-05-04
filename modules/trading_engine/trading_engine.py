@@ -414,6 +414,58 @@ class TradingEngine:
             return int(round(fallback_price * premium)), "fallback"
         return 0, "fallback"
 
+    def _capture_sell_reference_price(
+        self,
+        stock_code: str,
+        fallback_price: int = 0
+    ) -> tuple[int, str]:
+        """매도 슬리피지 측정용 reference price 캡처
+
+        시장가 매도는 매수 1호가(bid1)에서 체결되는 것이 정상이므로
+        bid1을 기준 가격으로 사용한다. 실패 시 단계별 폴백.
+
+        Args:
+            stock_code: 종목코드 (6자리)
+            fallback_price: 호가/현재가 모두 실패 시 최후 폴백 (예: buy_price)
+
+        Returns:
+            (price, source): 가격(int)과 출처 라벨
+                source ∈ {"bid1", "current_price", "fallback", "none"}
+        """
+        try:
+            ask_info = self.order_api.inquire_asking_price(stock_code)
+            if ask_info.get("success"):
+                bid1 = ask_info.get("bid1", 0) or 0
+                if bid1 > 0:
+                    return int(bid1), "bid1"
+                cur = ask_info.get("current_price", 0) or 0
+                if cur > 0:
+                    return int(cur), "current_price"
+        except Exception as e:
+            logger.warning(f"   매도 reference price 조회 예외 ({stock_code}): {e}")
+
+        if fallback_price and fallback_price > 0:
+            return int(fallback_price), "fallback"
+        return 0, "none"
+
+    @staticmethod
+    def _compute_sell_slippage(
+        filled_price: float,
+        reference_price: float
+    ) -> Optional[float]:
+        """시장가 매도 슬리피지 계산
+
+        slippage = (filled_price - reference_price) / reference_price × 100
+        - 음수: 불리한 체결 (매수 1호가 아래로 내려감, 시장가 매도의 정상)
+        - 양수: 유리한 체결 (호가 흔들림 시 드물게)
+
+        Returns:
+            슬리피지 (%) 또는 reference_price/filled_price 무효 시 None
+        """
+        if not filled_price or not reference_price or reference_price <= 0:
+            return None
+        return round((filled_price - reference_price) / reference_price * 100, 4)
+
     def _place_aggressive_limit_with_retry(
         self,
         stock_code: str,
@@ -681,10 +733,17 @@ class TradingEngine:
             logger.info(f"\n[{i}/{len(orders)}] 매도: {stock_name}")
             logger.info(f"   사유: {reason}")
 
+            # 매도 직전 매수 1호가 캡처 (slippage 측정용)
+            ref_price, ref_source = self._capture_sell_reference_price(
+                stock_code, fallback_price=buy_price
+            )
+
             result = self.order_api.sell_market_order(stock_code, quantity)
             result["stock_name"] = stock_name
             result["reason"] = reason
             result["buy_price"] = buy_price
+            result["reference_price"] = ref_price
+            result["reference_source"] = ref_source
             results.append(result)
 
             if i < len(orders):
@@ -694,7 +753,7 @@ class TradingEngine:
         if not self.use_mock_api:
             self._wait_for_fills(results)
 
-        # 손익 계산 + 금액 업데이트
+        # 손익 계산 + 금액 업데이트 + 슬리피지 계산
         for result in results:
             if not result.get("success"):
                 continue
@@ -708,6 +767,18 @@ class TradingEngine:
                 result["profit_rate"] = (filled_price - buy_price) / buy_price
                 result["profit_amount"] = (filled_price - buy_price) * quantity
                 logger.info(f"   📊 {result.get('stock_name')}: {buy_price:,}→{filled_price:,}원 ({result['profit_rate']:+.2%})")
+
+            # 매도 슬리피지 계산
+            ref_price = result.get("reference_price", 0)
+            slippage = self._compute_sell_slippage(filled_price, ref_price)
+            result["slippage"] = slippage
+            if slippage is not None:
+                threshold = settings.SELL_SLIPPAGE_WARN_THRESHOLD
+                log_fn = logger.warning if abs(slippage) > threshold else logger.info
+                log_fn(
+                    f"   📐 매도 slippage: {slippage:+.4f}% "
+                    f"(filled {filled_price:,} vs ref {ref_price:,} [{result.get('reference_source')}])"
+                )
 
         # 결과 집계
         success_count = sum(1 for r in results if r.get("success"))
@@ -751,7 +822,12 @@ class TradingEngine:
         
         logger.warning(f"🔻 손절 실행: {stock_name}")
         logger.warning(f"   매수가: {buy_price:,}원 → 현재가: {current_price:,}원 ({loss_pct:+.2f}%)")
-        
+
+        # 매도 직전 매수 1호가 캡처 (slippage 측정용)
+        ref_price, ref_source = self._capture_sell_reference_price(
+            stock_code, fallback_price=current_price or buy_price
+        )
+
         result = self.order_api.sell_market_order(stock_code, quantity)
 
         # 시장가 체결 후 실제 체결가 조회 (1초 대기 후)
@@ -767,17 +843,28 @@ class TradingEngine:
                 logger.debug(f"체결가 조회 실패 (현재가 사용): {e}")
 
         actual_loss_pct = (actual_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+        slippage = self._compute_sell_slippage(actual_price, ref_price)
+        if slippage is not None:
+            threshold = settings.SELL_SLIPPAGE_WARN_THRESHOLD
+            log_fn = logger.warning if abs(slippage) > threshold else logger.info
+            log_fn(
+                f"   📐 손절 slippage: {slippage:+.4f}% "
+                f"(filled {actual_price:,} vs ref {ref_price:,} [{ref_source}])"
+            )
 
         result.update({
             "stock_name": stock_name,
             "reason": "손절",
             "buy_price": buy_price,
             "sell_price": actual_price,
-            "profit_rate": actual_loss_pct
+            "profit_rate": actual_loss_pct,
+            "reference_price": ref_price,
+            "reference_source": ref_source,
+            "slippage": slippage,
         })
 
         return result
-    
+
     def execute_take_profit(
         self,
         position: dict,
@@ -802,7 +889,12 @@ class TradingEngine:
         
         logger.info(f"🔺 익절 실행: {stock_name}")
         logger.info(f"   매수가: {buy_price:,}원 → 현재가: {current_price:,}원 ({profit_pct:+.2f}%)")
-        
+
+        # 매도 직전 매수 1호가 캡처 (slippage 측정용)
+        ref_price, ref_source = self._capture_sell_reference_price(
+            stock_code, fallback_price=current_price or buy_price
+        )
+
         result = self.order_api.sell_market_order(stock_code, quantity)
 
         # 시장가 체결 후 실제 체결가 조회 (1초 대기 후)
@@ -818,13 +910,24 @@ class TradingEngine:
                 logger.debug(f"체결가 조회 실패 (현재가 사용): {e}")
 
         actual_profit_pct = (actual_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+        slippage = self._compute_sell_slippage(actual_price, ref_price)
+        if slippage is not None:
+            threshold = settings.SELL_SLIPPAGE_WARN_THRESHOLD
+            log_fn = logger.warning if abs(slippage) > threshold else logger.info
+            log_fn(
+                f"   📐 익절 slippage: {slippage:+.4f}% "
+                f"(filled {actual_price:,} vs ref {ref_price:,} [{ref_source}])"
+            )
 
         result.update({
             "stock_name": stock_name,
             "reason": "익절",
             "buy_price": buy_price,
             "sell_price": actual_price,
-            "profit_rate": actual_profit_pct
+            "profit_rate": actual_profit_pct,
+            "reference_price": ref_price,
+            "reference_source": ref_source,
+            "slippage": slippage,
         })
 
         return result
@@ -875,13 +978,18 @@ class TradingEngine:
                 order_price = order.get("price", 0)
                 buy_price = order.get("buy_price", 0)
                 expected_price = order.get("expected_price", 0)
+                reference_price = order.get("reference_price", 0)
 
                 # 슬리피지 계산
-                # - 매도: (체결가 - 주문가) / 주문가
+                # - 매도: order에 이미 계산된 slippage가 있으면 우선 사용 (execute_sell_orders에서 계산)
+                #         없으면 (filled - reference) / reference 또는 (filled - order) / order로 폴백
                 # - 매수(limit_aggressive): (가중평균 체결가 - expected_price) / expected_price
-                slippage = None
-                if is_sell and filled_price and order_price:
-                    slippage = round((filled_price - order_price) / order_price * 100, 4)
+                slippage = order.get("slippage") if is_sell else None
+                if is_sell and slippage is None:
+                    if filled_price and reference_price > 0:
+                        slippage = round((filled_price - reference_price) / reference_price * 100, 4)
+                    elif filled_price and order_price:
+                        slippage = round((filled_price - order_price) / order_price * 100, 4)
                 elif not is_sell and filled_price and expected_price:
                     slippage = round((filled_price - expected_price) / expected_price * 100, 4)
 

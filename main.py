@@ -2166,6 +2166,7 @@ class TradingSystem:
                     "profit_amount": actual_profit_amount,
                     "buy_price": buy_price,
                     "filled_price": filled_price,
+                    "slippage": order.get("slippage"),
                 })
 
                 # trade_review 적재 (portfolio_monitor_v2._close_position_in_db와 동일 패턴)
@@ -2294,6 +2295,7 @@ class TradingSystem:
                     "profit_amount": profit_amount,
                     "buy_price": buy_price,
                     "filled_price": filled_price,
+                    "slippage": order.get("slippage"),
                 })
 
                 # trade_review 적재
@@ -2405,6 +2407,7 @@ class TradingSystem:
                     "profit_amount": profit_amount,
                     "buy_price": buy_price,
                     "filled_price": filled_price,
+                    "slippage": order.get("slippage"),
                 })
 
                 # trade_review 적재

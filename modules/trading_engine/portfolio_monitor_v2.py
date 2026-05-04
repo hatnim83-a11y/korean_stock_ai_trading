@@ -719,11 +719,12 @@ class PortfolioMonitorV2:
     # ===== DB 반영 =====
 
     def _close_position_in_db(self, pos: Position, reason: str, sell_price: float,
-                              sell_shares: int = 0) -> None:
+                              sell_shares: int = 0, slippage: Optional[float] = None) -> None:
         """DB에서 포지션 청산 + 매도 기록 저장 + trade_review 생성
 
         Args:
             sell_shares: 매도 수량 (0이면 pos.remaining_shares 사용)
+            slippage: 매도 슬리피지(%) — execute_stop_loss/execute_take_profit가 계산해 전달
         """
         shares = sell_shares if sell_shares > 0 else pos.remaining_shares
         db = None
@@ -745,6 +746,7 @@ class PortfolioMonitorV2:
                 "profit_amount": actual_profit_amount,
                 "buy_price": pos.buy_price,
                 "filled_price": sell_price,
+                "slippage": slippage,
                 "remaining_shares": 0,
             })
 
@@ -790,9 +792,14 @@ class PortfolioMonitorV2:
         return "manual"
 
     def _save_partial_sell_to_db(
-        self, pos: Position, sell_shares: int, stage: int, sell_price: float
+        self, pos: Position, sell_shares: int, stage: int, sell_price: float,
+        slippage: Optional[float] = None
     ) -> None:
-        """부분 매도 시 DB에 매도 기록 저장 + 보유 수량/partial 상태 업데이트 + trade_review"""
+        """부분 매도 시 DB에 매도 기록 저장 + 보유 수량/partial 상태 업데이트 + trade_review
+
+        Args:
+            slippage: 매도 슬리피지(%) — execute_take_profit가 계산해 전달
+        """
         db = None
         try:
             db = Database()
@@ -812,6 +819,7 @@ class PortfolioMonitorV2:
                 "profit_amount": partial_profit,
                 "buy_price": pos.buy_price,
                 "filled_price": sell_price,
+                "slippage": slippage,
                 "remaining_shares": pos.remaining_shares,
             })
             # 포트폴리오 보유 수량 업데이트
@@ -913,7 +921,10 @@ class PortfolioMonitorV2:
         
         if result.get("success"):
             actual_sell_price = result.get("sell_price", pos.current_price)
-            self._close_position_in_db(pos, SellReason.STOP_LOSS.value, actual_sell_price)
+            self._close_position_in_db(
+                pos, SellReason.STOP_LOSS.value, actual_sell_price,
+                slippage=result.get("slippage"),
+            )
             self.remove_position(pos.stock_code)
         else:
             err = result.get("message") or result.get("error", "알 수 없는 오류")
@@ -1026,11 +1037,15 @@ class PortfolioMonitorV2:
             # 전량 매도 시 DB 포지션 청산
             if pos.remaining_shares <= 0:
                 reason = f"{stage}차 익절"
-                self._close_position_in_db(pos, reason, actual_sell_price, sell_shares)
+                self._close_position_in_db(
+                    pos, reason, actual_sell_price, sell_shares,
+                    slippage=result.get("slippage"),
+                )
             else:
                 # 부분 매도: DB에 매도 기록 저장 + 보유 수량 업데이트
                 self._save_partial_sell_to_db(
-                    pos, sell_shares, stage, actual_sell_price
+                    pos, sell_shares, stage, actual_sell_price,
+                    slippage=result.get("slippage"),
                 )
 
             # 콜백 (sell_shares 전달)
@@ -1205,7 +1220,10 @@ class PortfolioMonitorV2:
                 reason = SellReason.TRAILING_L1.value
             else:
                 reason = SellReason.TRAILING_STOP.value
-            self._close_position_in_db(pos, reason, actual_sell_price)
+            self._close_position_in_db(
+                pos, reason, actual_sell_price,
+                slippage=result.get("slippage"),
+            )
             self.remove_position(pos.stock_code)
         else:
             err = result.get("message") or result.get("error", "알 수 없는 오류")
@@ -1255,7 +1273,10 @@ class PortfolioMonitorV2:
         
         if result.get("success"):
             actual_sell_price = result.get("sell_price", pos.current_price)
-            self._close_position_in_db(pos, SellReason.MAX_HOLD_DAYS.value, actual_sell_price)
+            self._close_position_in_db(
+                pos, SellReason.MAX_HOLD_DAYS.value, actual_sell_price,
+                slippage=result.get("slippage"),
+            )
             # 콜백 (예외가 remove_position을 차단하지 않도록 보호)
             try:
                 if self.on_max_hold_sell:

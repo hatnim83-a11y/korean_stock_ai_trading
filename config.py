@@ -232,6 +232,10 @@ class Settings(BaseSettings):
         default=5,
         description="재시도가 이 횟수 이상이면 WARN 로그 (이상 징후 탐지)"
     )
+    SELL_SLIPPAGE_WARN_THRESHOLD: float = Field(
+        default=2.0,
+        description="매도 슬리피지 절댓값(%)이 이 값 초과면 WARN 로그 (갭다운/유동성 부족 징후)"
+    )
 
     # ===== 포트폴리오 제약 조건 =====
     MIN_POSITION_WEIGHT: float = Field(
