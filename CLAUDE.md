@@ -33,6 +33,19 @@
 ## 시스템별 규칙
 - **웹 대시보드** (`web/`): [`web/CLAUDE.md`](web/CLAUDE.md)
 - **전략/스코어링 모듈** (`modules/`): [`modules/CLAUDE.md`](modules/CLAUDE.md)
+- **종가베팅 시스템** (`closing_bet_system/`): 별도 모듈 + 별도 DB (`data/closing_bet.db`) + 별도 텔레그램 봇
+
+## 종가베팅 시스템 운영 규칙 (Phase 1 — 2026-05-04 도입)
+- **위치**: `closing_bet_system/` (같은 프로세스/계좌, KIS 토큰 공유)
+- **별도 텔레그램 봇**: `.env` `CLOSING_BET_TELEGRAM_BOT_TOKEN`/`CHAT_ID`
+- **Phase 1 (알림형) 정책**: **자동매수 절대 금지**. `MainOrchestrator` 는 후보 등록 + 알림만
+- **APScheduler 잡 시간** (PRD 16-3, mon-fri):
+  - 15:10 `run_daily_pipeline` (Layer 1+2+DART → 점수 → DB → 알림)
+  - 15:35 `run_daily_summary` (DB 집계 + 텔레그램)
+  - 10:00 `run_label_yesterday` (T+1 사후 라벨링)
+- **현재 상태**: main.py 통합 완료, **placeholder universe(빈 리스트)** 라 잡은 등록되지만 실제 데이터 처리는 무동작 → Phase 2 collector 도입 시 활성화
+- **fund_guard 미들웨어**: 같은 KIS 계좌 자금 풀 강제 분리 (스윙 매수 실패 방지)
+- **상세 컨텍스트**: `memory/project_closing_bet_system.md`, `종가베팅_트레이딩_시스템_PRD_v2.0.md`
 
 ## 코드 변경 후 필수 프로세스
 - **코드를 작성하거나 수정한 뒤 반드시 code-tester 에이전트로 검증**

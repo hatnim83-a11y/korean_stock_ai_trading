@@ -274,9 +274,41 @@ class TradingScheduler:
             replace_existing=True
         )
 
+        # 16. 종가베팅 시스템 잡 (Phase 1 알림형, 2026-05-04 도입)
+        # - PRD 16-3 시간표: 15:10 pipeline / 15:35 summary / 10:00 T+1 라벨링
+        # - Phase 1 = placeholder universe (빈 리스트) → 잡 등록되지만 무동작 (Phase 2 collector 도입 시 활성화)
+        # - 통합 실패 시 메인 시스템 영향 없도록 try/except 격리
+        self._setup_closing_bet_jobs()
+
         logger.info("스케줄 등록 완료")
         self._print_schedules()
-    
+
+    def _setup_closing_bet_jobs(self) -> None:
+        """종가베팅 시스템 잡 등록 (Phase 1: 알림형 / placeholder providers).
+
+        실패 시 main 시스템 영향 없도록 격리. Phase 2 진입 시
+        universe_provider / market_data_provider / name_lookup / label_provider 실 구현체 주입 필요.
+
+        주: PHASE 1 정책상 자동매수 절대 금지 — orchestrator는 mark_entered/log_exit 미호출.
+        """
+        try:
+            from closing_bet_system.main_orchestrator import MainOrchestrator
+            self._closing_bet_orch = MainOrchestrator(
+                # Phase 1 placeholder. Phase 2 collector 도입 시 실제 구현체로 교체.
+                universe_provider=lambda: [],            # 빈 리스트 → 파이프라인 무동작 (안전)
+                market_data_provider=lambda: {},          # 빈 dict → 외부리스크 룰 비활성
+                name_lookup=lambda t: "(미상)",           # 종목명 미상
+            )
+            self._closing_bet_orch.register_jobs(self.scheduler)
+            logger.info(
+                "🎯 종가베팅 시스템 잡 등록 완료 (Phase 1 알림형, placeholder universe — 무동작)"
+            )
+        except Exception as e:
+            logger.error(
+                f"⚠️ 종가베팅 잡 등록 실패 (메인 시스템은 정상 진행): {e}",
+                exc_info=True,
+            )
+
     def _print_schedules(self) -> None:
         """등록된 스케줄 출력 (KST 기준)"""
         jobs = self.scheduler.get_jobs()

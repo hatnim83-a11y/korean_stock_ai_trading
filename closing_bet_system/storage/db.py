@@ -106,7 +106,10 @@ class ClosingBetDatabase:
         try:
             yield cursor
             self.conn.commit()
-        except sqlite3.Error as e:
+        except Exception as e:
+            # sqlite3.Error 외 LookupError / ValueError (호출 측이 cursor.execute 후 raise)
+            # 케이스에서도 rollback 보장 — 트랜잭션 미정 상태 누적 방지.
+            # 1-6 candidate_logger 의 mark_entered / log_exit 가 rowcount==0 시 LookupError 발생.
             self.conn.rollback()
             logger.error(f"종가베팅 DB 작업 실패: {e}")
             raise

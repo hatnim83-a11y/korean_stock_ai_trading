@@ -7,6 +7,29 @@
 - `update` SQL 후 `cursor.rowcount` 미확인 → silent failure
 - DB 작업: `Database()` → `connect()` → 작업 → `close()` 패턴에 finally 필요
 - emoji in logger messages: 기존 코드에서 광범위 사용 (스타일 문제, 기능 무관)
+- `get_cursor` except sqlite3.Error 범위 → LookupError/ValueError는 rollback 미실행
+  → Python sqlite3 implicit transaction이지만 rowcount=0 UPDATE는 실질 변경 없어 기능 무해
+  → P1 개선: `except Exception`으로 범위 확대 권장 (db.py 패턴)
+
+### closing_bet_system main_orchestrator 패턴 (2026-05-04 Phase 1-8 검증 완료)
+- `asyncio.gather(flow, pv, dart)` return_exceptions=False 기본값: collector 내부 예외처리로 실전 위험 낮음 (P2)
+- `market_data_provider` 동기 callable 을 `_safe_call(fn)` 으로 직접 호출 (to_thread 미사용)
+  → Phase 1 에서 단순 dict 반환 lambda 사용 예상, 실 HTTP 구현 시 P1 이슈로 격상
+- `_process_ticker` 내 sqlite3 동기 호출 이벤트루프 직접 점유: universe 30종목 × 3쿼리 ~90건
+  → 각 쿼리 <1ms, 총 <100ms → Phase 1 수용 가능 (universe 확장 시 to_thread 전환 검토)
+- `score_engine.score()` 에 `market_ok` 미전달 (기본값=True): Phase 1 weighted_max=7 < max_position_score=9 이므로 MAX_SIZE_ENTRY 불가, 기능 무해
+- docstring line 26 불일치: "log_labels Phase 2 이후" 기술 → 실제로 run_label_yesterday Phase 1에서 호출
+- DART rejection_reason 중복 prefix: "DART 즉시제외: DART 즉시제외: 유상증자" 형식 → 기능 무관, 로그 가독성 이슈
+- test 파일 `datetime.now()` / `date.today()` 사용: 테스트 파일이므로 배포 무관, P2 수준
+- test_schedule_constants 에서 `SUMMARY_SCHEDULE_MINUTE=35` 미검증 (테스트 커버리지 공백)
+
+### closing_bet_system candidate_logger 패턴 (2026-05-04 검증 완료)
+- `log_labels INSERT OR REPLACE`: 두 번째 호출 시 미전달 컬럼(next_open_pct 등) NULL로 덮어씌워짐
+  → T+1 09:30 라벨링 시 모든 컬럼을 한 번에 전달해야 함 (부분 UPDATE 불가)
+- `atr_overheat` (LAYER2_KEYS): _safe_get으로 타입 변환 없이 저장 → str 'hot' 입력 시 TEXT 저장
+  → signal_score_engine MEMORY 이슈와 동일, Phase 1에서는 무해 (float 값 실사용)
+- `_validate_ticker_name`: isdigit() 사용 → '²34567' 같은 유니코드 상위숫자 통과 가능
+  → 실입력소스(KIS API)에서는 발생 안 하므로 허용 수준
 
 ### 잔존 기존 이슈 (미수정)
 - `database.py` line 524: `save_trade()` date 기본값 `date.today()` UTC 버그
@@ -83,6 +106,15 @@
 - 격리 테스트 통과 확인 (2026-03-11)
 - 잔존 설계 주의: init_tables DDL에 selected 컬럼 없음 (_migrate_v11 이전 호출 불가 구조라 무해)
 - 잔존 설계 주의: 주간 재선정 시 같은 날짜만 selected=1 초기화 → 이전 주 selected=1 행 누적 (기능 무관)
+
+### signal_score_engine.py 패턴 (2026-05-04 검증)
+- `atr_overheat_value` 필드: `l2.get("atr_overheat")` 원본값 그대로 저장 (타입 변환 없음)
+  → 입력이 str "hot"이면 `atr_overheat_value: str` 로 저장됨 (타입 힌트 `Optional[float]` 위반)
+  → Phase 1에서 DB 저장 경로 미존재로 현재 무해, 1-6 candidate_logger 구현 시 주의
+- `theme_leadership_rank=1.0` (float) → isinstance check에서 int 아님 → None 처리 (의도된 보수적 정책)
+- `ScoreBreakdown.missing_inputs`: `field(hash=False)` → frozen dataclass hash에서 제외됨 (안전)
+- `from_settings()`: settings.yaml의 `score_max_full` / `score_max_phase1` 키는 엔진 무시 (문서용 전용)
+- NaN이 `atr_overheat_value`에 저장돼도 frozen dataclass 해시/집합/dict 키 동작 정상 (Python dataclass 동작)
 
 ### 테마 파이프라인 하드코딩 목록 (v12 업데이트, 2026-03-13)
 - `screener.py:576` `stock_codes[:20]` — 크롤링 풀 크기, config 없음 (MAX_STOCKS_PER_THEME=10과 별개)
@@ -243,6 +275,38 @@
 - 4파일 + 테스트 스크립트 11시나리오 전체 PASS, 배포 가능 판정
 - SELL_SLIPPAGE_WARN_THRESHOLD: config.py (default=2.0%) — 하드코딩 없음
 - _save_trades is_sell 분기: 매수/매도 완전 분리, 기존 매수 경로 무영향
+
+### dart_disclosure_collector.py 패턴 (2026-05-04 검증)
+- `dart_api.fetch_dart_disclosures`: API 키 없어도 `[]` 반환 (None 아님) → is_valid=True 처리됨
+  → module docstring(line 31)에서 "API 키 없으면 is_valid=False"로 명시했으나 실제 동작과 불일치
+  → DART_API_KEY가 .env에 설정되어 있어 실전 영향 없음, 단 docstring 오해 유발
+- `조사` 키워드: substring 특성상 "시장조사", "신용조사", "기업실태조사" 등 정상 공시에서도 제외 트리거
+  → 보수적 방향(기회손실), 실손실 아님. Phase 1 한계로 명시됨
+- `CB`/`BW`/`EB` 영문 약어: PCB/GBW/EBS 등 복합어 오탐 가능
+  → 실제 DART 공시 제목은 formal 형식이라 발생 빈도 낮음. P2 수준
+- default_factory=tuple: `field(default_factory=tuple)` → `tuple()` = `()` 반환, 정상 동작 확인
+- 25개 단위 테스트 전체 PASS 확인 (2026-05-04)
+
+### overnight_risk_filter.py 패턴 (2026-05-04 검증, Phase 1-5b)
+- 24개 단위 테스트 전체 PASS, 배포 가능 판정
+- `position_size_factor` vs `final_size_factor` 구분: skip=True 시 position_size_factor=0.5 가능 (reduce 신호 반영됨)
+  → 호출자는 **반드시 final_size_factor 사용**, position_size_factor 는 시장 평가 중간값
+- skip 룰(us_futures/vkospi) 결손 경고 O, reduce 룰(usd_krw/kospi) 결손 경고 없음 → 비대칭 의도됨
+- `from_settings` 지원 키 5개: settings.yaml external_risk 키와 1:1 완전 일치
+  → `reduced_size_factor`: settings.yaml/from_settings 모두 미지원, DEFAULT 0.5 고정 (현재 요구사항 내 허용)
+- `_safe_float`: bool 차단 + NaN/inf → None, CLAUDE.md 규칙 준수 확인
+- `assess_for_universe` line 363 로그: `position_size_factor` 사용 → skip 아닌 경우에만 실행 보장됨 (정상)
+
+### telegram_review_bot.py 패턴 (2026-05-04, Phase 1-7)
+- P0 수정: `atr_oh:.2f` → `_fmt_num(atr_oh)` 로 str/non-float 방어 (duck-typing dict 입력 시 ValueError)
+  → ScoreBreakdown dataclass는 Optional[float]이지만 dict로 str 전달 시 크래시 가능했음
+- P1 수정: `'게이트 30건'` 하드코딩 → 모듈 상수 `_GATE_OPERATIONAL_REVIEW = 30` 추출
+  → settings.yaml gate.operational_review=30 과 동기화 유지 (주석 명시)
+- P2 수정 (테스트): `dt.now()` → `now_kst()` (DartDisclosureSnapshot.snapshot_time, 표시용이지만 규칙 준수)
+- `_fmt_num(atr_oh)` 패턴: str 'hot' → '—', float 1.5 → '1.5', None → '—' 모두 안전
+- is_enabled property: notifier lazy-init side-effect 있음 (일반 케이스 OK, 초기화 후 캐시됨)
+- send_batch_alert 헤더 발송 실패 시 개별 알림 계속 진행 (의도된 설계, 헤더 결과 무시)
+- 21개 mock 테스트 전체 PASS 확인 (2026-05-04)
 
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
