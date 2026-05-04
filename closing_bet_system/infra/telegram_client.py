@@ -12,6 +12,11 @@ env 변수 (사용자가 ``.env`` 에 추가해야 함):
 
 settings.yaml 의 ``telegram.bot_token_env`` / ``telegram.chat_id_env`` 에서
 실제 env 키 이름을 조회하므로, 봇 분리/병합 시 settings.yaml 만 수정하면 된다.
+
+채널 격리: 토큰/chat_id 미설정 시 ``TelegramNotifier`` 를 생성하지 않고
+NoOp 더미 (``_NoOpTelegramNotifier``) 를 반환한다. 부모 클래스 내부 속성
+(``_enabled``, ``base_url``) 을 직접 변경하던 기존 패턴을 제거하여 부모
+클래스 리팩터 시 silent break 위험을 차단한다.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -40,8 +45,31 @@ from modules.reporter.telegram_notifier import TelegramNotifier
 from closing_bet_system.storage.db import _load_settings
 
 
-_notifier_instance: Optional[TelegramNotifier] = None
+_notifier_instance: Optional[Any] = None
 _notifier_lock = threading.Lock()
+
+
+class _NoOpTelegramNotifier:
+    """텔레그램 비활성 시 silent NoOp 더미.
+
+    채널 격리(스윙 봇 토큰 폴백 차단)를 위해 ``TelegramNotifier`` 자체를
+    생성하지 않는다. ``TelegramReviewBot`` 이 ``getattr(notifier, "_enabled", False)``
+    로 활성 여부를 판단하므로 ``_enabled = False`` 만 노출하면 모든 발송이 자연스럽게 스킵된다.
+
+    부모 클래스 인터페이스가 변해도 ``__getattr__`` 가 모든 메서드를 silent NoOp 으로
+    처리하므로 호출 측 변경 없이 안전하다 (``send_message``, ``send_photo`` 등 미래 API 포함).
+    """
+
+    _enabled: bool = False
+    bot_token: Optional[str] = None
+    chat_id: Optional[str] = None
+
+    def __getattr__(self, name: str):
+        # send_message 가 bool 반환하는 인터페이스에 일관되게 False 반환
+        def _noop(*args, **kwargs) -> bool:
+            return False
+
+        return _noop
 
 
 def _resolve_telegram_credentials() -> tuple[Optional[str], Optional[str]]:
@@ -53,32 +81,31 @@ def _resolve_telegram_credentials() -> tuple[Optional[str], Optional[str]]:
     return os.getenv(bot_token_env), os.getenv(chat_id_env)
 
 
-def get_telegram_notifier() -> TelegramNotifier:
+def get_telegram_notifier() -> Any:
     """종가베팅 전용 TelegramNotifier 싱글톤.
 
-    종가베팅 신규 봇 토큰/chat_id 미설정 시에는 ``_enabled=False`` 로 강제 비활성화한다.
-    이는 ``TelegramNotifier.__init__`` 의 settings 폴백(스윙 봇 토큰)이 동작해
-    종가베팅 알림이 스윙 채널로 흘러가는 것을 막기 위함이다 (채널 격리).
+    토큰/chat_id 가 둘 다 설정된 경우에만 실제 ``TelegramNotifier`` 를 생성한다.
+    하나라도 없으면 ``_NoOpTelegramNotifier`` 를 반환하여 스윙 봇 토큰 폴백을 차단한다
+    (채널 격리).
+
+    Returns:
+        ``TelegramNotifier`` (활성) 또는 ``_NoOpTelegramNotifier`` (비활성).
     """
     global _notifier_instance
     if _notifier_instance is None:
         with _notifier_lock:
             if _notifier_instance is None:
                 bot_token, chat_id = _resolve_telegram_credentials()
-                _notifier_instance = TelegramNotifier(
-                    bot_token=bot_token,
-                    chat_id=chat_id,
-                )
                 if bot_token and chat_id:
+                    _notifier_instance = TelegramNotifier(
+                        bot_token=bot_token,
+                        chat_id=chat_id,
+                    )
                     logger.info("[종가베팅] 텔레그램 봇 인스턴스 생성 (활성)")
                 else:
-                    # 강제 비활성화: 스윙 봇 토큰 폴백 차단 (채널 격리)
-                    _notifier_instance.bot_token = None
-                    _notifier_instance.chat_id = None
-                    _notifier_instance._enabled = False
-                    _notifier_instance.base_url = ""
+                    _notifier_instance = _NoOpTelegramNotifier()
                     logger.warning(
-                        "[종가베팅] 텔레그램 토큰/chat_id 미설정 — 알림 비활성화 "
+                        "[종가베팅] 텔레그램 토큰/chat_id 미설정 — NoOp 더미 사용 "
                         "(.env 의 CLOSING_BET_TELEGRAM_BOT_TOKEN/CHAT_ID 등록 필요). "
                         "스윙 봇 폴백은 차단됨 (채널 격리)."
                     )

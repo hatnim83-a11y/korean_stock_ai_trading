@@ -293,15 +293,26 @@ class TradingScheduler:
         """
         try:
             from closing_bet_system.main_orchestrator import MainOrchestrator
+            from closing_bet_system.infra.name_lookup import get_name as _cb_get_name
+            from closing_bet_system.collectors.universe_provider import (
+                get_universe as _cb_get_universe,
+            )
+            from closing_bet_system.collectors.market_data_provider import (
+                get_market_data as _cb_get_market_data,
+            )
+            from closing_bet_system.collectors.label_provider import (
+                get_label as _cb_get_label,
+            )
             self._closing_bet_orch = MainOrchestrator(
-                # Phase 1 placeholder. Phase 2 collector 도입 시 실제 구현체로 교체.
-                universe_provider=lambda: [],            # 빈 리스트 → 파이프라인 무동작 (안전)
-                market_data_provider=lambda: {},          # 빈 dict → 외부리스크 룰 비활성
-                name_lookup=lambda t: "(미상)",           # 종목명 미상
+                # Phase 1 carryover 단위 A/B/C/D 적용. weekly_loss_limit (E) 는 fund_guard 내부.
+                universe_provider=_cb_get_universe,       # 스윙 top_themes → 네이버 크롤링 → list[ticker]
+                market_data_provider=_cb_get_market_data, # KOSPI(KIS) + V-KOSPI/미선물/USD-KRW(yfinance)
+                name_lookup=_cb_get_name,                 # KIS get_stock_name + 캐시
+                label_provider=_cb_get_label,             # T+1 사후 라벨링 (KIS get_daily_price + cost_engine)
             )
             self._closing_bet_orch.register_jobs(self.scheduler)
             logger.info(
-                "🎯 종가베팅 시스템 잡 등록 완료 (Phase 1 알림형, placeholder universe — 무동작)"
+                "🎯 종가베팅 시스템 잡 등록 완료 (Phase 1 알림형, providers 4종 활성)"
             )
         except Exception as e:
             logger.error(

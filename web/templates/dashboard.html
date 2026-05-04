@@ -481,6 +481,7 @@ tr:hover td { background: var(--bg-elevated); }
   <div class="tab" data-tab="performance">Performance</div>
   <div class="tab" data-tab="news">News</div>
   <div class="tab" data-tab="system">System</div>
+  <div class="tab" data-tab="closingbet">종가베팅</div>
 </div>
 
 <!-- Content -->
@@ -578,6 +579,71 @@ tr:hover td { background: var(--bg-elevated); }
         <div class="label" style="font-size:0.7rem;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:var(--sp-sm)">Recent Errors</div>
         <div class="error-log" id="error-log">에러 없음</div>
       </div>
+    </div>
+  </div>
+
+  <!-- ========== 종가베팅 (Phase 2-6) ========== -->
+  <div class="panel" id="panel-closingbet">
+    <!-- 게이트 진척도 -->
+    <h3 style="margin-bottom:var(--sp-md)">운영 점검 게이트 진척도 (1-9)</h3>
+    <div class="summary" id="cb-gate-summary">
+      <div class="card"><div class="label">Recommended 누적</div><div class="value" id="cb-gate-rec">-</div></div>
+      <div class="card"><div class="label">서로 다른 영업일</div><div class="value" id="cb-gate-days">-</div></div>
+      <div class="card"><div class="label">서로 다른 종목</div><div class="value" id="cb-gate-stocks">-</div></div>
+      <div class="card"><div class="label">통과 여부</div><div class="value" id="cb-gate-pass">-</div></div>
+    </div>
+
+    <hr class="section-divider">
+
+    <!-- 오늘 후보 -->
+    <h3 style="margin-bottom:var(--sp-md)">오늘 후보</h3>
+    <div class="summary" id="cb-today-summary">
+      <div class="card"><div class="label">Recommended</div><div class="value" id="cb-cnt-rec">-</div></div>
+      <div class="card"><div class="label">Entered</div><div class="value" id="cb-cnt-ent">-</div></div>
+      <div class="card"><div class="label">Rejected (Filter)</div><div class="value" id="cb-cnt-rejf">-</div></div>
+      <div class="card"><div class="label">Rejected (Manual)</div><div class="value" id="cb-cnt-rejm">-</div></div>
+    </div>
+    <div class="table-wrap" style="margin-top:var(--sp-md)">
+      <table id="cb-today-table">
+        <thead><tr>
+          <th>종목</th><th>이름</th><th>상태</th>
+          <th>L1</th><th>L2</th><th>L3</th><th>외부리스크</th><th>총점</th><th>탈락사유</th>
+        </tr></thead>
+        <tbody id="cb-today-body"></tbody>
+      </table>
+    </div>
+
+    <hr class="section-divider">
+
+    <!-- fund_guard 상태 -->
+    <h3 style="margin-bottom:var(--sp-md)">fund_guard 상태</h3>
+    <div class="summary" id="cb-fg-summary">
+      <div class="card"><div class="label">활성 자금 (원)</div><div class="value" id="cb-fg-amt">-</div></div>
+      <div class="card"><div class="label">활성 종목 수</div><div class="value" id="cb-fg-tickers">-</div></div>
+      <div class="card"><div class="label">오늘 진입 건수</div><div class="value" id="cb-fg-today">-</div></div>
+      <div class="card"><div class="label">주간 누적 PnL</div><div class="value" id="cb-fg-weekly">-</div></div>
+    </div>
+
+    <hr class="section-divider">
+
+    <!-- 최근 7일 탈락 사유 -->
+    <h3 style="margin-bottom:var(--sp-md)">최근 7일 탈락 사유</h3>
+    <div class="table-wrap">
+      <table id="cb-rej-table">
+        <thead><tr><th>날짜</th><th>종목</th><th>이름</th><th>상태</th><th>사유</th></tr></thead>
+        <tbody id="cb-rej-body"></tbody>
+      </table>
+    </div>
+
+    <hr class="section-divider">
+
+    <!-- 최근 호가 스냅샷 -->
+    <h3 style="margin-bottom:var(--sp-md)">최근 호가 스냅샷 (Phase 2-1)</h3>
+    <div class="table-wrap">
+      <table id="cb-ob-table">
+        <thead><tr><th>시각</th><th>종목</th><th>매도1</th><th>매수1</th><th>현재가</th><th>스프레드</th></tr></thead>
+        <tbody id="cb-ob-body"></tbody>
+      </table>
     </div>
   </div>
 
@@ -911,6 +977,103 @@ function loadTab(tab) {
     case 'performance': loadPerformance(); break;
     case 'news': loadNews(); break;
     case 'system': loadSystem(); break;
+    case 'closingbet': loadClosingBet(); break;
+  }
+}
+
+// ===== 종가베팅 (Phase 2-6) =====
+async function loadClosingBet() {
+  // 4 API 병렬 호출
+  const [today, gate, fg, rej, ob] = await Promise.all([
+    api('/closing-bet/today'),
+    api('/closing-bet/gate-progress'),
+    api('/closing-bet/fund-guard-status'),
+    api('/closing-bet/rejections?days=7&limit=50'),
+    api('/closing-bet/orderbook-history?days=1&limit=30'),
+  ]);
+  if (!today || !gate || !fg || !rej || !ob) return;
+
+  // 게이트 진척도
+  document.getElementById('cb-gate-rec').textContent =
+    `${gate.actual.recommended} / ${gate.target.recommended}`;
+  document.getElementById('cb-gate-days').textContent =
+    `${gate.actual.business_days} / ${gate.target.business_days}`;
+  document.getElementById('cb-gate-stocks').textContent =
+    `${gate.actual.distinct_stocks} / ${gate.target.distinct_stocks}`;
+  const passEl = document.getElementById('cb-gate-pass');
+  passEl.textContent = gate.passed ? 'PASSED' : 'PENDING';
+  passEl.style.color = gate.passed ? 'var(--positive)' : 'var(--text-tertiary)';
+
+  // 오늘 후보 카운트 + 리스트
+  document.getElementById('cb-cnt-rec').textContent = today.status_counts.recommended;
+  document.getElementById('cb-cnt-ent').textContent = today.status_counts.entered;
+  document.getElementById('cb-cnt-rejf').textContent = today.status_counts.rejected_filter;
+  document.getElementById('cb-cnt-rejm').textContent = today.status_counts.rejected_manual;
+
+  const todayBody = document.getElementById('cb-today-body');
+  if (today.candidates.length === 0) {
+    todayBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--text-tertiary)">오늘 후보 없음 (15:10 KST 자동 트리거 후 갱신)</td></tr>`;
+  } else {
+    todayBody.innerHTML = today.candidates.map(c => `
+      <tr>
+        <td>${c.ticker}</td>
+        <td>${c.name || '-'}</td>
+        <td>${c.candidate_status}</td>
+        <td>${c.layer1_score ?? '-'}</td>
+        <td>${c.layer2_score ?? '-'}</td>
+        <td>${c.layer3_score ?? '-'}</td>
+        <td>${c.external_risk_score ?? '-'}</td>
+        <td>${c.total_score ?? '-'}</td>
+        <td style="font-size:0.78rem;color:var(--text-tertiary)">${c.rejection_reason || '-'}</td>
+      </tr>
+    `).join('');
+  }
+
+  // fund_guard
+  document.getElementById('cb-fg-amt').textContent = fmt(fg.active_amount) + '원';
+  document.getElementById('cb-fg-tickers').textContent =
+    `${fg.active_tickers.length} / ${fg.config.max_concurrent_positions}`;
+  document.getElementById('cb-fg-today').textContent =
+    `${fg.today_entries} / ${fg.config.max_daily_entries}`;
+  const weeklyEl = document.getElementById('cb-fg-weekly');
+  if (fg.weekly_pnl_pct === null || fg.weekly_pnl_pct === undefined) {
+    weeklyEl.textContent = '-';
+  } else {
+    weeklyEl.textContent = fmtPct(fg.weekly_pnl_pct * 100);
+    weeklyEl.className = 'value ' + valueClass(fg.weekly_pnl_pct);
+  }
+
+  // 탈락 사유
+  const rejBody = document.getElementById('cb-rej-body');
+  if (rej.rejections.length === 0) {
+    rejBody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-tertiary)">최근 7일 탈락 사유 없음</td></tr>`;
+  } else {
+    rejBody.innerHTML = rej.rejections.map(r => `
+      <tr>
+        <td>${r.trade_date}</td>
+        <td>${r.ticker}</td>
+        <td>${r.name || '-'}</td>
+        <td>${r.candidate_status}</td>
+        <td style="font-size:0.78rem">${r.rejection_reason || '-'}</td>
+      </tr>
+    `).join('');
+  }
+
+  // 호가 스냅샷
+  const obBody = document.getElementById('cb-ob-body');
+  if (ob.snapshots.length === 0) {
+    obBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-tertiary)">호가 스냅샷 없음 (Phase 2-1 첫 트리거 후 갱신)</td></tr>`;
+  } else {
+    obBody.innerHTML = ob.snapshots.map(s => `
+      <tr>
+        <td style="font-size:0.78rem">${s.snapshot_time}</td>
+        <td>${s.ticker}</td>
+        <td>${fmt(s.ask1)}</td>
+        <td>${fmt(s.bid1)}</td>
+        <td>${fmt(s.current_price)}</td>
+        <td>${s.spread_pct != null ? (s.spread_pct * 100).toFixed(3) + '%' : '-'}</td>
+      </tr>
+    `).join('');
   }
 }
 

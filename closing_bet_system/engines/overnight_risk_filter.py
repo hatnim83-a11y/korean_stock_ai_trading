@@ -198,6 +198,7 @@ class OvernightRiskFilter:
         market_data: Optional[dict] = None,
         dart_snapshot: Optional[Any] = None,
         *,
+        kind_alerts: Optional[Any] = None,
         assessed_at: Optional[datetime] = None,
     ) -> OvernightRiskAssessment:
         """단일 종목 외부 리스크 통합 평가.
@@ -207,6 +208,8 @@ class OvernightRiskFilter:
             market_data: 시장 데이터 dict — 키: ``us_futures_change_pct``, ``vkospi``,
                 ``kospi_change_pct``, ``usd_krw_change_pct`` (모두 None 허용 — Phase 1 결손 정책)
             dart_snapshot: 1-5a ``DartDisclosureSnapshot`` (None 허용 — DART 평가 스킵)
+            kind_alerts: Phase 2-2 ``KindAlertSnapshot`` 또는 ``{ticker: severity}`` dict
+                (None 허용 — KIND 평가 스킵, Phase 1 결손 정책)
             assessed_at: 평가 시각 (None 이면 now_kst)
 
         Returns:
@@ -285,6 +288,22 @@ class OvernightRiskFilter:
             dart_excl_reason = _get_attr_or_key(dart_snapshot, "exclusion_reason", None)
             has_positive = bool(_get_attr_or_key(dart_snapshot, "has_positive_disclosure", False))
 
+        # ===== 2b. 종목 평가 (KIND 시장경보, Phase 2-2) =====
+        # severity 0: 정상 (영향 없음), 1: 주의 (워닝만), 2: 경고 (size 축소), 3: 위험/정지 (제외)
+        kind_severity = _resolve_kind_severity(kind_alerts, ticker)
+        if kind_severity >= 3:
+            # 매매거래정지 / 투자위험 → 즉시 제외
+            warnings.append(f"KIND severity {kind_severity} (위험/정지) → 진입 제외")
+        elif kind_severity == 2:
+            # 투자경고 → 50% 비중
+            size_factor = min(size_factor, self.reduced_size_factor)
+            warnings.append(
+                f"KIND 투자경고 → 비중 {self.reduced_size_factor*100:.0f}%"
+            )
+        elif kind_severity == 1:
+            # 투자주의 → 워닝만 (size 영향 없음, 알림으로 사용자 인지)
+            warnings.append("KIND 투자주의 (size 영향 없음, 사용자 인지용)")
+
         # ===== 3. 통합 결정 =====
         if skip_today:
             can_enter = False
@@ -295,6 +314,11 @@ class OvernightRiskFilter:
             final_size = ZERO_SIZE_FACTOR
             # 1-5a `exclusion_reason` 이 이미 "DART 즉시제외:" prefix 를 포함 → 중복 prefix 제거
             decision_reason = dart_excl_reason or "DART 즉시제외: 키워드 매칭"
+        elif kind_severity >= 3:
+            # KIND 위험/정지: DART 즉시제외와 같은 우선순위 (매매 자체 차단)
+            can_enter = False
+            final_size = ZERO_SIZE_FACTOR
+            decision_reason = f"KIND 시장경보 즉시제외 (severity {kind_severity}: 위험/정지)"
         else:
             can_enter = True
             final_size = size_factor
@@ -331,6 +355,7 @@ class OvernightRiskFilter:
         dart_snapshots: dict,  # ticker → DartDisclosureSnapshot
         tickers: Optional[list[str]] = None,
         *,
+        kind_alerts: Optional[Any] = None,
         assessed_at: Optional[datetime] = None,
     ) -> dict:
         """여러 종목 평가. ticker → ``OvernightRiskAssessment`` 반환.
@@ -339,6 +364,8 @@ class OvernightRiskFilter:
             market_data: 시장 데이터 (1회 평가, 모든 종목 공통)
             dart_snapshots: ``{ticker: DartDisclosureSnapshot}`` 매핑
             tickers: 평가 대상 ticker 리스트 (None 이면 dart_snapshots 키 사용)
+            kind_alerts: Phase 2-2 ``KindAlertSnapshot`` 또는 ``{ticker: severity}`` dict
+                (None 허용 — KIND 평가 스킵, 결손 정책 일관)
         """
         ts = assessed_at or now_kst()
         if tickers is None:
@@ -349,7 +376,10 @@ class OvernightRiskFilter:
         excl_count = 0
         for ticker in tickers:
             snap = dart_snapshots.get(ticker)
-            assessment = self.assess(ticker, market_data, snap, assessed_at=ts)
+            assessment = self.assess(
+                ticker, market_data, snap,
+                kind_alerts=kind_alerts, assessed_at=ts,
+            )
             results[ticker] = assessment
             if assessment.skip_today:
                 skip_count += 1
@@ -395,3 +425,39 @@ def _get_attr_or_key(obj: Any, name: str, default: Any) -> Any:
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
+
+
+def _resolve_kind_severity(kind_alerts: Any, ticker: str) -> int:
+    """KIND 입력에서 ticker 의 severity 추출. 미존재/None 시 0 (정상).
+
+    지원 입력 형태:
+    - ``KindAlertSnapshot`` (Phase 2-2 dataclass) — ``severity_for(ticker)`` 호출
+    - ``{ticker: severity_int}`` dict
+    - ``{ticker: severity_str}`` (예: ``{"005930": "주의"}``) — 한글명 매핑
+    - None — 평가 스킵 (0 반환)
+    """
+    if kind_alerts is None:
+        return 0
+
+    # KindAlertSnapshot 또는 호환 객체 (severity_for 메서드 가짐)
+    severity_fn = getattr(kind_alerts, "severity_for", None)
+    if callable(severity_fn):
+        try:
+            return int(severity_fn(ticker))
+        except (TypeError, ValueError):
+            return 0
+
+    if isinstance(kind_alerts, dict):
+        raw = kind_alerts.get(ticker)
+        if raw is None:
+            return 0
+        if isinstance(raw, int):
+            return max(0, raw)
+        if isinstance(raw, str):
+            # 본 모듈에서 매핑 표 import 회피 위해 인라인
+            from closing_bet_system.collectors.kind_alert_collector import (
+                ALERT_LEVEL_TO_SEVERITY,
+            )
+            return int(ALERT_LEVEL_TO_SEVERITY.get(raw.strip(), 0))
+        return 0
+    return 0

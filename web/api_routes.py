@@ -51,3 +51,48 @@ async def news(stock_code: str = Query(None)):
 async def system_status():
     data = await svc.get_system_status()
     return data
+
+
+# ===== 종가베팅 (Phase 2-6) =====
+# closing_bet_system/dashboard/data_adapter.py 의 read-only 헬퍼를 호출.
+# 모든 응답은 closing_bet.db 가 비어있어도 빈 dict / 0 카운트 정상 반환.
+
+import asyncio  # noqa: E402
+
+from closing_bet_system.dashboard import data_adapter as cb_adapter  # noqa: E402
+
+
+@router.get("/closing-bet/today")
+async def closing_bet_today():
+    """오늘 후보 status별 카운트 + 리스트."""
+    return await asyncio.to_thread(cb_adapter.get_today_candidates)
+
+
+@router.get("/closing-bet/gate-progress")
+async def closing_bet_gate_progress():
+    """운영 점검 게이트 진척도 (30건 / 15영업일 / 20종목)."""
+    return await asyncio.to_thread(cb_adapter.get_gate_progress)
+
+
+@router.get("/closing-bet/orderbook-history")
+async def closing_bet_orderbook_history(
+    days: int = Query(1, ge=1, le=7),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """최근 N일 호가 스냅샷 (Phase 2-1 데이터)."""
+    return await asyncio.to_thread(cb_adapter.get_orderbook_history, days, limit)
+
+
+@router.get("/closing-bet/rejections")
+async def closing_bet_rejections(
+    days: int = Query(7, ge=1, le=30),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """최근 N일 rejected_filter / rejected_manual 사유."""
+    return await asyncio.to_thread(cb_adapter.get_recent_rejections, days, limit)
+
+
+@router.get("/closing-bet/fund-guard-status")
+async def closing_bet_fund_guard_status():
+    """fund_guard 자금 사용/한도/주간 손실 등."""
+    return await asyncio.to_thread(cb_adapter.get_fund_guard_status)

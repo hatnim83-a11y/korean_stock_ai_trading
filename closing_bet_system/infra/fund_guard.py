@@ -35,6 +35,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -66,6 +67,7 @@ class GuardConfig:
     max_position_per_stock: float = 0.25        # 1종목 최대 비중 (종가베팅 자금 기준)
     max_concurrent_positions: int = 4
     max_daily_entries: int = 2
+    weekly_loss_limit: float = -0.05            # 최근 7일 누적 net_pnl_pct ≤ 한도 시 매매 중지
 
     @classmethod
     def from_settings(cls, settings: Optional[dict] = None) -> "GuardConfig":
@@ -80,6 +82,7 @@ class GuardConfig:
                 f.get("max_concurrent_positions", cls.max_concurrent_positions)
             ),
             max_daily_entries=int(f.get("max_daily_entries", cls.max_daily_entries)),
+            weekly_loss_limit=float(f.get("weekly_loss_limit", cls.weekly_loss_limit)),
         )
 
 
@@ -181,6 +184,16 @@ class FundGuard:
                     f">= 한도 {cfg.max_daily_entries}건"
                 )
 
+        # 8) 주간 손실 한도 — 최근 7일 누적 net_pnl_pct 가 임계값 이하면 매매 중지.
+        # entered + exit_time 채워진 후보들의 net_pnl_pct 합계 (개별 거래 손익률을 단순 합산).
+        # 임계값(-0.05) 이하 → 차단. weekly_pnl 이 None(데이터 없음) 시 통과.
+        weekly_pnl = db_state.get("weekly_pnl")
+        if weekly_pnl is not None and weekly_pnl <= cfg.weekly_loss_limit:
+            return False, (
+                f"주간 손실 한도 초과: 최근 7일 누적 {weekly_pnl:+.2%} "
+                f"<= 한도 {cfg.weekly_loss_limit:+.2%}"
+            )
+
         return True, ""
 
     # ===== 내부 헬퍼 (override 가능) =====
@@ -212,10 +225,12 @@ class FundGuard:
     def _fetch_db_state(self) -> dict:
         """allow_order() 한 번에 필요한 모든 DB 정보를 단일 connection 으로 조회.
 
-        TOCTOU(Time-of-check-to-time-of-use) 위험 회피 — 3 쿼리가 같은 스냅샷을 본다.
+        TOCTOU(Time-of-check-to-time-of-use) 위험 회피 — 4 쿼리가 같은 스냅샷을 본다.
 
         Returns:
-            ``{"active_amount": int, "active_tickers": set[str], "today_entries": int}``
+            dict 키: ``active_amount`` (int), ``active_tickers`` (set[str]),
+            ``today_entries`` (int), ``weekly_pnl`` (Optional[float] — 최근 7일 net_pnl_pct 합계,
+            데이터 없으면 None)
 
         Raises:
             ``sqlite3.Error`` — 호출 측이 catch 하여 보수적 차단 처리
@@ -238,7 +253,8 @@ class FundGuard:
             active_tickers = {r[0] for r in rows if r[0]}
 
             # 오늘 (KST) entered 처리 수
-            today = now_kst().date().isoformat()
+            today_dt = now_kst().date()
+            today = today_dt.isoformat()
             cur.execute(
                 """
                 SELECT COUNT(*)
@@ -251,10 +267,35 @@ class FundGuard:
             row = cur.fetchone()
             today_entries = int(row[0]) if row and row[0] else 0
 
+            # 최근 7일 누적 net_pnl_pct (entered + exit_time 채워진 후보).
+            # 영업일 5일 ≒ 캘린더 7일. exit_time 은 TIMESTAMP 라 SUBSTR 비교 회피하려고
+            # trade_date(DATE) 로 비교 — Phase 1/2 종가베팅은 T 진입 → T+1 매도 패턴 (16~18시간)
+            # 이라 trade_date 기준 7일 윈도가 정확함.
+            # Phase 3 다일 보유 도입 시 (T 진입 → T+N 매도, N>1), trade_date 가 윈도 밖이지만
+            # exit_time 이 윈도 안인 거래가 누락되므로 exit_date 기준 쿼리로 재검토 필요.
+            week_start = (today_dt - timedelta(days=7)).isoformat()
+            cur.execute(
+                """
+                SELECT SUM(net_pnl_pct), COUNT(net_pnl_pct)
+                FROM candidates
+                WHERE candidate_status = 'entered'
+                  AND exit_time IS NOT NULL
+                  AND trade_date >= ?
+                """,
+                (week_start,),
+            )
+            row = cur.fetchone()
+            weekly_pnl: Optional[float] = None
+            if row and row[1] and int(row[1]) > 0:
+                # SUM 이 None 일 가능성 (모든 net_pnl_pct 가 NULL): 가드
+                if row[0] is not None:
+                    weekly_pnl = float(row[0])
+
             return {
                 "active_amount": active_amount,
                 "active_tickers": active_tickers,
                 "today_entries": today_entries,
+                "weekly_pnl": weekly_pnl,
             }
         finally:
             conn.close()

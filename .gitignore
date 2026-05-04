@@ -71,3 +71,10 @@ htmlcov/
 # Temporary
 *.tmp
 *.temp
+
+# Runtime artifacts (장기 운영 중 자동 생성)
+trading_system.pid
+.claude/scheduled_tasks.lock
+data/monitor_state.json
+data/theme_cache.json
+data/backtest_*.csv

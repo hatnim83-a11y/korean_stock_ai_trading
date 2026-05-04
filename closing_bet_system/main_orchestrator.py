@@ -103,9 +103,12 @@ class MainOrchestrator:
         risk_filter: Optional[Any] = None,
         candidate_logger: Optional[Any] = None,
         review_bot: Optional[Any] = None,
+        orderbook_collector: Optional[Any] = None,
+        kind_collector: Optional[Any] = None,
         universe_provider: Optional[Callable[[], list]] = None,
         market_data_provider: Optional[Callable[[], dict]] = None,
         name_lookup: Optional[Callable[[str], str]] = None,
+        label_provider: Optional[Callable[[str], dict]] = None,
         gate_threshold: int = DEFAULT_GATE_OPERATIONAL_REVIEW,
     ):
         self._flow_collector = flow_collector
@@ -115,9 +118,12 @@ class MainOrchestrator:
         self._risk_filter = risk_filter
         self._candidate_logger = candidate_logger
         self._review_bot = review_bot
+        self._orderbook_collector = orderbook_collector
+        self._kind_collector = kind_collector
         self._universe_provider = universe_provider
         self._market_data_provider = market_data_provider
         self._name_lookup = name_lookup
+        self._label_provider = label_provider
         self.gate_threshold = int(gate_threshold)
 
     # ===== 의존성 지연 로딩 =====
@@ -185,6 +191,24 @@ class MainOrchestrator:
             self._review_bot = TelegramReviewBot()
         return self._review_bot
 
+    @property
+    def orderbook_collector(self):
+        if self._orderbook_collector is None:
+            from closing_bet_system.collectors.kis_orderbook_collector import (
+                KisOrderbookCollector,
+            )
+            self._orderbook_collector = KisOrderbookCollector()
+        return self._orderbook_collector
+
+    @property
+    def kind_collector(self):
+        if self._kind_collector is None:
+            from closing_bet_system.collectors.kind_alert_collector import KindAlertCollector
+            # Phase 2-2 1단계: provider 미주입 → 빈 dict 반환 (인터페이스만 활성)
+            # Phase 2-2 2단계 (별도 단위) 에서 KindHttpProvider 주입 예정
+            self._kind_collector = KindAlertCollector()
+        return self._kind_collector
+
     # ===== 메인 파이프라인 =====
 
     async def run_daily_pipeline(self) -> dict:
@@ -221,21 +245,46 @@ class MainOrchestrator:
         dart_snaps_task = asyncio.to_thread(
             self.dart_collector.collect_for_universe, tickers
         )
+        # Phase 2-1: 호가 1단계 스냅샷 (KIS inquire_asking_price)
+        orderbook_snaps_task = asyncio.to_thread(
+            self.orderbook_collector.collect_for_universe, tickers
+        )
         gather_results = await asyncio.gather(
-            flow_snaps_task, pv_snaps_task, dart_snaps_task,
+            flow_snaps_task, pv_snaps_task, dart_snaps_task, orderbook_snaps_task,
             return_exceptions=True,
         )
         flow_snaps = gather_results[0] if not isinstance(gather_results[0], Exception) else []
         pv_snaps = gather_results[1] if not isinstance(gather_results[1], Exception) else []
         dart_snaps = gather_results[2] if not isinstance(gather_results[2], Exception) else []
-        for label, res in zip(("flow", "price_volume", "dart"), gather_results):
+        orderbook_snaps = gather_results[3] if not isinstance(gather_results[3], Exception) else []
+        for label, res in zip(("flow", "price_volume", "dart", "orderbook"), gather_results):
             if isinstance(res, Exception):
                 logger.error(f"[orchestrator] {label} collector 예외 (빈 폴백 진행): {res}")
+
+        # Phase 2-1: 호가 스냅샷 DB INSERT (signal/risk 점수에는 미반영, Phase 2-3 활용)
+        if orderbook_snaps:
+            try:
+                from closing_bet_system.collectors.kis_orderbook_collector import (
+                    insert_snapshots as _insert_orderbook,
+                )
+                inserted = await asyncio.to_thread(_insert_orderbook, orderbook_snaps)
+                logger.info(
+                    f"[orchestrator] orderbook 스냅샷 DB 저장 — {inserted}/{len(orderbook_snaps)}건"
+                )
+            except Exception as e:
+                logger.error(f"[orchestrator] orderbook DB 저장 예외 (파이프라인 계속): {e}")
 
         # 시장 데이터 (Phase 2 HTTP 수집기 도입 시 블로킹 방지 위해 to_thread 로 격리)
         market_data = await asyncio.to_thread(
             self._safe_call, self._market_data_provider, {}
         )
+
+        # Phase 2-2: KIND 시장경보 수집 (1회, universe 무관)
+        try:
+            kind_snapshot = await asyncio.to_thread(self.kind_collector.collect)
+        except Exception as e:
+            logger.error(f"[orchestrator] kind_collector 예외 (빈 폴백 진행): {e}")
+            kind_snapshot = None
 
         # ===== 2. 종목별 스코어링 + DB + 알림 후보 수집 =====
         # snapshot 인덱싱
@@ -252,7 +301,8 @@ class MainOrchestrator:
         for ticker in tickers:
             try:
                 processed = self._process_ticker(
-                    today, ticker, flow_by_ticker, pv_by_ticker, dart_by_ticker, market_data
+                    today, ticker, flow_by_ticker, pv_by_ticker, dart_by_ticker, market_data,
+                    kind_snapshot=kind_snapshot,
                 )
                 if processed is None:
                     continue
@@ -320,6 +370,9 @@ class MainOrchestrator:
         어제(T-1) recommended/entered 후보들에 대해 오늘 09:30 시초/고/저 데이터를
         ``label_provider(ticker)`` 로 가져와 ``candidate_labels`` 에 저장.
 
+        명시 인자가 없으면 ``__init__`` 의 ``label_provider`` 폴백 사용 — APScheduler 가
+        인자 없이 호출하므로 인스턴스 의존성으로 자동 주입됨.
+
         Args:
             label_provider: ``Callable[[ticker], dict]`` — 각 종목의 라벨 dict 반환.
                 키: ``next_open_pct``, ``next_morning_high_pct``, ``next_morning_low_pct``,
@@ -332,7 +385,9 @@ class MainOrchestrator:
         """
         today = now_kst().date()
         yesterday = today - timedelta(days=1)
-        if label_provider is None:
+        # 인스턴스 폴백 (APScheduler 가 인자 없이 호출하는 경로)
+        provider = label_provider if label_provider is not None else self._label_provider
+        if provider is None:
             logger.info("[orchestrator] label_provider 미설정 — 라벨링 스킵")
             return {"date": str(yesterday), "labeled": 0, "errors": 0, "skipped": "no provider"}
 
@@ -347,7 +402,7 @@ class MainOrchestrator:
             ticker = row.get("ticker")
             cid = row.get("candidate_id")
             try:
-                label_data = label_provider(ticker)
+                label_data = provider(ticker)
                 if not label_data:
                     continue
                 await asyncio.to_thread(
@@ -381,8 +436,13 @@ class MainOrchestrator:
         pv_by_ticker: dict,
         dart_by_ticker: dict,
         market_data: dict,
+        *,
+        kind_snapshot: Optional[Any] = None,
     ) -> Optional[dict]:
         """1종목 처리 — 점수 → 외부리스크 → DB 저장 → 알림 후보 판단.
+
+        Args:
+            kind_snapshot: Phase 2-2 ``KindAlertSnapshot`` (None 허용 — KIND 평가 스킵)
 
         Returns:
             None: 데이터 결손으로 스킵
@@ -407,8 +467,8 @@ class MainOrchestrator:
 
         # 점수 산출
         score_bd = self.score_engine.score(ticker, layer1, layer2, layer3)
-        # 외부 리스크 (1-5b)
-        risk = self.risk_filter.assess(ticker, market_data, dart)
+        # 외부 리스크 (1-5b + Phase 2-2 KIND)
+        risk = self.risk_filter.assess(ticker, market_data, dart, kind_alerts=kind_snapshot)
 
         # DB 저장 (recommended INSERT)
         name = self._safe_name_lookup(ticker)

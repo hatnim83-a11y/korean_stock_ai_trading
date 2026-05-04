@@ -167,6 +167,7 @@ class ClosingBetDatabase:
         current = self._get_schema_version()
         migrations = [
             (1, "Phase 0-A: candidates/features/labels/flow_reliability 4테이블", self._migrate_v1),
+            (2, "Phase 2-1: orderbook_snapshots 테이블 (호가 1단계 스냅샷)", self._migrate_v2),
         ]
 
         pending = [(v, d, fn) for v, d, fn in migrations if v > current]
@@ -344,6 +345,44 @@ class ClosingBetDatabase:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_flow_reliability_date "
                 "ON flow_data_reliability(trade_date)"
+            )
+
+    def _migrate_v2(self) -> None:
+        """v2: orderbook_snapshots 테이블 (Phase 2-1).
+
+        호가 1단계 + 잔량 + 현재가 + 스프레드 스냅샷 기록. PK = (ticker, snapshot_time)
+        라 같은 시각에 같은 종목 재호출 시 INSERT OR REPLACE 동작.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+                    ticker TEXT NOT NULL,
+                    snapshot_time TIMESTAMP NOT NULL,
+                    is_valid INTEGER NOT NULL,
+
+                    ask1 INTEGER,
+                    ask_volume1 INTEGER,
+                    bid1 INTEGER,
+                    bid_volume1 INTEGER,
+
+                    current_price INTEGER,
+                    spread_pct REAL,
+
+                    error_msg TEXT,
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                    PRIMARY KEY (ticker, snapshot_time)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_time "
+                "ON orderbook_snapshots(ticker, snapshot_time DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_orderbook_time "
+                "ON orderbook_snapshots(snapshot_time)"
             )
 
 
