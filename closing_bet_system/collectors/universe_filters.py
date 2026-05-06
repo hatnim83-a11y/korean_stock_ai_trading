@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 import sys
 import threading
+import time
 from datetime import date as date_cls, timedelta
 from pathlib import Path
 from typing import Optional
@@ -72,6 +73,15 @@ LOOKBACK_20D_DAYS = 30
 # pykrx market 코드
 _PYKRX_MARKETS = ("KOSPI", "KOSDAQ")
 
+# 단위 2-9c — KRX bulk 빈 응답 시 종목별 by_date 폴백 상한 (hard_cap 정합)
+MAX_FALLBACK_TICKERS = 100
+
+# 종목별 폴백 호출 사이 sleep — KRX 차단 방어 (50ms × 100건 = 최대 5초 추가)
+FALLBACK_RATE_LIMIT_SEC = 0.05
+
+# data_source 토글 default — settings.yaml `data_source.fallback_per_ticker_enabled`
+DEFAULT_FALLBACK_PER_TICKER_ENABLED = True
+
 # PRD 4-1 KIND severity 사전 제외 임계값 — kind_alert_collector 단방향 import (순환 없음).
 # kind_alert_collector 가 본 모듈을 import 하지 않으므로 안전.
 from closing_bet_system.collectors.kind_alert_collector import (
@@ -84,6 +94,9 @@ from closing_bet_system.collectors.kind_alert_collector import (
 _market_data_cache_lock = threading.Lock()
 _market_data_cache: dict[str, dict[str, dict]] = {}  # key=YYYYMMDD → {ticker: {market_cap, close, change_rate, trading_value}}
 
+# 단위 2-9c — bulk 빈 응답 폴백 결과 별도 격리 (bulk 캐시 오염 방지)
+_per_ticker_market_cache: dict[str, dict[str, dict]] = {}  # key=YYYYMMDD → {ticker: {close, change_rate, trading_value}}
+
 _per_ticker_cache_lock = threading.Lock()
 _high_52w_cache: dict[tuple[str, str], Optional[float]] = {}  # (today_str, ticker) → high_52w
 _avg_value_20d_cache: dict[tuple[str, str], Optional[float]] = {}  # (today_str, ticker) → avg_20d
@@ -93,6 +106,7 @@ def reset_cache() -> None:
     """테스트용: 모든 캐시 초기화."""
     with _market_data_cache_lock:
         _market_data_cache.clear()
+        _per_ticker_market_cache.clear()
     with _per_ticker_cache_lock:
         _high_52w_cache.clear()
         _avg_value_20d_cache.clear()
@@ -139,6 +153,7 @@ def _load_filter_config() -> dict:
 
     stock_filter = settings.get("stock_filter", {}) or {}
     liquidity = settings.get("liquidity", {}) or {}
+    data_source = settings.get("data_source", {}) or {}
 
     return {
         "min_market_cap": stock_filter.get("min_market_cap", DEFAULT_MIN_MARKET_CAP),
@@ -151,6 +166,10 @@ def _load_filter_config() -> dict:
         ),
         "min_avg_value_20d": liquidity.get("min_avg_value_20d", DEFAULT_MIN_AVG_VALUE_20D),
         "min_today_value": liquidity.get("min_today_value", DEFAULT_MIN_TODAY_VALUE),
+        # 단위 2-9c — bulk 빈 응답 시 종목별 by_date 폴백 토글
+        "fallback_per_ticker_enabled": bool(
+            data_source.get("fallback_per_ticker_enabled", DEFAULT_FALLBACK_PER_TICKER_ENABLED)
+        ),
     }
 
 
@@ -165,22 +184,79 @@ def _import_pykrx():
 # ===== Bulk fetch: 시총 + OHLCV (시장당 1회) =====
 
 
-def _fetch_market_data_bulk(today_str: str) -> dict[str, dict]:
+def _fetch_per_ticker_today_data(ticker: str, today_str: str, krx) -> dict:
+    """단위 2-9c — 종목별 1일치 OHLCV 폴백.
+
+    bulk(`get_market_*_by_ticker`)이 KRX 정책 변경으로 빈 응답을 반환할 때,
+    종목별 ``get_market_ohlcv_by_date(today, today, ticker)``로 보강.
+
+    옵션 A (보수): 시가총액은 채우지 않음(``market_cap`` 키 부재) →
+    후속 ``apply_attribute_filters``가 ``data_not_found`` 보수 탈락.
+    본격 시총 보강은 단위 2-9d (KIS Open API ranking 대체).
+
+    Args:
+        ticker: 6자리 종목코드.
+        today_str: ``YYYYMMDD``.
+        krx: ``pykrx.stock`` 모듈 (호출자에서 lazy import 후 주입).
+
+    Returns:
+        ``{close, change_rate, trading_value}`` (성공 시).
+        실패 또는 빈 응답 → ``{}`` (graceful 격리).
+    """
+    try:
+        df = krx.get_market_ohlcv_by_date(today_str, today_str, ticker)
+        if df is None or len(df) == 0:
+            return {}
+        cols = df.columns
+        row = df.iloc[-1]  # 1일치라 1행이지만 안전하게 마지막 행 사용
+        out: dict = {}
+        if "종가" in cols:
+            v = _safe_float(row["종가"])
+            if v is not None:
+                out["close"] = v
+        if "등락률" in cols:
+            v = _safe_float(row["등락률"])
+            if v is not None:
+                out["change_rate"] = v
+        if "거래대금" in cols:
+            v = _safe_float(row["거래대금"])
+            if v is not None:
+                out["trading_value"] = v
+        return out
+    except Exception as e:
+        logger.debug(f"[universe_filters] per_ticker_today {ticker} 실패: {e}")
+        return {}
+
+
+def _fetch_market_data_bulk(
+    today_str: str,
+    tickers: Optional[list[str]] = None,
+) -> dict[str, dict]:
     """KOSPI+KOSDAQ 일괄 시총/OHLCV 조회 → ticker 단위 dict.
 
     캐시 히트 시 즉시 반환.
 
+    단위 2-9c — bulk 가 빈 응답이고 ``tickers``가 제공되었으며 토글이 켜진 경우,
+    종목별 ``get_market_ohlcv_by_date`` 폴백으로 보강. 결과는 별도 캐시
+    (`_per_ticker_market_cache`)에 격리해 bulk 캐시와 충돌 방지.
+
+    Args:
+        today_str: ``YYYYMMDD``.
+        tickers: 폴백 후보 종목 리스트 (None 시 폴백 비활성). hard_cap 정합 위해
+            ``MAX_FALLBACK_TICKERS=100`` 까지만 처리.
+
     Returns:
-        ``{ticker: {"market_cap", "close", "change_rate", "trading_value"}}``
+        ``{ticker: {"market_cap"?, "close", "change_rate", "trading_value"}}`` —
+        폴백 모드에서는 ``market_cap`` 키가 없을 수 있음 (옵션 A 보수).
     """
     cached = _market_data_cache.get(today_str)
     if cached is not None:
-        return cached
+        return _merge_with_fallback_cache(cached, today_str)
 
     with _market_data_cache_lock:
         cached = _market_data_cache.get(today_str)
         if cached is not None:
-            return cached
+            return _merge_with_fallback_cache(cached, today_str)
 
         result: dict[str, dict] = {}
         krx = None
@@ -236,7 +312,105 @@ def _fetch_market_data_bulk(today_str: str) -> dict[str, dict]:
         logger.info(
             f"[universe_filters] bulk market data 캐시 저장 — {len(result)}종목 ({today_str})"
         )
-        return result
+
+        # 단위 2-9c — bulk 빈 응답 폴백
+        _maybe_run_per_ticker_fallback(today_str, tickers, krx, result)
+        return _merge_with_fallback_cache(result, today_str)
+
+
+def _maybe_run_per_ticker_fallback(
+    today_str: str,
+    tickers: Optional[list[str]],
+    krx,
+    bulk_result: dict[str, dict],
+) -> None:
+    """단위 2-9c — bulk 빈 응답 시 종목별 폴백 실행. 결과는 ``_per_ticker_market_cache``에 격리.
+
+    호출 조건 (모두 AND):
+        - bulk_result 가 빈 dict (KRX bulk API 차단 시그널)
+        - tickers 인자 제공 (호출자가 후보 리스트 알고 있음)
+        - 토글 ``fallback_per_ticker_enabled`` True
+        - 같은 거래일 폴백 캐시 히트 X
+
+    호출량 가드:
+        ``MAX_FALLBACK_TICKERS=100`` (hard_cap 정합), 사이 ``FALLBACK_RATE_LIMIT_SEC=0.05``초.
+    """
+    if bulk_result:
+        return  # bulk 정상 → 폴백 스킵
+    if not tickers:
+        return
+    if today_str in _per_ticker_market_cache:
+        return  # 이미 폴백 실행 (캐시 히트)
+
+    try:
+        cfg = _load_filter_config()
+        if not cfg.get("fallback_per_ticker_enabled", DEFAULT_FALLBACK_PER_TICKER_ENABLED):
+            return
+    except Exception as e:
+        logger.debug(
+            f"[universe_filters] 폴백 토글 로드 실패: {e} — "
+            f"default({DEFAULT_FALLBACK_PER_TICKER_ENABLED}) 적용"
+        )
+        if not DEFAULT_FALLBACK_PER_TICKER_ENABLED:
+            return  # 명시적 default 체크 (코더 검토 심각 #2)
+
+    # 중복 제거 + 상한 적용 (입력 순서 보존)
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for t in tickers:
+        if t not in seen:
+            seen.add(t)
+            candidates.append(t)
+        if len(candidates) >= MAX_FALLBACK_TICKERS:
+            break
+
+    n_input = len(candidates)
+    logger.warning(
+        f"[universe_filters] bulk 빈 응답 — 종목별 폴백 진입 N={n_input}건 "
+        f"(상한 {MAX_FALLBACK_TICKERS}, sleep {FALLBACK_RATE_LIMIT_SEC}s/건)"
+    )
+
+    fallback: dict[str, dict] = {}
+    success = 0
+    start = time.monotonic()
+    for ticker in candidates:
+        data = _fetch_per_ticker_today_data(ticker, today_str, krx)
+        if data:
+            fallback[ticker] = data
+            success += 1
+        try:
+            time.sleep(FALLBACK_RATE_LIMIT_SEC)
+        except Exception:
+            pass
+    elapsed = time.monotonic() - start
+
+    _per_ticker_market_cache[today_str] = fallback
+    logger.info(
+        f"[universe_filters] 종목별 폴백 완료 — {success}/{n_input}건 성공, "
+        f"{elapsed:.2f}초 소요 ({today_str})"
+    )
+
+
+def _merge_with_fallback_cache(bulk: dict[str, dict], today_str: str) -> dict[str, dict]:
+    """단위 2-9c — bulk 캐시 + 폴백 캐시 통합 view 반환.
+
+    bulk 가 비어 있으면 폴백 캐시만 반환.
+    bulk 정상 시 폴백은 사용 안 함(캐시도 비어 있음).
+
+    동시성: ``_per_ticker_market_cache`` 는 ``_market_data_cache_lock`` 안에서만 쓰여지며,
+    본 함수는 fast-path(락 외)와 lock 보유 중 모두에서 호출된다. ``threading.Lock`` 은
+    non-reentrant 라 lock 보유 중에 lock 재획득 시 데드락 발생 → lock 미사용.
+    CPython GIL 이 dict.get 을 atomic 보장하므로 단일 프로세스에서 안전.
+    """
+    fb = _per_ticker_market_cache.get(today_str)
+    if not fb:
+        return bulk
+    if not bulk:
+        return fb
+    # 양쪽 모두 데이터가 있는 비정상 상황 — bulk 우선
+    merged = dict(fb)
+    merged.update(bulk)
+    return merged
 
 
 # ===== 종목별 fetch: 52주 고점 / 20일 평균 거래대금 =====
@@ -357,7 +531,9 @@ def apply_attribute_filters(
         if not tickers:
             return [], rejected
 
-    market_data = _fetch_market_data_bulk(today_str)
+    # 단위 2-9c — KIND 사전 제외 후 survivors 를 폴백 후보로 전달.
+    # bulk 정상 시 가드(`if not bulk_result`)로 폴백 스킵.
+    market_data = _fetch_market_data_bulk(today_str, tickers=tickers)
 
     for ticker in tickers:
         data = market_data.get(ticker)
@@ -365,9 +541,12 @@ def apply_attribute_filters(
             rejected[ticker] = "data_not_found"
             continue
 
-        # 1. 시가총액
+        # 1. 시가총액 — 옵션 A 보수: 시총 불명(폴백 경로 등)은 data_not_found 탈락 (단위 2-9c)
         market_cap = data.get("market_cap")
-        if market_cap is not None and market_cap < cfg["min_market_cap"]:
+        if market_cap is None:
+            rejected[ticker] = "data_not_found"
+            continue
+        if market_cap < cfg["min_market_cap"]:
             rejected[ticker] = "market_cap_too_low"
             continue
 
@@ -426,7 +605,8 @@ def apply_liquidity_filters(
     today_str = today.strftime("%Y%m%d")
     cfg = config or _load_filter_config()
 
-    market_data = _fetch_market_data_bulk(today_str)
+    # 단위 2-9c — bulk 빈 응답 시 입력 tickers 로 종목별 폴백.
+    market_data = _fetch_market_data_bulk(today_str, tickers=tickers)
 
     passed: list[str] = []
     rejected: dict[str, str] = {}

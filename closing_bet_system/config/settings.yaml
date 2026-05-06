@@ -100,6 +100,14 @@ stock_filter:
   exclude_upper_limit: true                # 당일 상한가 종목 제외
   protection_period_days: 7                # 보호예수 해제 D-7 이내 종목 제외
 
+# ─── 데이터 소스 폴백 (단위 2-9c) ─────────────────────────────────────────
+# KRX 사이트 정책 변경으로 pykrx get_market_*_by_ticker(시장 단위 bulk)가
+# 빈 응답을 반환할 때, 종목별 get_market_ohlcv_by_date 호출로 폴백.
+# 시총은 채우지 않음(옵션 A 보수) → market_cap=None 인 종목은 data_not_found 로 탈락.
+# 본격 해결은 단위 2-9d (KIS Open API ranking 대체).
+data_source:
+  fallback_per_ticker_enabled: true        # bulk 빈 응답 시 종목별 by_date 폴백 (default true)
+
 # ─── 텔레그램 (신규 봇, env 변수 분리) ─────────────────────────────────────
 telegram:
   bot_token_env: "CLOSING_BET_TELEGRAM_BOT_TOKEN"
