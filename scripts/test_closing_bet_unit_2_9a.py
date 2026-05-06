@@ -235,7 +235,9 @@ def test_UV2_9_KOSPI_KOSDAQ_거래대금_합산():
     fake_krx.get_market_ohlcv_by_ticker.side_effect = lambda d, market: (
         df_kospi if market == "KOSPI" else df_kosdaq
     )
-    with patch.object(upv2, "_import_pykrx", return_value=fake_krx):
+    # 단위 2-9d 회귀: KIS 라우팅 OFF (pykrx 경로 직접 검증)
+    with patch.object(upv2, "_is_kis_ranking_enabled", return_value=False), \
+         patch.object(upv2, "_import_pykrx", return_value=fake_krx):
         codes = upv2._fetch_top_value_codes("20260430", top_n=3)
     # 합산 상위 3: 200001(9000), 100004(8000), 200004(7000)
     assert codes == ["200001", "100004", "200004"], f"UV2-9 FAIL: {codes}"
@@ -254,7 +256,9 @@ def test_UV2_10_외국인_investor_정확_매핑():
     fake_krx.get_market_net_purchases_of_equities_by_ticker.side_effect = (
         lambda fromdate, todate, market, investor: df_kospi if market == "KOSPI" else df_kosdaq
     )
-    with patch.object(upv2, "_import_pykrx", return_value=fake_krx):
+    # 단위 2-9d 회귀: KIS 라우팅 OFF (pykrx 경로 직접 검증)
+    with patch.object(upv2, "_is_kis_ranking_enabled", return_value=False), \
+         patch.object(upv2, "_import_pykrx", return_value=fake_krx):
         codes = upv2._fetch_top_foreign_buy_codes("20260430", top_n=3)
     # 모든 호출 중 investor 한글 정확 매핑 확인
     all_calls = fake_krx.get_market_net_purchases_of_equities_by_ticker.call_args_list
@@ -281,7 +285,9 @@ def test_UV2_11_등락률_음수_혼재_nlargest():
     fake_krx.get_market_price_change_by_ticker.side_effect = lambda f, t, market: (
         df_kospi if market == "KOSPI" else df_kosdaq
     )
-    with patch.object(upv2, "_import_pykrx", return_value=fake_krx):
+    # 단위 2-9d 회귀: KIS 라우팅 OFF (pykrx 경로 직접 검증)
+    with patch.object(upv2, "_is_kis_ranking_enabled", return_value=False), \
+         patch.object(upv2, "_import_pykrx", return_value=fake_krx):
         codes = upv2._fetch_top_change_codes("20260430", top_n=3)
     # 상위 3: 100003(12.0), 200001(8.0), 100001(5.0)
     assert codes == ["100003", "200001", "100001"], f"UV2-11 FAIL: {codes}"
@@ -308,7 +314,9 @@ def test_UV2_13_비영업일_빈_DataFrame():
     empty_df = pd.DataFrame()
     fake_krx = MagicMock()
     fake_krx.get_market_ohlcv_by_ticker.return_value = empty_df
-    with patch.object(upv2, "_import_pykrx", return_value=fake_krx):
+    # 단위 2-9d 회귀: KIS 라우팅 OFF (pykrx 경로 직접 검증)
+    with patch.object(upv2, "_is_kis_ranking_enabled", return_value=False), \
+         patch.object(upv2, "_import_pykrx", return_value=fake_krx):
         codes = upv2._fetch_top_value_codes("20260101", top_n=10)
     assert codes == [], f"UV2-13 FAIL: {codes}"
     print("[PASS] UV2-13: 비-영업일 (빈 DataFrame) → 빈 리스트")
@@ -369,7 +377,9 @@ def test_UV2_16_None_반환_graceful():
     upv2.reset_cache()
     fake_krx = MagicMock()
     fake_krx.get_market_ohlcv_by_ticker.return_value = None
-    with patch.object(upv2, "_import_pykrx", return_value=fake_krx):
+    # 단위 2-9d 회귀: KIS 라우팅 OFF (pykrx 경로 직접 검증)
+    with patch.object(upv2, "_is_kis_ranking_enabled", return_value=False), \
+         patch.object(upv2, "_import_pykrx", return_value=fake_krx):
         codes = upv2._fetch_top_value_codes("20260430", top_n=10)
     assert codes == [], f"UV2-16 FAIL: {codes}"
     print("[PASS] UV2-16: None 반환 graceful → 빈 리스트")
@@ -409,7 +419,9 @@ def test_UV2_18_KeyError_pykrx_라이브러리_결함():
     fake_krx.get_market_ohlcv_by_ticker.side_effect = KeyError(
         "None of [Index(['시가', '고가', '저가', '종가'])] are in the [columns]"
     )
-    with patch.object(upv2, "_import_pykrx", return_value=fake_krx):
+    # 단위 2-9d 회귀: KIS 라우팅 OFF (pykrx 경로 직접 검증)
+    with patch.object(upv2, "_is_kis_ranking_enabled", return_value=False), \
+         patch.object(upv2, "_import_pykrx", return_value=fake_krx):
         codes = upv2._fetch_top_value_codes("20260430", top_n=10)
     assert codes == [], f"UV2-18 FAIL: {codes}"
     print("[PASS] UV2-18: pykrx KeyError graceful → 빈 리스트")

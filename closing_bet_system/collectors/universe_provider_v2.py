@@ -68,6 +68,25 @@ _PYKRX_MARKETS = ("KOSPI", "KOSDAQ")
 # 외국인 investor 카테고리 — PRD 5장 Layer 1 확정 "외국인" (한글 정확 매칭)
 _FOREIGN_INVESTOR = "외국인"
 
+# 단위 2-9d — KIS Open API ranking 라우팅 default (settings.yaml `data_source.use_kis_ranking`)
+DEFAULT_USE_KIS_RANKING = True
+
+
+def _is_kis_ranking_enabled() -> bool:
+    """settings.yaml `data_source.use_kis_ranking` 토글 로드 (default True).
+
+    실패 시 default 적용 — 로그 부담 회피 위해 debug 레벨.
+    """
+    try:
+        from closing_bet_system.storage.db import _load_settings
+        settings = _load_settings()
+        return bool(
+            settings.get("data_source", {}).get("use_kis_ranking", DEFAULT_USE_KIS_RANKING)
+        )
+    except Exception as e:
+        logger.debug(f"[universe_v2] use_kis_ranking 로드 실패: {e} — default 적용")
+        return DEFAULT_USE_KIS_RANKING
+
 
 # ===== 캐시 (v1 과 분리된 별도 dict) =====
 
@@ -296,13 +315,28 @@ def _import_pykrx():
 def _fetch_top_value_codes(today_str: str, top_n: int) -> list[str]:
     """거래대금 상위 N 종목코드 (KOSPI+KOSDAQ 합산).
 
+    단위 2-9d 라우팅: ``use_kis_ranking=True`` 시 KIS Open API ``volume-rank``
+    (TR_ID FHPST01710000, FID_BLNG_CLS_CODE=3) 호출. False 또는 실패 시 pykrx 폴백.
+
     Args:
-        today_str: 'YYYYMMDD' 형식 거래일.
-        top_n: 상위 N (시장별 N → KOSPI N + KOSDAQ N → 합쳐서 nlargest N).
+        today_str: 'YYYYMMDD' 형식 거래일 (pykrx 폴백 시 사용).
+        top_n: 상위 N.
 
     Returns:
         종목코드 list (최대 ``top_n`` 건). 실패 시 빈 리스트.
     """
+    # 단위 2-9d — KIS Open API 라우팅
+    if _is_kis_ranking_enabled():
+        try:
+            from closing_bet_system.collectors.kis_market_provider import get_kis_market_provider
+            codes = get_kis_market_provider().get_top_value_codes(top_n=top_n)
+            if codes:
+                return codes
+            logger.debug("[universe_v2] KIS top_value 빈 결과 → pykrx 폴백")
+        except Exception as e:
+            logger.warning(f"[universe_v2] KIS top_value 실패 → pykrx 폴백: {e}")
+
+    # pykrx 폴백 (단위 2-9c 시점에는 KRX bulk 차단으로 빈 결과)
     krx = _import_pykrx()
     frames = []
     for market in _PYKRX_MARKETS:
@@ -327,13 +361,28 @@ def _fetch_top_value_codes(today_str: str, top_n: int) -> list[str]:
 def _fetch_top_change_codes(today_str: str, top_n: int) -> list[str]:
     """당일 등락률 상위 N 종목코드 (KOSPI+KOSDAQ 합산).
 
+    단위 2-9d 라우팅: ``use_kis_ranking=True`` 시 KIS Open API ``ranking/fluctuation``
+    (TR_ID FHPST01700000) 호출. False 또는 실패 시 pykrx 폴백.
+
     Args:
-        today_str: 'YYYYMMDD' 형식 거래일.
+        today_str: 'YYYYMMDD' 형식 거래일 (pykrx 폴백 시 사용).
         top_n: 상위 N.
 
     Returns:
         종목코드 list. 실패 시 빈 리스트.
     """
+    # 단위 2-9d — KIS Open API 라우팅
+    if _is_kis_ranking_enabled():
+        try:
+            from closing_bet_system.collectors.kis_market_provider import get_kis_market_provider
+            codes = get_kis_market_provider().get_top_change_codes(top_n=top_n, direction="up")
+            if codes:
+                return codes
+            logger.debug("[universe_v2] KIS top_change 빈 결과 → pykrx 폴백")
+        except Exception as e:
+            logger.warning(f"[universe_v2] KIS top_change 실패 → pykrx 폴백: {e}")
+
+    # pykrx 폴백
     krx = _import_pykrx()
     frames = []
     for market in _PYKRX_MARKETS:
@@ -360,19 +409,32 @@ def _fetch_top_change_codes(today_str: str, top_n: int) -> list[str]:
 def _fetch_top_foreign_buy_codes(today_str: str, top_n: int) -> list[str]:
     """외국인 순매수 상위 N 종목코드 (KOSPI+KOSDAQ 합산).
 
-    pykrx 의 ``get_market_net_purchases_of_equities_by_ticker`` 결과에서
+    단위 2-9d 라우팅: ``use_kis_ranking=True`` 시 KIS Open API
+    ``foreign-institution-total`` (TR_ID FHPTJ04400000, FID_ETC_CLS_CODE=1, RANK_SORT=0,
+    FID_DIV_CLS_CODE=1=금액) 호출. False 또는 실패 시 pykrx 폴백.
+
+    pykrx 폴백: ``get_market_net_purchases_of_equities_by_ticker`` 결과의
     "순매수거래대금" 컬럼(외국인 순매수 거래대금) 기준 상위 N.
 
-    pykrx 반환 컬럼: 종목명 / 매도거래량 / 매수거래량 / 순매수거래량 /
-                     매도거래대금 / 매수거래대금 / 순매수거래대금
-
     Args:
-        today_str: 'YYYYMMDD' 형식 거래일.
+        today_str: 'YYYYMMDD' 형식 거래일 (pykrx 폴백 시 사용).
         top_n: 상위 N.
 
     Returns:
         종목코드 list. 실패 시 빈 리스트.
     """
+    # 단위 2-9d — KIS Open API 라우팅
+    if _is_kis_ranking_enabled():
+        try:
+            from closing_bet_system.collectors.kis_market_provider import get_kis_market_provider
+            codes = get_kis_market_provider().get_top_foreign_buy_codes(top_n=top_n)
+            if codes:
+                return codes
+            logger.debug("[universe_v2] KIS top_foreign 빈 결과 → pykrx 폴백")
+        except Exception as e:
+            logger.warning(f"[universe_v2] KIS top_foreign 실패 → pykrx 폴백: {e}")
+
+    # pykrx 폴백
     _FOREIGN_COL = "순매수거래대금"
     krx = _import_pykrx()
     frames = []

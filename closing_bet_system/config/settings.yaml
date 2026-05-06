@@ -100,13 +100,19 @@ stock_filter:
   exclude_upper_limit: true                # 당일 상한가 종목 제외
   protection_period_days: 7                # 보호예수 해제 D-7 이내 종목 제외
 
-# ─── 데이터 소스 폴백 (단위 2-9c) ─────────────────────────────────────────
-# KRX 사이트 정책 변경으로 pykrx get_market_*_by_ticker(시장 단위 bulk)가
-# 빈 응답을 반환할 때, 종목별 get_market_ohlcv_by_date 호출로 폴백.
-# 시총은 채우지 않음(옵션 A 보수) → market_cap=None 인 종목은 data_not_found 로 탈락.
-# 본격 해결은 단위 2-9d (KIS Open API ranking 대체).
+# ─── 데이터 소스 폴백 + KIS Open API ranking (단위 2-9c + 2-9d) ──────────
+# 단위 2-9c: KRX 사이트 정책 변경으로 pykrx get_market_*_by_ticker(시장 단위 bulk)가
+#           빈 응답을 반환할 때, 종목별 get_market_ohlcv_by_date 호출로 폴백.
+# 단위 2-9d: KIS Open API ranking 4종(volume-rank/fluctuation/foreign-institution-total/market-cap)
+#           로 출처 2~4 + 시총 보강(옵션 B 자연 활성). pykrx 의존도 제거.
+# 매뉴얼 출처:
+#   - https://github.com/koreainvestment/open-trading-api
+#   - https://apiportal.koreainvestment.com/apiservice-apiservice
 data_source:
-  fallback_per_ticker_enabled: true        # bulk 빈 응답 시 종목별 by_date 폴백 (default true)
+  fallback_per_ticker_enabled: true        # 2-9c: bulk 빈 응답 시 종목별 by_date 폴백 (default true)
+  use_kis_ranking: true                    # 2-9d: 출처 2~4 KIS Open API 라우팅 (default true, false 시 pykrx 폴백)
+  fallback_include_market_cap: false       # 2-9d: KIS market-cap 시총 보강 — stck_avls 단위 미확정으로 비활성. 단위 2-9e 후속 단위에서 종목별 inquire-price 보강 또는 단위 정규화 적용 후 true 전환
+  kis_market_cap_top_n: 200                # 2-9d: KIS market-cap ranking 호출 상위 N (단위 2-9e 활성 시 사용)
 
 # ─── 텔레그램 (신규 봇, env 변수 분리) ─────────────────────────────────────
 telegram:
@@ -119,8 +125,14 @@ db:
   swing_db_path: "data/trading.db"         # 스윙 DB (read-only 조회: 보유 종목 중복 방지)
 
 # ─── KIS API ─────────────────────────────────────────────────────────────
+# 단위 2-9d (2026-05-06): use_mock false 전환
+#   - 배경: 메인 봇이 실전 모드(--real)라 KISApi._shared_token 이 실전 토큰. 종가베팅이
+#     is_mock=true 로 모의 도메인 호출 시 토큰 인증 불일치로 403 Forbidden 발생.
+#   - 영향: 종가베팅 시세 조회(orderbook/market_data/label/name_lookup) + KIS ranking
+#     모두 실전 도메인 사용. Phase 1 알림형이라 자동매수 차단 → 자동매매 위험 0.
+#   - Phase 2 자동매매 진입 시 재검토 필요 (모의 분리 vs 실전 통합).
 kis:
-  use_mock: true                           # Phase 1 모의투자 우선
+  use_mock: false                          # Phase 1 알림형 — 실전 도메인 시세 조회 (자동매수 X)
 
 # ─── Kill Switch (Phase 3에서 활성화) ────────────────────────────────────
 kill_switch:

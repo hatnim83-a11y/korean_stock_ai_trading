@@ -82,6 +82,11 @@ FALLBACK_RATE_LIMIT_SEC = 0.05
 # data_source 토글 default — settings.yaml `data_source.fallback_per_ticker_enabled`
 DEFAULT_FALLBACK_PER_TICKER_ENABLED = True
 
+# 단위 2-9d — KIS market-cap ranking 으로 시총 보강 default
+DEFAULT_FALLBACK_INCLUDE_MARKET_CAP = True
+# KIS 시총 ranking 호출 시 가져올 상위 N — 시장 규모 대비 충분히 커야 함 (KOSPI+KOSDAQ ~2,500종목 중 상위 200)
+DEFAULT_KIS_MARKET_CAP_TOP_N = 200
+
 # PRD 4-1 KIND severity 사전 제외 임계값 — kind_alert_collector 단방향 import (순환 없음).
 # kind_alert_collector 가 본 모듈을 import 하지 않으므로 안전.
 from closing_bet_system.collectors.kind_alert_collector import (
@@ -169,6 +174,15 @@ def _load_filter_config() -> dict:
         # 단위 2-9c — bulk 빈 응답 시 종목별 by_date 폴백 토글
         "fallback_per_ticker_enabled": bool(
             data_source.get("fallback_per_ticker_enabled", DEFAULT_FALLBACK_PER_TICKER_ENABLED)
+        ),
+        # 단위 2-9d — KIS market-cap ranking 으로 시총 보강 (옵션 B 자연 활성)
+        "fallback_include_market_cap": bool(
+            data_source.get(
+                "fallback_include_market_cap", DEFAULT_FALLBACK_INCLUDE_MARKET_CAP
+            )
+        ),
+        "kis_market_cap_top_n": int(
+            data_source.get("kis_market_cap_top_n", DEFAULT_KIS_MARKET_CAP_TOP_N)
         ),
     }
 
@@ -342,17 +356,20 @@ def _maybe_run_per_ticker_fallback(
     if today_str in _per_ticker_market_cache:
         return  # 이미 폴백 실행 (캐시 히트)
 
+    # cfg 명시적 default 폴백 — settings 로드 실패 시 NameError 방어 (코더 검토 심각 #1, 단위 2-9d)
+    cfg: dict = {
+        "fallback_per_ticker_enabled": DEFAULT_FALLBACK_PER_TICKER_ENABLED,
+        "fallback_include_market_cap": DEFAULT_FALLBACK_INCLUDE_MARKET_CAP,
+        "kis_market_cap_top_n": DEFAULT_KIS_MARKET_CAP_TOP_N,
+    }
     try:
         cfg = _load_filter_config()
-        if not cfg.get("fallback_per_ticker_enabled", DEFAULT_FALLBACK_PER_TICKER_ENABLED):
-            return
     except Exception as e:
         logger.debug(
-            f"[universe_filters] 폴백 토글 로드 실패: {e} — "
-            f"default({DEFAULT_FALLBACK_PER_TICKER_ENABLED}) 적용"
+            f"[universe_filters] 폴백 토글 로드 실패: {e} — default 적용 (cfg 폴백)"
         )
-        if not DEFAULT_FALLBACK_PER_TICKER_ENABLED:
-            return  # 명시적 default 체크 (코더 검토 심각 #2)
+    if not cfg.get("fallback_per_ticker_enabled", DEFAULT_FALLBACK_PER_TICKER_ENABLED):
+        return  # 토글 OFF — 폴백 진입 X
 
     # 중복 제거 + 상한 적용 (입력 순서 보존)
     seen: set[str] = set()
@@ -371,12 +388,41 @@ def _maybe_run_per_ticker_fallback(
     )
 
     fallback: dict[str, dict] = {}
+
+    # 단위 2-9d — KIS market-cap ranking 으로 시총 보강 (옵션 B 자연 활성)
+    # KIS top N(default 200) 시총 데이터를 1회 호출 → candidates 중 매칭된 종목에 market_cap 채움.
+    # 매칭 안 된 종목은 market_cap None 유지 → 옵션 A 보수 탈락 (PRD 4-1 정합).
+    if cfg.get("fallback_include_market_cap", DEFAULT_FALLBACK_INCLUDE_MARKET_CAP):
+        try:
+            from closing_bet_system.collectors.kis_market_provider import (
+                get_kis_market_provider,
+            )
+            mcap_top_n = int(
+                cfg.get("kis_market_cap_top_n", DEFAULT_KIS_MARKET_CAP_TOP_N)
+            )
+            mcap_data = get_kis_market_provider().get_top_market_cap_data(top_n=mcap_top_n)
+            matched = 0
+            for ticker in candidates:
+                if ticker in mcap_data:
+                    fallback[ticker] = dict(mcap_data[ticker])
+                    matched += 1
+            logger.info(
+                f"[universe_filters] 시총 보강 (단위 2-9d) — KIS top {mcap_top_n} 중 "
+                f"{matched}/{n_input}건 매치"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[universe_filters] 시총 보강 실패 → 옵션 A 보수 적용: {e}"
+            )
+
+    # 종목별 by_date 폴백 (close/change/value 채움 — 시총 보강 데이터 위에 누적)
     success = 0
     start = time.monotonic()
     for ticker in candidates:
         data = _fetch_per_ticker_today_data(ticker, today_str, krx)
         if data:
-            fallback[ticker] = data
+            # 시총 보강 데이터(있다면) 위에 OHLCV 추가
+            fallback.setdefault(ticker, {}).update(data)
             success += 1
         try:
             time.sleep(FALLBACK_RATE_LIMIT_SEC)
