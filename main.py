@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 PID_FILE = Path(__file__).parent / "trading_system.pid"
 
 from logger import logger
-from config import settings, now_kst, is_trading_day, count_trading_days
+from config import settings, now_kst, is_trading_day, count_trading_days, is_makeup_reselection_day
 from database import Database
 from scheduler import TradingScheduler
 
@@ -333,14 +333,22 @@ class TradingSystem:
         logger.info("📊 테마 분석 시작 (08:30)")
         logger.info("=" * 70)
 
+        # 보정 재선정 판정 (today 1회 계산, 같은 함수 내 재사용)
+        today = now_kst().date()
+        is_makeup, missed_tue = is_makeup_reselection_day(today)
+        # 중복 발화 방어: missed 화요일 이후 이미 재선정 발생했다면 보정 우회
+        if (is_makeup and missed_tue and self._last_theme_rotation_date
+                and self._last_theme_rotation_date >= missed_tue):
+            is_makeup, missed_tue = (False, None)
+
         # 기존 테마가 있고, 선정일로부터 7일 이내면 재사용
         # (화~월 5영업일 사이클: 화요일 선정 → 다음 화요일 전까지 유지)
         # 단, 화요일은 주간 재선정일이므로 항상 재분석 실행
+        # 화요일이 휴장(공휴일/주말)이면 다음 첫 영업일에 보정 재선정
         if self.today_themes and self._last_theme_rotation_date:
-            today = now_kst().date()
             days_since_rotation = (today - self._last_theme_rotation_date).days
             is_tuesday = (today.weekday() == 1)
-            same_week = (days_since_rotation < 7) and not is_tuesday
+            same_week = (days_since_rotation < 7) and not is_tuesday and not is_makeup
             if same_week:
                 logger.info(
                     f"🔄 기존 테마 유지 (이번 주 {self._last_theme_rotation_date.strftime('%m/%d')} 선정)"
@@ -442,6 +450,20 @@ class TradingSystem:
 
                 return {"success": True, "themes": len(self.today_themes), "reused": True}
 
+        # 정규 재선정 분기 진입 — 보정 발화 시 운영자 알림
+        # (콜드 스타트 시점에는 알림 생략: _last_theme_rotation_date 없으면 어차피 첫 정규 선정)
+        if is_makeup and missed_tue and self._last_theme_rotation_date:
+            _kor_dow = ['월', '화', '수', '목', '금', '토', '일'][today.weekday()]
+            logger.info(
+                f"🔁 화요일 보정 재선정 발동 "
+                f"(직전 화요일 {missed_tue} 휴장 → 오늘 {today} {_kor_dow})"
+            )
+            self.notifier.send_message(
+                f"🔁 화요일 보정 재선정\n"
+                f"휴장: {missed_tue.strftime('%m/%d')} (화)\n"
+                f"오늘({today.strftime('%m/%d')} {_kor_dow}) 재선정 실행"
+            )
+
         start_time = now_kst()
 
         try:
@@ -454,7 +476,7 @@ class TradingSystem:
                 aggregate_weekly_scores,
             )
 
-            today = now_kst().date()
+            # today는 함수 시작부에서 이미 계산됨 (보정 재선정 판정과 공유)
             is_tuesday = (today.weekday() == 1)
 
             # 유동성 통과율 조회 (screening_log 기반)
@@ -1736,8 +1758,14 @@ class TradingSystem:
             if theme_info:
                 logger.info(f"   현재 테마: {theme_info['theme_name']}")
                 today_check = now_kst().date()
+                is_makeup_day, _missed_check = is_makeup_reselection_day(today_check)
+                # 중복 발화 방어: missed 이후 이미 재선정 발생했다면 보정 우회
+                if (is_makeup_day and _missed_check and self._last_theme_rotation_date
+                        and self._last_theme_rotation_date >= _missed_check):
+                    is_makeup_day = False
                 is_review_day = (self._last_theme_rotation_date is None or
                     today_check.weekday() == 1 or
+                    is_makeup_day or
                     (today_check - self._last_theme_rotation_date).days >= 7)
                 review_status = "오늘 재평가 예정" if is_review_day else f"보유 {theme_info['days_held']}일"
                 logger.info(f"   상태: {review_status}")
@@ -1781,8 +1809,17 @@ class TradingSystem:
         today = now_kst().date()
 
         # 화요일은 정규 재선정일이므로 스킵
-        if today.weekday() == 1:
-            logger.info("   주중 교체: 화요일(정규 재선정일) — 스킵")
+        # 화요일 휴장 시 보정 재선정일도 동일하게 미드위크 교체 스킵 (정규 재선정과 충돌 방지)
+        is_makeup_today, missed_check = is_makeup_reselection_day(today)
+        if (is_makeup_today and missed_check and self._last_theme_rotation_date
+                and self._last_theme_rotation_date >= missed_check):
+            is_makeup_today = False
+        if today.weekday() == 1 or is_makeup_today:
+            if today.weekday() == 1:
+                label = "화요일"
+            else:
+                label = f"보정일(직전 화 {missed_check or 'N/A'} 휴장)"
+            logger.info(f"   주중 교체: {label}(정규 재선정일) — 스킵")
             return
 
         # 활성 테마 확인

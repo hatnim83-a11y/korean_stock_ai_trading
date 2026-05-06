@@ -597,6 +597,10 @@ class Settings(BaseSettings):
         default=True,
         description="화요일 재선정 시 retention 탈락 테마의 동일 세션 재진입 금지"
     )
+    THEME_MAKEUP_RESELECTION_ENABLED: bool = Field(
+        default=True,
+        description="화요일이 휴장(공휴일/주말)이면 다음 첫 영업일에 1회 보정 재선정 발화"
+    )
 
     # ===== 장 초반 관찰 설정 (Morning Filter) =====
     ENABLE_MORNING_FILTER: bool = Field(
@@ -759,6 +763,36 @@ def get_kis_websocket_url(is_mock: bool = True) -> str:
 # ===== 설정 싱글톤 인스턴스 =====
 # 다른 모듈에서 'from config import settings'로 사용
 settings = Settings()
+
+
+def is_makeup_reselection_day(today, target_weekday: int = 1):
+    """
+    오늘이 '직전 target_weekday(기본 화요일) 휴장 이후 첫 영업일'인지 판정.
+
+    화요일이 공휴일/주말이라 정규 테마 재선정이 스킵됐을 때, 다음 첫 영업일에
+    1회 보정 재선정을 발화시키기 위한 순수 헬퍼 함수.
+
+    Args:
+        today: 판정할 날짜 (date)
+        target_weekday: 정규 재선정 요일 (기본 1=화요일, weekday() 기준)
+
+    Returns:
+        (is_makeup, missed_date) — 보정일 여부와 직전 누락된 target_weekday 날짜
+    """
+    if not settings.THEME_MAKEUP_RESELECTION_ENABLED:
+        return (False, None)
+    if not is_trading_day(today):
+        return (False, None)
+    delta = (today.weekday() - target_weekday) % 7 or 7
+    missed = today - timedelta(days=delta)
+    if is_trading_day(missed):
+        return (False, None)
+    cursor = missed + timedelta(days=1)
+    while cursor < today:
+        if is_trading_day(cursor):
+            return (False, None)
+        cursor += timedelta(days=1)
+    return (True, missed)
 
 
 # ===== 디버깅용 출력 함수 =====
