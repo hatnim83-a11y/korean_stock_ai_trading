@@ -80,6 +80,10 @@ _TICKER_PATTERN = re.compile(r"^\d{6}$")
 DEFAULT_TOP_N = 30
 DEFAULT_MARKET_CAP_TOP_N = 200
 
+# 단위 2-9e — KIS stck_avls 단위 = 억원 (사전 조사 5종목 × 1억 = inquire-price market_cap 정확 일치 확정)
+# 005930: stck_avls=15,551,101 × 1억 = 1,555,110,100,000,000원 (= stck_prpr × lstn_stcn = inquire-price market_cap)
+_STCK_AVLS_UNIT_TO_WON = 100_000_000
+
 
 # ===== 헬퍼 =====
 
@@ -236,20 +240,21 @@ class KISMarketProvider:
             close = _safe_float(item.get(_FIELD_PRICE), default=0.0)
             chg = _safe_float(item.get(_FIELD_CHANGE_RATE), default=0.0)
             entry: dict = {}
-            # KIS 시가총액은 단위가 "억원" 일 수 있어 1억 곱하기 — KIS volume_rank chk 결과 검증 필요
-            # 보수적으로: 받은 값 그대로 저장하되 0 이하 제외
+            # 단위 2-9e — stck_avls 단위 = 억원 확정 (사전 조사 5종목 검증):
+            #   005930 stck_avls=15,551,101 × 100,000,000 = 1,555,110,100,000,000원
+            #   ↔ stck_prpr × lstn_stcn = 1,554,909,948,728,000원
+            #   ↔ inquire-price market_cap = 1,555,110,100,000,000원 (3값 정확 일치)
+            # 비교 기준: universe_filters.min_market_cap = 50_000_000_000 (500억, settings.yaml:97)
+            # int(round(...)) — _safe_float 가 float 반환 후 곱셈 시 IEEE 754 정밀도 한계로
+            # 경계값(500억 근처) 절단 누락 위험 차단
             if mcap > 0:
-                # 시총 단위 정규화: KIS 문서상 stck_avls 단위 미명시 — pykrx 와 동일하게 원 단위 가정
-                # KIS 응답이 억원 단위면 universe_filters.min_market_cap=500_000_000_000 (5,000억)이라
-                # 잘못 비교될 수 있음 — 본 단위에서는 값 그대로 저장하고
-                # universe_filters 측에서 단위 확인 로그 1회 출력 후 정규화 결정 (추후 보강).
-                entry["market_cap"] = mcap
-                # 코더 검토 주의 #3 — stck_avls 단위 진단 로그 (첫 항목 1회)
+                entry["market_cap"] = int(round(mcap * _STCK_AVLS_UNIT_TO_WON))
+                # 단위 진단 로그 (첫 항목 1회) — 단위 2-9e 확정 표기
                 if not result:
                     logger.info(
-                        f"[kis_market_provider] stck_avls 단위 진단(첫 항목) — "
-                        f"{code} mcap={mcap:.0f} close={close:.0f} "
-                        f"(원 단위 가정. min_market_cap=500억과 비교)"
+                        f"[kis_market_provider] stck_avls 단위 = 억원 (단위 2-9e 확정), × 1억 정규화 적용 — "
+                        f"{code} raw={mcap:.0f} → market_cap={entry['market_cap']:,d}원 "
+                        f"(min_market_cap=500억과 비교)"
                     )
             if close > 0:
                 entry["close"] = close

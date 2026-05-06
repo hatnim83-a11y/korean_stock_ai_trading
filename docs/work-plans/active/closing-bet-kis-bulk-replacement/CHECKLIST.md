@@ -78,7 +78,7 @@
 - [x] `docs/improvements/change_log.md` 1줄 추가 (단위 2-9d 항목)
 - [x] `memory/project_closing_bet_system.md` — 단위 2-9d 1단락 추가
 - [x] `memory/MEMORY.md` 인덱스 description 갱신
-- [ ] git commit + push (이번 단계)
+- [x] git commit + push (commit `bcb633c` 포함 origin/main 동기화 확인)
 - [ ] 3문서 active → completed/20260506_closing-bet-kis-bulk-replacement/ (5/7 자연 트리거 검증 후)
 
 ## 후속 단위 (별도 작업)
@@ -88,6 +88,6 @@
 - [x] 구현 항목 전부 `[x]`
 - [x] 검증 항목 단위/통합 전부 `[x]` (실전 검증은 5/7 자연 트리거 후)
 - [x] 배포 항목 전부 `[x]`
-- [x] 문서 업데이트 항목 (커밋 + 아카이브 제외) 전부 `[x]`
-- [ ] git commit + push (다음 단계)
+- [x] 문서 업데이트 항목 (아카이브 제외) 전부 `[x]`
+- [x] git commit + push (`bcb633c` origin/main 동기화 완료)
 - [ ] 5/7 자연 트리거 검증 후 → active → completed 아카이브

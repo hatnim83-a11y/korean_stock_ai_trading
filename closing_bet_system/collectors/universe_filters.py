@@ -83,7 +83,9 @@ FALLBACK_RATE_LIMIT_SEC = 0.05
 DEFAULT_FALLBACK_PER_TICKER_ENABLED = True
 
 # 단위 2-9d — KIS market-cap ranking 으로 시총 보강 default
-DEFAULT_FALLBACK_INCLUDE_MARKET_CAP = True
+# 단위 2-9e — True → False 변경: settings.yaml(false→true 활성)와 default 가 정반대였음 → settings 로드 실패 시
+# cfg fallback 분기에서 의도와 반대로 활성화 위험. 단위 2-9e 활성 후에는 settings ON 이라 무관, 향후 롤백 시 안전.
+DEFAULT_FALLBACK_INCLUDE_MARKET_CAP = False
 # KIS 시총 ranking 호출 시 가져올 상위 N — 시장 규모 대비 충분히 커야 함 (KOSPI+KOSDAQ ~2,500종목 중 상위 200)
 DEFAULT_KIS_MARKET_CAP_TOP_N = 200
 
@@ -339,6 +341,11 @@ def _maybe_run_per_ticker_fallback(
     bulk_result: dict[str, dict],
 ) -> None:
     """단위 2-9c — bulk 빈 응답 시 종목별 폴백 실행. 결과는 ``_per_ticker_market_cache``에 격리.
+
+    **반드시 ``bulk_result`` 가 빈 dict 일 때만 호출되어야 한다** (단위 2-9c 설계).
+    이 함수는 현재 ``_fetch_market_data_bulk`` 한 곳에서만 호출되며, 라인 354 의
+    ``if bulk_result: return`` 가드로 진입 자체가 차단된다. 다른 호출 지점이 추가될
+    경우 이 가드 외부에서 호출되지 않도록 주의.
 
     호출 조건 (모두 AND):
         - bulk_result 가 빈 dict (KRX bulk API 차단 시그널)

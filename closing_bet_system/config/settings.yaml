@@ -100,18 +100,21 @@ stock_filter:
   exclude_upper_limit: true                # 당일 상한가 종목 제외
   protection_period_days: 7                # 보호예수 해제 D-7 이내 종목 제외
 
-# ─── 데이터 소스 폴백 + KIS Open API ranking (단위 2-9c + 2-9d) ──────────
+# ─── 데이터 소스 폴백 + KIS Open API ranking (단위 2-9c + 2-9d + 2-9e) ──
 # 단위 2-9c: KRX 사이트 정책 변경으로 pykrx get_market_*_by_ticker(시장 단위 bulk)가
 #           빈 응답을 반환할 때, 종목별 get_market_ohlcv_by_date 호출로 폴백.
 # 단위 2-9d: KIS Open API ranking 4종(volume-rank/fluctuation/foreign-institution-total/market-cap)
 #           로 출처 2~4 + 시총 보강(옵션 B 자연 활성). pykrx 의존도 제거.
+# 단위 2-9e: KIS stck_avls 단위 = 억원 확정 (사전 조사 5종목 검증, 005930 등 stck_avls × 1억 =
+#           inquire-price market_cap 정확 일치) → fallback_include_market_cap 활성화.
+#           kis_market_provider.py 에서 int(round(mcap * 100_000_000)) 정규화 적용.
 # 매뉴얼 출처:
 #   - https://github.com/koreainvestment/open-trading-api
 #   - https://apiportal.koreainvestment.com/apiservice-apiservice
 data_source:
   fallback_per_ticker_enabled: true        # 2-9c: bulk 빈 응답 시 종목별 by_date 폴백 (default true)
   use_kis_ranking: true                    # 2-9d: 출처 2~4 KIS Open API 라우팅 (default true, false 시 pykrx 폴백)
-  fallback_include_market_cap: false       # 2-9d: KIS market-cap 시총 보강 — stck_avls 단위 미확정으로 비활성. 단위 2-9e 후속 단위에서 종목별 inquire-price 보강 또는 단위 정규화 적용 후 true 전환
+  fallback_include_market_cap: true        # 2-9e: stck_avls 단위 = 억원 확정 후 활성화 (false → true). 옵션 A 보수 탈락 다수를 universe 진입시켜 universe ≥ 5건 목표
   kis_market_cap_top_n: 200                # 2-9d: KIS market-cap ranking 호출 상위 N (단위 2-9e 활성 시 사용)
 
 # ─── 텔레그램 (신규 봇, env 변수 분리) ─────────────────────────────────────
