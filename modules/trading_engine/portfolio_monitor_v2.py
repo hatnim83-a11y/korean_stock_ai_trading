@@ -30,6 +30,7 @@ from logger import logger
 from config import settings, now_kst, is_trading_day, count_trading_days
 from database import Database
 from modules.trading_engine.kis_websocket import KISWebSocket, MockWebSocket, PriceData
+from modules.trading_engine.sell_lock import sell_lock
 from modules.trading_engine.trading_engine import TradingEngine
 
 
@@ -903,6 +904,16 @@ class PortfolioMonitorV2:
     
     async def _execute_stop_loss(self, pos: Position) -> None:
         """손절 실행"""
+        # SellLock: 09:00 조기 모니터링 도입 후 midweek/hold_period 매도 잡과의 race 봉쇄
+        # acquire 실패 = 다른 매도 경로 진행 중 → 이 종목은 스킵
+        if settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            if not sell_lock.acquire(pos.stock_code, owner="monitor_stop_loss"):
+                logger.info(
+                    f"   [SellLock] {pos.stock_name} 손절 skip — "
+                    f"{sell_lock.owner(pos.stock_code)} 이 매도 처리 중"
+                )
+                return
+
         logger.warning(f"🔻 손절 발동: {pos.stock_name}")
         logger.warning(f"   현재가 {pos.current_price:,}원 <= 손절가 {pos.stop_loss_price:,}원")
         pnl_label = "수익" if pos.profit_rate >= 0 else "손실"
@@ -941,13 +952,29 @@ class PortfolioMonitorV2:
     async def _check_and_execute_partial_profit(self, pos: Position) -> bool:
         """
         분할 익절 체크 및 실행
-        
+
         Returns:
             분할 매도 실행 여부
         """
         profit_rate = pos.profit_rate
+
+        # SellLock: 매도 잡(midweek/hold_period)이 같은 종목을 처리 중이면 분할익절 skip
+        # 트리거 조건이 충족된 경우만 잠금 시도 (건당 acquire 호출 비용 최소화)
+        trigger_hit = (
+            (not pos.partial_3_executed and profit_rate >= self.take_profit_3)
+            or (not pos.partial_2_executed and profit_rate >= self.take_profit_2)
+            or (not pos.partial_1_executed and profit_rate >= self.take_profit_1)
+        )
+        if trigger_hit and settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            if not sell_lock.acquire(pos.stock_code, owner="monitor_partial"):
+                logger.info(
+                    f"   [SellLock] {pos.stock_name} 분할익절 skip — "
+                    f"{sell_lock.owner(pos.stock_code)} 이 매도 처리 중"
+                )
+                return False
+
         executed = False
-        
+
         # 3차 익절 (+20%) — 20%만 매도, 나머지는 트레일링으로 청산
         if not pos.partial_3_executed and profit_rate >= self.take_profit_3:
             sell_shares = int(pos.shares * self.partial_sell_ratio_3)
@@ -1181,6 +1208,15 @@ class PortfolioMonitorV2:
     
     async def _execute_trailing_stop(self, pos: Position) -> None:
         """트레일링 스탑 실행"""
+        # SellLock: 매도 잡(midweek/hold_period)이 동일 종목을 처리 중이면 skip
+        if settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            if not sell_lock.acquire(pos.stock_code, owner="monitor_trailing"):
+                logger.info(
+                    f"   [SellLock] {pos.stock_name} 트레일링 skip — "
+                    f"{sell_lock.owner(pos.stock_code)} 이 매도 처리 중"
+                )
+                return
+
         # 트레일링 레벨에 따른 로그 메시지
         if pos.trailing_level == 3:
             level_str = "L3 (2%)"

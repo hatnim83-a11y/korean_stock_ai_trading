@@ -24,6 +24,13 @@
 - pandas 값 → float 변환 전 `pd.isna()` 체크 필수
 - KST 타임존: `datetime.now()` 대신 `from config import now_kst` 사용 (서버가 UTC)
 
+## 매도 동시성 잠금 (SellLock — 2026-05-06 도입)
+- **모듈**: `modules/trading_engine/sell_lock.py` (싱글톤 `sell_lock`, threading.Lock 기반)
+- **목적**: 09:00 조기 모니터링 도입 후 분할익절/손절/트레일링 모니터와 09:00/09:10/09:15 매도 잡(midweek/hold_period)이 동일 종목을 동시 매도 발주하는 race 봉쇄
+- **패턴**: 매도 진입 직전 `sell_lock.acquire(stock_code, owner)` → True면 진행, False면 다른 매도 경로가 처리 중이므로 해당 종목 스킵
+- **release 정책**: 매도 함수 종료 시 release하지 **않음** → 15:30 `stop_monitoring()`에서 `clear_all()` 일괄 해제 (race window 봉쇄). 같은 거래일 내 한 종목에 두 매도 잡이 발화하지 않으므로 누수 위험 없음
+- **무력화**: `PARTIAL_PROFIT_EARLY_MONITORING_ENABLED=False` + systemctl restart → acquire 호출 자체가 분기되어 NO-OP, 09:26 legacy 시작
+
 ## MCP 서버
 프로젝트에 3개 MCP 서버(`SQLite`, `Fetch`, `Sequential Thinking`)가 `.mcp.json`에 등록되어 있다.
 **상세 사용법**: [`docs/mcp-usage.md`](docs/mcp-usage.md) 참조.

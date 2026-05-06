@@ -259,6 +259,14 @@ class Settings(BaseSettings):
         default=3,
         description="동일 섹터(카테고리) 최대 보유 종목 수"
     )
+    THEME_SLOT_RELAXATION_ENABLED: bool = Field(
+        default=True,
+        description="빈 슬롯 + 후보 부족 시 테마 한도 일시 상향 ON/OFF"
+    )
+    MAX_STOCKS_PER_THEME_RELAXED: int = Field(
+        default=3,
+        description="2차 패스 테마 한도 (1차 후 빈 슬롯 남고 후보 모자랄 때만 적용)"
+    )
 
     # ===== 보유 기간 설정 =====
     MAX_HOLD_DAYS_PROFIT: int = Field(
@@ -326,7 +334,11 @@ class Settings(BaseSettings):
         default=0.20,
         description="3차 익절 시 매도 비율 (20%)"
     )
-    
+    PARTIAL_PROFIT_EARLY_MONITORING_ENABLED: bool = Field(
+        default=True,
+        description="09:00 조기 모니터링 + SellLock 활성화 (False=09:26 legacy)"
+    )
+
     # ===== 트레일링 스탑 =====
     ENABLE_TRAILING_STOP: bool = Field(
         default=True,

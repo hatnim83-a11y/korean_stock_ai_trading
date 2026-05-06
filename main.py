@@ -60,6 +60,8 @@ from modules.ai_verifier import run_daily_verification
 from modules.portfolio_optimizer import run_daily_optimization, display_portfolio
 from modules.trading_engine import TradingEngine
 from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2, SellReason
+from modules.trading_engine.sell_lock import sell_lock
+from modules.trading_engine.diversity_filter import apply_diversity_filter
 from modules.rebalancer import run_daily_rebalancing
 from modules.reporter import (
     PerformanceCalculator,
@@ -1085,6 +1087,8 @@ class TradingSystem:
         self._diversity_excluded = []
         self._slot_excluded = []
         self._buy_skip_reason = ''
+        self._theme_relaxation_applied = False
+        self._theme_relaxation_count = 0
 
         # Phase 0: 관찰 완료 대기
         if self._observer_task and not self._observer_task.done():
@@ -1210,36 +1214,37 @@ class TradingSystem:
             if s['code'] in filtered_codes
         ]
 
-        # 테마/섹터 분산 필터 적용
-        max_per_theme = settings.MAX_STOCKS_PER_THEME
-        max_per_sector = settings.MAX_STOCKS_PER_SECTOR
-        diversified_candidates = []
-        for stock in all_ai_candidates:
-            s_theme = stock.get("theme", "")
-            s_sector = theme_to_category.get(s_theme, "기타")
+        # 테마/섹터 분산 필터 적용 (헬퍼 호출 — 1차 한도 + 조건부 2차 한도)
+        relax_max = (
+            settings.MAX_STOCKS_PER_THEME_RELAXED
+            if settings.THEME_SLOT_RELAXATION_ENABLED
+            else None
+        )
+        diversified_candidates, diversity_excluded, relax_applied = apply_diversity_filter(
+            candidates=all_ai_candidates,
+            theme_to_category=theme_to_category,
+            initial_theme_counts=theme_counts,
+            initial_sector_counts=sector_counts,
+            available_slots=available_slots,
+            max_per_theme=settings.MAX_STOCKS_PER_THEME,
+            max_per_sector=settings.MAX_STOCKS_PER_SECTOR,
+            relax_max=relax_max,
+        )
+        self._diversity_excluded.extend(diversity_excluded)
+        self._theme_relaxation_applied = relax_applied
+        self._theme_relaxation_count = sum(1 for c in diversified_candidates if c.get("_relaxed"))
 
-            # 테마 분산 제한 (빈 테마는 제한 미적용)
-            if s_theme:
-                t_count = theme_counts.get(s_theme, 0)
-                if t_count >= max_per_theme:
-                    logger.info(f"   테마 분산 제한: {stock.get('name')} ({s_theme}) 제외 — 테마 {t_count}/{max_per_theme}")
-                    self._diversity_excluded.append({**stock, '_reason': f"테마 분산 ({s_theme} {t_count}/{max_per_theme})"})
-                    continue
+        # 분산 필터 결과 로그
+        for ex in diversity_excluded:
+            logger.info(f"   분산 제한 제외: {ex.get('name')} — {ex.get('_reason')}")
+        if relax_applied:
+            logger.info(
+                f"   ⚙️ 테마 슬롯 한도 상향 적용: {self._theme_relaxation_count}건 "
+                f"({settings.MAX_STOCKS_PER_THEME}→{settings.MAX_STOCKS_PER_THEME_RELAXED})"
+            )
 
-            # 섹터 분산 제한
-            s_count = sector_counts.get(s_sector, 0)
-            if s_count >= max_per_sector:
-                logger.info(f"   섹터 분산 제한: {stock.get('name')} ({s_sector}) 제외 — 섹터 {s_count}/{max_per_sector}")
-                self._diversity_excluded.append({**stock, '_reason': f"섹터 분산 ({s_sector} {s_count}/{max_per_sector})"})
-                continue
-
-            diversified_candidates.append(stock)
-            if s_theme:
-                theme_counts[s_theme] = theme_counts.get(s_theme, 0) + 1
-            sector_counts[s_sector] = s_count + 1
-
-        new_ai_stocks = diversified_candidates[:available_slots]
-        self._slot_excluded = diversified_candidates[available_slots:]
+        new_ai_stocks = diversified_candidates  # 헬퍼가 available_slots까지만 반환
+        self._slot_excluded = []  # 헬퍼가 슬롯 초과를 직접 처리하므로 비워둠
 
         if new_ai_stocks:
             # 가용현금 기반 슬롯 배분 (수익 재투자 반영)
@@ -1410,6 +1415,12 @@ class TradingSystem:
 
         # 신규 매수 상세
         lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━")
+        if getattr(self, "_theme_relaxation_applied", False):
+            lines.append(
+                f"⚙️ 테마 슬롯 한도 상향 적용: "
+                f"{getattr(self, '_theme_relaxation_count', 0)}건 "
+                f"({settings.MAX_STOCKS_PER_THEME}→{settings.MAX_STOCKS_PER_THEME_RELAXED})"
+            )
         lines.append(f"\n📥 신규 매수: {bought_count}종목\n")
         for i, o in enumerate(new_buy_orders, 1):
             code = o.get('stock_code', '')
@@ -1490,19 +1501,30 @@ class TradingSystem:
     # ===== 모니터링 (V2: 분할 익절 + 트레일링 스탑) =====
     
     async def start_monitoring(self) -> None:
-        """실시간 모니터링 시작 (V2)"""
+        """실시간 모니터링 시작 (V2)
+
+        09:00 조기 가동(Phase 1) 도입 후 본 함수는 재호출 가능:
+        - 09:00 첫 호출: 기존 보유분 모니터링 시작
+        - 09:26 재호출: 09:25 매수분 포함 모니터 재시작 (KIS WebSocket이 활성 세션에
+          동적 SUBSCRIBE 메시지 전송 메커니즘이 없어 stop+start 패턴 사용 — 5~10초 공백)
+        """
+        # 이미 가동 중이면 종료 후 재시작 (신규 매수분 포함 위해)
+        if self.monitor and getattr(self.monitor, "_running", False):
+            logger.info("📊 모니터링 재시작 (신규 매수분 포함)")
+            await self.stop_monitoring()
+
         logger.info("=" * 70)
         logger.info("📊 실시간 모니터링 V2 시작")
         logger.info(f"   - 분할 익절: +{settings.TAKE_PROFIT_1:.0%}/+{settings.TAKE_PROFIT_2:.0%}/+{settings.TAKE_PROFIT_3:.0%}")
         logger.info(f"   - 트레일링 스탑: L1 -{settings.TRAIL_LEVEL1_PCT:.0%} / L2 -{settings.TRAIL_LEVEL2_PCT:.0%} / L3 -{settings.TRAIL_LEVEL3_PCT:.0%}")
         logger.info(f"   - 보유 기간: 수익 {settings.MAX_HOLD_DAYS_PROFIT}일, 손실 {settings.MAX_HOLD_DAYS_LOSS}일")
         logger.info("=" * 70)
-        
+
         self.monitor = PortfolioMonitorV2(use_mock=self.test_mode)
-        
+
         # 포지션 로드
         self.monitor.load_positions_from_db()
-        
+
         # 콜백 설정
         self.monitor.on_stop_loss = self._on_stop_loss
         self.monitor.on_partial_profit = self._on_partial_profit
@@ -1510,15 +1532,23 @@ class TradingSystem:
         self.monitor.on_trailing_level_change = self._on_trailing_level_change
         self.monitor.on_max_hold_sell = self._on_max_hold_sell
         self.monitor.on_sell_failed = self._on_sell_failed
-        
+
         # 모니터링 시작 (백그라운드)
         asyncio.create_task(self.monitor.start_monitoring())
-    
+
     async def stop_monitoring(self) -> None:
-        """실시간 모니터링 종료"""
+        """실시간 모니터링 종료 (15:30 또는 재시작 시점)
+
+        15:30 정상 종료에서는 sell_lock 일괄 해제 (다음 거래일 09:00 가동 시 깨끗한 상태).
+        재시작 시점(09:26)에서도 호출되지만 같은 거래일 내라 clear는 영향 없음 (sell_lock 비어있음).
+        """
         if self.monitor:
             await self.monitor.stop_monitoring()
             logger.info("📊 모니터링 종료")
+        # SellLock 일괄 해제 — 재호출에 안전 (비어있어도 noop)
+        cleared = sell_lock.clear_all()
+        if cleared > 0:
+            logger.info(f"   [SellLock] 일괄 해제: {cleared}건")
     
     def _on_stop_loss(self, position, price) -> None:
         """손절 발동 콜백"""
@@ -2125,6 +2155,22 @@ class TradingSystem:
                 logger.info(f"   [테스트] {t['stock_name']} 매도 스킵")
             return
 
+        # SellLock: 09:00 조기 모니터링과 race 봉쇄 — acquire 실패한 종목은 모니터가 처리 중이므로 스킵
+        if settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            acquired_targets = []
+            for t in sell_targets:
+                if sell_lock.acquire(t["stock_code"], owner="hold_period"):
+                    acquired_targets.append(t)
+                else:
+                    logger.warning(
+                        f"   [SellLock] {t['stock_name']} ({t['stock_code']}) 보유기간 매도 skip — "
+                        f"{sell_lock.owner(t['stock_code'])} 이 매도 처리 중"
+                    )
+            sell_targets = acquired_targets
+            if not sell_targets:
+                logger.info("   SellLock으로 모든 종목 스킵 — 보유기간 매도 종료")
+                return
+
         # 매도 실행
         try:
             result = await asyncio.to_thread(
@@ -2258,6 +2304,23 @@ class TradingSystem:
         position_states = self.db.get_all_position_states()
         today = now_kst().date()
 
+        # SellLock: 09:00 동시 발화 race — acquire 실패한 종목은 모니터가 처리 중이므로 스킵
+        if settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            acquired_orders = []
+            for o in sell_orders:
+                if sell_lock.acquire(o["stock_code"], owner="midweek_profit"):
+                    acquired_orders.append(o)
+                else:
+                    logger.warning(
+                        f"   [SellLock] {o['stock_name']} ({o['stock_code']}) 주중교체 수익매도 skip — "
+                        f"{sell_lock.owner(o['stock_code'])} 이 매도 처리 중"
+                    )
+            sell_orders = acquired_orders
+            if not sell_orders:
+                logger.info("   SellLock으로 모든 종목 스킵 — 주중교체 수익매도 종료")
+                self._midweek_sell_queue.clear()
+                return
+
         try:
             result = await asyncio.to_thread(
                 self.trading_engine.execute_sell_orders,
@@ -2370,6 +2433,23 @@ class TradingSystem:
         queue_snapshot = {s["stock_code"]: s for s in self._midweek_loss_queue}
         position_states = self.db.get_all_position_states()
         today = now_kst().date()
+
+        # SellLock: 09:10 매도 잡 — acquire 실패한 종목은 모니터가 처리 중이므로 스킵
+        if settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            acquired_orders = []
+            for o in sell_orders:
+                if sell_lock.acquire(o["stock_code"], owner="midweek_loss"):
+                    acquired_orders.append(o)
+                else:
+                    logger.warning(
+                        f"   [SellLock] {o['stock_name']} ({o['stock_code']}) 주중교체 손실매도 skip — "
+                        f"{sell_lock.owner(o['stock_code'])} 이 매도 처리 중"
+                    )
+            sell_orders = acquired_orders
+            if not sell_orders:
+                logger.info("   SellLock으로 모든 종목 스킵 — 주중교체 손실매도 종료")
+                self._midweek_loss_queue.clear()
+                return
 
         try:
             result = await asyncio.to_thread(

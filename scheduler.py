@@ -154,12 +154,24 @@ class TradingScheduler:
             replace_existing=True
         )
 
-        # 4. 모니터링 시작 (KST 09:26)
+        # 4-0. 조기 모니터링 시작 (KST 09:00) — 09:00 직후 급등락 분할익절 시그널 캡처
+        # PARTIAL_PROFIT_EARLY_MONITORING_ENABLED=False일 때는 등록 스킵 (09:26만 활성)
+        if settings.PARTIAL_PROFIT_EARLY_MONITORING_ENABLED:
+            self.scheduler.add_job(
+                self._run_monitoring_start,
+                CronTrigger(hour=9, minute=0, day_of_week='mon-fri', timezone=_KST_TZ),
+                id='monitoring_start_early',
+                name='조기 모니터링 시작 (09:00)',
+                replace_existing=True
+            )
+
+        # 4. 모니터링 시작 (KST 09:26) — 09:25 매수분 포함 재시작
+        # 옵션 D-1: KIS WebSocket 동적 SUBSCRIBE 미지원 → start_monitoring()이 stop+start 패턴으로 재시작
         self.scheduler.add_job(
             self._run_monitoring_start,
             CronTrigger(hour=9, minute=26, day_of_week='mon-fri', timezone=_KST_TZ),
             id='monitoring_start',
-            name='모니터링 시작',
+            name='모니터링 재시작 (09:26, 신규 매수분 포함)',
             replace_existing=True
         )
 
