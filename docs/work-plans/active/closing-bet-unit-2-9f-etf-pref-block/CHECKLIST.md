@@ -1,0 +1,254 @@
+# CHECKLIST — 단위 2-9f · ETF/우선주 차단 + 자체 시총 계산 (사전 리뷰 반영)
+
+## 사전 조사 (Step 0 — 코딩 진입 차단 게이트)
+
+### 0.1 pykrx ETF 리스트 동적 조회 가능 여부
+- [ ] `scripts/probe_pykrx_etf_list.py` 신규 — `pykrx.stock.get_etf_ticker_list(today_str)` 단발 검증
+- [ ] 호출 성공 시 ETF 종목 수 + 응답 시간 + 메이저 ETF (069500/102110/122630/233740) 매칭 확인
+- [ ] 호출 실패 시 (단위 2-9c와 동일 KRX 정책 영향 가능성):
+  - [ ] 에러 메시지 캡처 (`IndexError` / `KeyError` / `URLError` 등)
+  - [ ] 정적 화이트리스트 set 폴백 사전 합의 (KODEX/TIGER/KOSEF/HANARO/ARIRANG 주요 ETF 종목코드 ~800개 list-up)
+- [ ] 결과를 CONTEXT.md "한국거래소 종목코드 체계" 섹션에 기록
+
+### 0.2 KIS API `FID_DIV_CLS_CODE` 매뉴얼 검증
+- [ ] **WebFetch**: `https://github.com/koreainvestment/open-trading-api/blob/main/rest/domestic_stock/inquire_volume_rank/inquire_volume_rank.py`
+- [ ] **WebFetch**: fluctuation 엔드포인트 — `fid_div_cls_code` 파라미터 존재? 의미 동일 (1=보통주, 2=우선주)?
+- [ ] **WebFetch**: foreign-institution-total — `FID_DIV_CLS_CODE` 파라미터 존재?
+- [ ] 결과:
+  - [ ] volume-rank: `(1=보통주, 2=우선주)` 코드 주석 확인 (이미 적혀있음)
+  - [ ] fluctuation: 지원 여부
+  - [ ] foreign-institution-total: 지원 여부
+- [ ] **결론**:
+  - [ ] 3종 모두 지원 → `kis_div_cls_code` 토글 활성화 후속 단위 2-9g 계획
+  - [ ] 일부만 지원 → 지원 ranking만 적용 + 나머지는 universe_filters 차단 분기 의존
+
+### 0.3 5/7 universe + KOSPI/KOSDAQ 거래대금 top 100 분포 실측
+- [ ] `scripts/probe_etf_pref_distribution.py` 신규
+- [ ] 5/7 universe 18건 종목코드 + 종목명 list-up
+- [ ] KOSPI/KOSDAQ 거래대금 top 100 종목코드 + 종목명 (KIS volume-rank 호출)
+- [ ] 분석 항목:
+  - [ ] 6자리 종목코드 → pykrx ETF 리스트 매칭 → ETF 비율
+  - [ ] 끝자리 5/7/9 종목 → 종목명 "우/우B/우C/우K" 접미사 매칭 → 우선주 진성 / false positive 분포
+  - [ ] **false positive 후보 list-up**: 보통주가 끝자리 5/7/9 + 종목명 "우" 미포함 케이스
+- [ ] 결과를 CONTEXT.md "한국거래소 종목코드 체계" 섹션에 기록
+
+### 0.4 자기주식 비중 큰 종목 sample 단발 검증
+- [ ] SK하이닉스/셀트리온/네이버 등 sample 5종목
+- [ ] 각 종목에서 `stck_avls × 1억` vs `lstn_stcn × stck_prpr` 차이 측정
+- [ ] 차이가 5% 이상인 케이스 list-up → 시총 보강 우선순위(stck_avls × 1억 1순위) 결정 근거
+
+### 0.5 사전 조사 게이트 통과 조건
+- [ ] pykrx ETF 리스트 또는 정적 폴백 set 확보
+- [ ] KIS `FID_DIV_CLS_CODE` 지원 여부 확정
+- [ ] false positive 후보 종목코드 list-up + 단위 테스트 fixture 준비
+- [ ] 시총 보강 우선순위 결정 (stck_avls × 1억 우선 합의)
+- [ ] **모두 완료 후 Step 1 진입**
+
+## 구현 항목
+
+### Step 1 — `universe_filters.py` ETF/우선주 차단 분기
+
+#### 1.1 모듈 상수 + cfg fallback default
+- [ ] 모듈 상수:
+  - `_BLOCK_ETF_DEFAULT = True`
+  - `_BLOCK_PREF_STOCK_DEFAULT = False` (점진 활성화)
+  - `_KIS_MARKET_CAP_PRIORITY_DEFAULT = False`
+  - `_KIS_DIV_CLS_CODE_DEFAULT = "0"` (Step 0 검증 후 "1")
+  - `_PREF_STOCK_LAST_DIGITS = frozenset({"5", "7", "9"})`
+  - `_PREF_STOCK_NAME_SUFFIXES = ("우", "우B", "우C", "우K")`
+  - `_ETF_TICKER_CACHE_TTL_SEC = 86400`
+  - `_ETF_STATIC_FALLBACK = frozenset({...})` (Step 0 사전 합의 set)
+  - `REJECTION_REASON_IS_ETF = "is_etf"`
+  - `REJECTION_REASON_IS_PREF_STOCK = "is_pref_stock"`
+- [ ] `_load_filter_config()` 신규 4개 키 추가 + cfg fallback dict default reflect
+
+#### 1.2 ETF/우선주 헬퍼 함수
+- [ ] `_get_etf_ticker_set(today_str)` — pykrx 동적 조회 + lock 더블체크 캐시 + 정적 폴백
+- [ ] `_is_etf(ticker, today_str)` — 6자리 정규식 + ETF 리스트 매칭
+- [ ] `_is_pref_stock(ticker, name)` — 6자리 정규식 + 끝자리 AND 종목명 접미사
+
+#### 1.3 차단 분기 (apply_attribute_filters)
+- [ ] **차단 분기 위치**: `for ticker in tickers:` 루프 첫 단계 (KIND severity if 블록 밖)
+- [ ] ETF → 우선주 순서 (first-rejection-only)
+- [ ] rejection_reason 모듈 상수 사용
+- [ ] `name_lookup_map` 인자 추가 또는 기존 KIS 응답에서 종목명 회수 (호출부 변경 영향 검증)
+- [ ] **로그 분해**: 카운트 4종 (`kind/etf/pref/attr`) + 첫 호출 1회 차단 list 진단 로그
+- [ ] py_compile 통과
+
+### Step 2 — `kis_market_provider.py` lstn_stcn 자체 시총 계산
+
+#### 2.1 모듈 상수
+- [ ] `_FIELD_LISTED_SHARES = "lstn_stcn"` (단위 2-9d 패턴 일관)
+
+#### 2.2 헬퍼 함수
+- [ ] `_compute_market_cap_from_response(item)`:
+  - `_safe_int(lstn_stcn)` × `_safe_int(stck_prpr)` (정수 × 정수 — IEEE 754 정밀도 손실 없음)
+  - `_safe_float` 사용 절대 금지
+  - 0 또는 음수 입력 → None
+- [ ] **단위 진단 로그** (첫 호출 1회, 단위 2-9e 패턴):
+  - `[kis_market_provider] lstn_stcn × stck_prpr 자체 계산 — {code} {lstn_stcn:,d} × {stck_prpr:,d} = {market_cap:,d}원 (stck_avls 대비 차이 ~0.01% 자기주식 영향 추정)`
+
+#### 2.3 신규 메서드
+- [ ] `get_top_value_data(top_n, market) -> dict[str, dict]`:
+  - volume_rank API 호출 + 각 item에서 `_compute_market_cap_from_response` 호출
+  - 반환: `{ticker: {market_cap, close, change_rate, lstn_stcn}}`
+  - 기존 `get_top_value_codes` 유지 (옵션 A — 메서드 분리)
+- [ ] `get_top_change_data` / `get_top_foreign_buy_data`: **신규 X** (응답에 lstn_stcn 부재 — Step 0 검증 결과)
+
+#### 2.4 (선택) KIS native filter
+- [ ] volume-rank `FID_DIV_CLS_CODE` 옵션 — settings 토글로 `"0"` (전체) / `"1"` (보통주만) 선택
+- [ ] Step 0 매뉴얼 검증 결과에 따라 fluctuation/foreign-institution-total 동시 적용 여부 결정 (단위 2-9g 분리 가능)
+
+### Step 3 — `universe_filters.py` 시총 보강 우선순위 + helper 분리
+
+#### 3.1 helper 분리 (108줄 → ~50줄)
+- [ ] `_enrich_market_cap_from_kis_top(candidates, cfg)` — 단위 2-9d/2-9e 기존 코드 추출
+- [ ] `_enrich_market_cap_from_volume_rank(candidates, cfg)` — 단위 2-9f 신규 (lstn_stcn × stck_prpr)
+- [ ] `_enrich_ohlcv_per_ticker(candidates, today_str, krx)` — 단위 2-9c 기존 코드 추출
+- [ ] `_maybe_run_per_ticker_fallback` 본문 골격만 유지
+
+#### 3.2 시총 보강 우선순위 (해석 A 채택)
+- [ ] 1순위: KIS market-cap top 200 (`stck_avls × 1억`)
+- [ ] 2순위: 1순위 미매치 → KIS volume-rank top 30 (`lstn_stcn × stck_prpr`)
+- [ ] 3순위: 2순위도 미매치 → `data_not_found` 탈락 (옵션 A 보수)
+- [ ] `kis_market_cap_priority` 토글:
+  - `false` (default): pykrx bulk 정상 시 미진입 (현 동작)
+  - `true`: pykrx 정상이어도 시총 컬럼만 KIS로 후처리 덮어쓰기
+
+### Step 4 — `settings.yaml` 토글 4종
+- [ ] `stock_filter.etf_block_enabled: true`
+- [ ] `stock_filter.pref_stock_block_enabled: false` (점진 활성화)
+- [ ] `data_source.kis_market_cap_priority: false`
+- [ ] `data_source.kis_div_cls_code: "0"` (Step 0 검증 후 "1")
+- [ ] yaml 문법 검증
+
+### Step 5 — 단위 테스트 (`scripts/test_closing_bet_unit_2_9f.py`) — 22건+
+
+#### 5.1 ETF 차단 (5건)
+- [ ] **ETF-1**: 069500 KODEX 200 → ETF 리스트 매칭 → 탈락
+- [ ] **ETF-2**: 102110 TIGER 200 → 매칭 → 탈락 (메이저 ETF 회귀)
+- [ ] **ETF-3**: 069080 웹젠 KOSDAQ 보통주 → ETF 리스트 미매칭 → **통과** (false positive 회귀)
+- [ ] **ETF-4**: 091990 셀트리온헬스케어 → 미매칭 → **통과** (false positive 회귀)
+- [ ] **ETF-5**: 토글 OFF → 069500 통과 (회귀)
+
+#### 5.2 우선주 차단 (5건)
+- [ ] **PREF-1**: 005935 삼성전자우 (끝자리 5 + 종목명 "삼성전자우") → AND → 탈락
+- [ ] **PREF-2**: 005930 삼성전자 (끝자리 0) → 끝자리 미충족 → 통과
+- [ ] **PREF-3**: 005385 현대차우 (끝자리 5 + 종목명 "현대차우") → AND → 탈락
+- [ ] **PREF-4**: KOSDAQ 보통주 끝자리 5/7/9 + 종목명 "우" 미포함 → AND 미충족 → **통과** (false positive 회귀, Step 0 결과 반영)
+- [ ] **PREF-5**: 토글 OFF → 005935 통과
+
+#### 5.3 자체 시총 계산 (4건)
+- [ ] **MC-CALC-1**: lstn_stcn=5,846,278,608 + stck_prpr=271,500 → 1,587,264,478,572,000원
+- [ ] **MC-CALC-2**: lstn_stcn 부재 → None
+- [ ] **MC-CALC-3**: stck_prpr=0 → None
+- [ ] **MC-CALC-4**: NaN/문자/음수/공백 → `_safe_int` default=0 → None
+
+#### 5.4 통합 (3건)
+- [ ] **INTEGRATION-1**: volume_rank 30종목 자체 계산 → 매치율 ≥ 80%
+- [ ] **INTEGRATION-2**: stck_avls × 1억 1순위 + lstn_stcn × stck_prpr 2순위 우선순위 검증
+- [ ] **INTEGRATION-3**: pykrx bulk 정상 + `kis_market_cap_priority=false` → KIS 보강 미진입 (회귀)
+
+#### 5.5 회귀 (3건)
+- [ ] **REGRESSION-1** (단위 2-9d-hotfix): fluctuation `stck_shrn_iscd` 응답에서 ticker 추출 정상 + ETF/우선주 룰 정상 동작
+- [ ] **REGRESSION-2** (단위 2-9e): market_cap top 200 응답 stck_avls × 1억 = 005930 1,555,110,100,000,000원 유지
+- [ ] **REGRESSION-3** (단위 2-9c): pykrx bulk 빈 응답 시 KIS 시총 보강 + 종목별 OHLCV 폴백 정상
+
+#### 5.6 Edge case (4건)
+- [ ] **EDGE-1**: ticker None/빈 문자열/5자리/7자리 → `_is_etf` / `_is_pref_stock` False (None safe)
+- [ ] **EDGE-2**: lstn_stcn 문자열 응답 (`"5846278608"`) → `_safe_int` 정상 처리
+- [ ] **EDGE-3**: pykrx ETF 리스트 호출 실패 → 정적 화이트리스트 폴백 + warning 로그
+- [ ] **EDGE-4**: ETF/우선주 토글 둘 다 OFF + 5/7 universe 18건 → 단위 2-9e 결과 그대로 재현 (회귀)
+
+### Step 6 — code-tester 검증
+- [ ] code-tester 에이전트 호출 (수정 4개 + 신규 테스트 1개 + probe 2개 대상)
+- [ ] 단위 2-9d/2-9e/2-9d-hotfix 발견 패턴 재발 차단:
+  - cfg NameError → 신규 키 4종 module_const + cfg fallback default 명시 검증
+  - `_FIELD_*` 상수 → `_FIELD_LISTED_SHARES` 추가 검증
+  - 단위 진단 로그 → `lstn_stcn × stck_prpr` + ETF/우선주 차단 list 첫 호출 1회 검증
+  - direction dead parameter → 본 단위 무관 (확인)
+- [ ] 심각 이슈 0건 또는 발견 시 즉시 수정
+- [ ] 회귀 누적 116건 (단위 2-9d-hotfix 기준) → 138+건 (2-9f 22건 추가) 재실행 PASS
+
+## 검증 항목
+
+### 단위 검증
+- [ ] py_compile 통과 (universe_filters.py / kis_market_provider.py)
+- [ ] `venv/bin/python scripts/test_closing_bet_unit_2_9f.py` 22건+ PASS
+- [ ] 회귀 138+건 PASS
+
+### 통합 검증 (단발)
+- [ ] `get_universe_v2_filtered()` 단발 호출
+- [ ] universe에 ETF/우선주 0건 (사전 조사 결과 false positive도 0건)
+- [ ] `[universe_filters] 속성 필터: ... ETF {etf} + 우선주 {pref} ...` 로그
+- [ ] 시총 보강 매치율 ≥ 60% (volume_rank 자체 계산 효과)
+- [ ] universe 건수 회귀 없음 (5/7 18건 기준, 1~2건 감소 가능)
+
+### 실전 검증 (다음 영업일 자연 트리거)
+- [ ] 15:10 KST 자동 트리거 발화
+- [ ] universe에 ETF/우선주 0건
+- [ ] universe 건수 회귀 없음
+- [ ] 시총 보강 매치율 향상 확인 (KIS top 200 한도 우회 효과)
+- [ ] candidates INSERT ≥ 1건
+- [ ] **신규 모니터링**: false positive 사례 발견 시 즉시 화이트리스트 보강
+
+## 배포 항목
+- [ ] systemd 재시작 전 단일 PID 확인
+- [ ] 변경 파일 git stage (의도 일치 확인)
+- [ ] `sudo systemctl restart trading_system`
+- [ ] active(running) 확인
+- [ ] 종가베팅 잡 3건 등록 + Phase 1 알림형 로그 확인
+- [ ] 배포 후 30분 무이상 모니터링
+
+### 점진 활성화 정책
+- [ ] **1주차**: ETF 차단만 활성화 (`etf_block_enabled=true`, `pref_stock_block_enabled=false`)
+- [ ] **2주차**: 사전 조사 결과 안정적이면 우선주 차단 활성화
+- [ ] **별도 결정**: `kis_market_cap_priority` / `kis_div_cls_code` (사용자 결정)
+
+### 롤백 트리거
+- [ ] universe 건수 5/7 18건 대비 50% 이하 감소 (예: 9건 미만)
+- [ ] candidates INSERT 0건
+- [ ] false positive 명백한 종목명 발견
+
+## 문서 업데이트 항목
+- [ ] `docs/improvements/change_log.md` 1줄 추가 (단위 2-9f, 단위 2-9e/2-9d-hotfix 형식 일관)
+- [ ] `memory/project_closing_bet_system.md` 단위 2-9f 단락 추가
+- [ ] `memory/MEMORY.md` 인덱스 description 갱신
+- [ ] git commit + push
+- [ ] 임시 스크립트 보존: `scripts/probe_pykrx_etf_list.py`, `scripts/probe_etf_pref_distribution.py` (재검증용)
+
+## 완료 게이트 (선언 전 체크)
+- [ ] Step 0 사전 조사 항목 전부 `[x]`
+- [ ] Step 1~4 구현 항목 전부 `[x]`
+- [ ] Step 5 단위 테스트 22건+ PASS
+- [ ] Step 6 code-tester 통과
+- [ ] 검증 항목 단위/통합 전부 `[x]`
+- [ ] 배포 항목 전부 `[x]`
+- [ ] 문서 업데이트 항목 (아카이브 제외) 전부 `[x]`
+- [ ] 자연 트리거 검증 후 → active → completed 아카이브 (단위 2-9c~2-9f + 2-9d-hotfix 와 함께)
+
+## 사전 리뷰 반영 요약 (2026-05-07)
+
+| 우선순위 | 항목 | 반영 결과 |
+|---|---|---|
+| **P0** | ETF prefix 룰 → pykrx 동적 조회 + 정적 폴백 | Step 0.1 + 1.2 + EDGE-3 |
+| **P0** | 우선주 끝자리 룰 → 종목명 "우" 접미사 AND 조건 | Step 1.2 + PREF-4 |
+| **S3** | IEEE 754 정밀도 보호 (`_safe_int × _safe_int`) | Step 2.2 + MC-CALC-4 |
+| **M1** | `get_top_value_data` 옵션 A 메서드 분리 | Step 2.3 |
+| **M2** | `_maybe_run_per_ticker_fallback` helper 3개 분리 | Step 3.1 |
+| **M3** | `kis_market_cap_priority` 해석 A 명시 | Step 3.2 |
+| **R1** | cfg NameError 방어 (4종 신규 키 module_const) | Step 1.1 |
+| **R2** | `_FIELD_LISTED_SHARES` 상수 | Step 2.1 |
+| **R3** | 단위 진단 로그 (lstn_stcn 첫 호출 1회 + ETF/우선주 list) | Step 1.3 + 2.2 |
+| **R5** | 단위 테스트 14건 → 22건 (REGRESSION 3 + EDGE 4 추가) | Step 5.5 + 5.6 |
+| **A1** | 차단 분기 위치 (KIND if 블록 밖) | Step 1.3 |
+| **A2** | rejection_reason 모듈 상수 | Step 1.1 |
+| **A3** | _is_etf/_is_pref_stock None safety | Step 1.2 + EDGE-1 |
+| **점진 활성화** | pref_stock default false 1주 관찰 | Step 4 + 배포 항목 |
+| **로그 분해** | etf_rejected/pref_rejected 카운트 분리 | Step 1.3 |
+
+## 후속 단위 (별도)
+- 단위 2-9g — `kis_div_cls_code` source-level 제외 활성화 (Step 0 검증 결과 OK 시)
+- 단위 2-9h — universe v2 출처 5 신규 (KIS market-cap 상위 30) 검토
+- 단위 2-9i — KIS top_market_cap top_n 증가 (200 → 500) 검토
+- Phase 2 자동매매(2-3/2-4/2-5) — 30/100건 게이트 통과 후
