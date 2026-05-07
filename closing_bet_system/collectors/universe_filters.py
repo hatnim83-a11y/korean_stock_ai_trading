@@ -89,6 +89,32 @@ DEFAULT_FALLBACK_INCLUDE_MARKET_CAP = False
 # KIS 시총 ranking 호출 시 가져올 상위 N — 시장 규모 대비 충분히 커야 함 (KOSPI+KOSDAQ ~2,500종목 중 상위 200)
 DEFAULT_KIS_MARKET_CAP_TOP_N = 200
 
+# 단위 2-9f — ETF/우선주 차단 토글 default
+# Step 0.3 검증: KOSPI top 30 ETF 13/30(43%) + 우선주 false positive 0건
+_BLOCK_ETF_DEFAULT = True
+_BLOCK_PREF_STOCK_DEFAULT = False  # 점진 활성화 — 1주 관찰 후 True
+_KIS_MARKET_CAP_PRIORITY_DEFAULT = False  # pykrx 정상 시 KRX 공식 사용
+_KIS_DIV_CLS_CODE_DEFAULT = "0"  # Step 0.2 — volume_rank만 "1" 활성 가능 (별도 후속 단위)
+
+# 단위 2-9f — 우선주 끝자리 + 종목명 AND 조건
+_PREF_STOCK_LAST_DIGITS: frozenset[str] = frozenset({"5", "7", "9"})
+_PREF_STOCK_NAME_SUFFIXES: tuple[str, ...] = ("우", "우B", "우C", "우K")
+
+# 단위 2-9f — ETF/ETN 종목명 brand prefix
+# Step 0.3 KOSPI top 30 검증: KODEX 6 + TIGER 3 = 9건 100% 정확도
+# 추가 brand는 KOSDAQ/소형 ETF 발행사 (한화/하나/신한 등 일부 발행사는 brand 없이 종목명 시작)
+_ETF_BRAND_PREFIXES: tuple[str, ...] = (
+    "KODEX", "TIGER", "KOSEF", "HANARO", "ARIRANG", "ACE",
+    "KBSTAR", "SOL", "KINDEX", "RISE", "PLUS", "SMART",
+    "FOCUS", "TIMEFOLIO", "WOORI",
+)
+# ETN 식별 키워드 (종목명에 포함 시 차단)
+_ETN_NAME_KEYWORD = "ETN"
+
+# rejection_reason 모듈 상수 (PRD 11-1 candidates 스키마 정합)
+REJECTION_REASON_IS_ETF = "is_etf"
+REJECTION_REASON_IS_PREF_STOCK = "is_pref_stock"
+
 # PRD 4-1 KIND severity 사전 제외 임계값 — kind_alert_collector 단방향 import (순환 없음).
 # kind_alert_collector 가 본 모듈을 import 하지 않으므로 안전.
 from closing_bet_system.collectors.kind_alert_collector import (
@@ -186,7 +212,66 @@ def _load_filter_config() -> dict:
         "kis_market_cap_top_n": int(
             data_source.get("kis_market_cap_top_n", DEFAULT_KIS_MARKET_CAP_TOP_N)
         ),
+        # 단위 2-9f — ETF/우선주 차단 토글
+        "etf_block_enabled": bool(
+            stock_filter.get("etf_block_enabled", _BLOCK_ETF_DEFAULT)
+        ),
+        "pref_stock_block_enabled": bool(
+            stock_filter.get("pref_stock_block_enabled", _BLOCK_PREF_STOCK_DEFAULT)
+        ),
+        "kis_market_cap_priority": bool(
+            data_source.get("kis_market_cap_priority", _KIS_MARKET_CAP_PRIORITY_DEFAULT)
+        ),
+        "kis_div_cls_code": str(
+            data_source.get("kis_div_cls_code", _KIS_DIV_CLS_CODE_DEFAULT)
+        ),
     }
+
+
+# ===== 단위 2-9f — ETF/우선주 헬퍼 =====
+
+
+def _is_etf_or_etn(name: Optional[str]) -> bool:
+    """종목명 기반 ETF/ETN 식별.
+
+    Step 0.3 검증: KOSPI top 30 13/13 = 100% 정확도 (KODEX/TIGER prefix).
+    종목명 None/빈 문자열 → False (보수적, false positive 회피).
+
+    Args:
+        name: KIS API ``hts_kor_isnm`` 종목명 또는 다른 출처.
+
+    Returns:
+        True: ETF brand prefix 매칭 또는 종목명에 ETN 키워드 포함.
+    """
+    if not name or not isinstance(name, str):
+        return False
+    if name.startswith(_ETF_BRAND_PREFIXES):
+        return True
+    if _ETN_NAME_KEYWORD in name:
+        return True
+    return False
+
+
+def _is_pref_stock(ticker: str, name: Optional[str]) -> bool:
+    """우선주 식별 — 끝자리 + 종목명 AND 조건.
+
+    Step 0.3 검증: KOSPI top 30 false positive 0건 (KOSDAQ 보통주가 끝자리 5/7/9 +
+    종목명 "우" 미포함 케이스 없음). AND 조건으로 false positive 회피.
+
+    Args:
+        ticker: 6자리 종목코드.
+        name: 종목명. None 시 False (보수적).
+
+    Returns:
+        True: 끝자리 ∈ {5,7,9} AND 종목명이 ("우","우B","우C","우K")로 끝남.
+    """
+    if not ticker or not isinstance(ticker, str) or len(ticker) != 6 or not ticker.isdigit():
+        return False
+    if ticker[-1] not in _PREF_STOCK_LAST_DIGITS:
+        return False
+    if not name or not isinstance(name, str):
+        return False
+    return name.endswith(_PREF_STOCK_NAME_SUFFIXES)
 
 
 # ===== pykrx lazy import =====
@@ -355,6 +440,12 @@ def _maybe_run_per_ticker_fallback(
 
     호출량 가드:
         ``MAX_FALLBACK_TICKERS=100`` (hard_cap 정합), 사이 ``FALLBACK_RATE_LIMIT_SEC=0.05``초.
+
+    시총 보강 우선순위 (단위 2-9d/2-9f):
+        1순위 (단위 2-9d): KIS market-cap top 200 매치 — `fallback_include_market_cap=True` 시.
+        2순위 (단위 2-9f): volume_rank lstn_stcn × stck_prpr 자체 계산 — 1순위 미매치 종목 대상.
+            **2순위도 `fallback_include_market_cap=True` 블록 안에 중첩됨** — 토글 OFF 시 두 단계 모두 스킵.
+        3순위: 미매치 종목은 market_cap None 유지 → apply_attribute_filters에서 옵션 A 보수 탈락.
     """
     if bulk_result:
         return  # bulk 정상 → 폴백 스킵
@@ -396,9 +487,10 @@ def _maybe_run_per_ticker_fallback(
 
     fallback: dict[str, dict] = {}
 
-    # 단위 2-9d — KIS market-cap ranking 으로 시총 보강 (옵션 B 자연 활성)
+    # 단위 2-9d — KIS market-cap ranking 으로 시총 보강 (1순위, top 200 한도)
     # KIS top N(default 200) 시총 데이터를 1회 호출 → candidates 중 매칭된 종목에 market_cap 채움.
-    # 매칭 안 된 종목은 market_cap None 유지 → 옵션 A 보수 탈락 (PRD 4-1 정합).
+    # 매칭 안 된 종목은 단위 2-9f의 volume_rank 자체 계산으로 2순위 보강 후, 최종 미매치는
+    # market_cap None 유지 → 옵션 A 보수 탈락 (PRD 4-1 정합).
     if cfg.get("fallback_include_market_cap", DEFAULT_FALLBACK_INCLUDE_MARKET_CAP):
         try:
             from closing_bet_system.collectors.kis_market_provider import (
@@ -414,13 +506,41 @@ def _maybe_run_per_ticker_fallback(
                     fallback[ticker] = dict(mcap_data[ticker])
                     matched += 1
             logger.info(
-                f"[universe_filters] 시총 보강 (단위 2-9d) — KIS top {mcap_top_n} 중 "
-                f"{matched}/{n_input}건 매치"
+                f"[universe_filters] 시총 보강 1순위 (단위 2-9d) — KIS market-cap top {mcap_top_n} "
+                f"중 {matched}/{n_input}건 매치"
             )
         except Exception as e:
             logger.warning(
-                f"[universe_filters] 시총 보강 실패 → 옵션 A 보수 적용: {e}"
+                f"[universe_filters] 1순위 시총 보강 실패 → 2순위 시도: {e}"
             )
+
+        # 단위 2-9f — 1순위 미매치 종목에 대해 volume_rank lstn_stcn × stck_prpr 자체 계산 (2순위)
+        # Step 0.4 검증: stck_avls × 1억 ≈ lstn_stcn × stck_prpr (자기주식 영향 ≈ 0%)
+        # → KIS market-cap top 200 한도 우회 (top 30~50 등 추가 보강)
+        unmatched = [t for t in candidates if t not in fallback]
+        if unmatched:
+            try:
+                from closing_bet_system.collectors.kis_market_provider import (
+                    get_kis_market_provider,
+                )
+                # volume_rank top 30 호출 (기본값) → 자체 시총 계산
+                # 거래대금 큰 종목 위주로 candidates 와 겹칠 가능성 높음
+                # volume_rank DEFAULT_TOP_N=30 (kis_market_provider) — 단위 2-9f 시총 보강 2순위
+                vol_data = get_kis_market_provider().get_top_value_data(top_n=30)
+                matched_2 = 0
+                for ticker in unmatched:
+                    entry = vol_data.get(ticker)
+                    if entry and "market_cap" in entry:
+                        fallback[ticker] = dict(entry)
+                        matched_2 += 1
+                logger.info(
+                    f"[universe_filters] 시총 보강 2순위 (단위 2-9f) — volume_rank 자체 계산 "
+                    f"{matched_2}/{len(unmatched)}건 매치 (1순위 미매치 종목 대상)"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[universe_filters] 2순위 시총 보강 실패 → 옵션 A 보수 적용: {e}"
+                )
 
     # 종목별 by_date 폴백 (close/change/value 채움 — 시총 보강 데이터 위에 누적)
     success = 0
@@ -537,17 +657,22 @@ def apply_attribute_filters(
     today: Optional[date_cls] = None,
     config: Optional[dict] = None,
     severity_map: Optional[dict[str, int]] = None,
+    name_lookup_map: Optional[dict[str, str]] = None,
 ) -> tuple[list[str], dict[str, str]]:
-    """PRD 4-1 속성 기반 필터 적용 — KIND severity / 시총/주가/상한가/52주 고점.
+    """PRD 4-1 속성 기반 필터 적용 — KIND severity / ETF/우선주 / 시총/주가/상한가/52주 고점.
 
-    KIND severity ≥ 3 (관리/거래정지/투자위험) → PRD 4-1 명시 "제외" 하드 룰로
-    속성 필터 첫 단계에서 사전 차단 (first-rejection-only 정합).
+    차단 순서 (first-rejection-only):
+        1. KIND severity ≥ 3 (관리/거래정지/투자위험) — severity_map 주입 시
+        2. ETF/ETN — 단위 2-9f, 종목명 brand prefix 매칭 (name_lookup_map 주입 시)
+        3. 우선주 — 단위 2-9f, 끝자리 + 종목명 AND 조건
+        4. 시총/주가/상한가/52주 고점
 
     Args:
         tickers: 6자리 종목코드 리스트.
         today: 평가 기준 거래일. None 시 KST 오늘.
         config: 필터 임계값 dict (None 시 settings.yaml 로드).
-        severity_map: KIND 시장경보 ``{ticker: severity}``. None/빈 dict 시 KIND 사전 제외 스킵.
+        severity_map: KIND 시장경보 ``{ticker: severity}``. None/빈 dict 시 KIND 단계 스킵.
+        name_lookup_map: 종목명 매핑 ``{ticker: name}``. None/빈 dict 시 ETF/우선주 단계 스킵.
 
     Returns:
         (passed, rejected) — passed: list[str], rejected: ``{ticker: reason}``
@@ -562,7 +687,9 @@ def apply_attribute_filters(
     passed: list[str] = []
     rejected: dict[str, str] = {}
     original_total = len(tickers)
-    kind_rejected_count = 0  # 로그 분해용 (속성 탈락과 분리 표시)
+    kind_rejected_count = 0
+    etf_rejected_count = 0
+    pref_rejected_count = 0
 
     # 0. KIND severity ≥ 3 사전 제외 (PRD 4-1 — "관리/투자경고/거래정지 제외")
     # 속성 필터 첫 단계에서 차단해 후속 fetch 비용 절감.
@@ -584,7 +711,41 @@ def apply_attribute_filters(
         if not tickers:
             return [], rejected
 
-    # 단위 2-9c — KIND 사전 제외 후 survivors 를 폴백 후보로 전달.
+    # 0.5 ETF/우선주 차단 (단위 2-9f, name_lookup_map 주입 시)
+    # name_lookup_map 부재 시 보수적으로 단계 스킵 (false positive 회피)
+    etf_block_enabled = cfg.get("etf_block_enabled", _BLOCK_ETF_DEFAULT)
+    pref_block_enabled = cfg.get("pref_stock_block_enabled", _BLOCK_PREF_STOCK_DEFAULT)
+    etf_blocked_list: list[tuple[str, str]] = []
+    pref_blocked_list: list[tuple[str, str]] = []
+
+    if name_lookup_map and (etf_block_enabled or pref_block_enabled):
+        survivors2: list[str] = []
+        for t in tickers:
+            name = name_lookup_map.get(t)
+            if etf_block_enabled and _is_etf_or_etn(name):
+                rejected[t] = REJECTION_REASON_IS_ETF
+                etf_rejected_count += 1
+                etf_blocked_list.append((t, name or ""))
+                continue
+            if pref_block_enabled and _is_pref_stock(t, name):
+                rejected[t] = REJECTION_REASON_IS_PREF_STOCK
+                pref_rejected_count += 1
+                pref_blocked_list.append((t, name or ""))
+                continue
+            survivors2.append(t)
+
+        if etf_rejected_count or pref_rejected_count:
+            sample_etf = etf_blocked_list[:5]
+            sample_pref = pref_blocked_list[:5]
+            logger.info(
+                f"[universe_filters] ETF/ETN 차단 {etf_rejected_count}건 sample={sample_etf} / "
+                f"우선주 차단 {pref_rejected_count}건 sample={sample_pref}"
+            )
+        tickers = survivors2
+        if not tickers:
+            return [], rejected
+
+    # 단위 2-9c — KIND/ETF/우선주 사전 제외 후 survivors 를 폴백 후보로 전달.
     # bulk 정상 시 가드(`if not bulk_result`)로 폴백 스킵.
     market_data = _fetch_market_data_bulk(today_str, tickers=tickers)
 
@@ -627,10 +788,12 @@ def apply_attribute_filters(
 
         passed.append(ticker)
 
-    attr_rejected_count = len(rejected) - kind_rejected_count
+    attr_rejected_count = (
+        len(rejected) - kind_rejected_count - etf_rejected_count - pref_rejected_count
+    )
     logger.info(
         f"[universe_filters] 속성 필터: {len(passed)}/{original_total} 통과 "
-        f"(KIND 사전 제외 {kind_rejected_count} + 속성 탈락 {attr_rejected_count})"
+        f"(KIND {kind_rejected_count} + ETF {etf_rejected_count} + 우선주 {pref_rejected_count} + 속성 {attr_rejected_count} 탈락)"
     )
     return passed, rejected
 
@@ -697,10 +860,12 @@ def apply_all_filters(
     today: Optional[date_cls] = None,
     config: Optional[dict] = None,
     severity_map: Optional[dict[str, int]] = None,
+    name_lookup_map: Optional[dict[str, str]] = None,
 ) -> tuple[list[str], dict[str, str]]:
     """PRD 4-1 속성 + 4-4 유동성 통합 필터.
 
-    KIND severity → 속성 → 유동성 순으로 적용. 한 종목이 여러 필터 위반 시 첫 위반만 기록.
+    차단 순서: KIND severity → ETF/우선주 → 시총/주가/상한가/52주 고점 → 유동성.
+    한 종목이 여러 필터 위반 시 첫 위반만 기록.
 
     Args:
         tickers: 6자리 종목코드 리스트.
@@ -708,6 +873,8 @@ def apply_all_filters(
         config: 필터 임계값 dict.
         severity_map: KIND 시장경보 ``{ticker: severity}``. severity ≥ 3 사전 제외 (PRD 4-1).
             None/빈 dict 시 KIND 단계 스킵 (기존 동작 유지 — 회귀).
+        name_lookup_map: 종목명 매핑 ``{ticker: name}``. 단위 2-9f ETF/우선주 차단용.
+            None/빈 dict 시 ETF/우선주 단계 스킵 (보수적, false positive 회피).
 
     Returns:
         (passed, rejected) — 두 단계 통합 dict
@@ -719,7 +886,8 @@ def apply_all_filters(
     cfg = config or _load_filter_config()
 
     after_attr, rejected_attr = apply_attribute_filters(
-        tickers, today=today, config=cfg, severity_map=severity_map
+        tickers, today=today, config=cfg,
+        severity_map=severity_map, name_lookup_map=name_lookup_map,
     )
     after_liq, rejected_liq = apply_liquidity_filters(after_attr, today=today, config=cfg)
 

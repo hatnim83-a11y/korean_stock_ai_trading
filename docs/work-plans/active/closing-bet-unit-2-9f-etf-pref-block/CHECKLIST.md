@@ -1,78 +1,77 @@
 # CHECKLIST — 단위 2-9f · ETF/우선주 차단 + 자체 시총 계산 (사전 리뷰 반영)
 
-## 사전 조사 (Step 0 — 코딩 진입 차단 게이트)
+## 사전 조사 (Step 0 — ✅ 2026-05-07 KST 19:50 완료)
 
 ### 0.1 pykrx ETF 리스트 동적 조회 가능 여부
-- [ ] `scripts/probe_pykrx_etf_list.py` 신규 — `pykrx.stock.get_etf_ticker_list(today_str)` 단발 검증
-- [ ] 호출 성공 시 ETF 종목 수 + 응답 시간 + 메이저 ETF (069500/102110/122630/233740) 매칭 확인
-- [ ] 호출 실패 시 (단위 2-9c와 동일 KRX 정책 영향 가능성):
-  - [ ] 에러 메시지 캡처 (`IndexError` / `KeyError` / `URLError` 등)
-  - [ ] 정적 화이트리스트 set 폴백 사전 합의 (KODEX/TIGER/KOSEF/HANARO/ARIRANG 주요 ETF 종목코드 ~800개 list-up)
-- [ ] 결과를 CONTEXT.md "한국거래소 종목코드 체계" 섹션에 기록
+- [x] `scripts/probe_pykrx_etf_list.py` 신규 + 단발 실행
+- [x] 결과: ❌ **사용 불가** — `KeyError: '시장'` (단위 2-9c와 동일 KRX API 정책 영향)
+- [x] 결정: **종목명 brand prefix 매칭** 채택 (정적 set ~800개 유지보수 부담 회피)
 
-### 0.2 KIS API `FID_DIV_CLS_CODE` 매뉴얼 검증
-- [ ] **WebFetch**: `https://github.com/koreainvestment/open-trading-api/blob/main/rest/domestic_stock/inquire_volume_rank/inquire_volume_rank.py`
-- [ ] **WebFetch**: fluctuation 엔드포인트 — `fid_div_cls_code` 파라미터 존재? 의미 동일 (1=보통주, 2=우선주)?
-- [ ] **WebFetch**: foreign-institution-total — `FID_DIV_CLS_CODE` 파라미터 존재?
-- [ ] 결과:
-  - [ ] volume-rank: `(1=보통주, 2=우선주)` 코드 주석 확인 (이미 적혀있음)
-  - [ ] fluctuation: 지원 여부
-  - [ ] foreign-institution-total: 지원 여부
-- [ ] **결론**:
-  - [ ] 3종 모두 지원 → `kis_div_cls_code` 토글 활성화 후속 단위 2-9g 계획
-  - [ ] 일부만 지원 → 지원 ranking만 적용 + 나머지는 universe_filters 차단 분기 의존
+### 0.2 KIS API `FID_DIV_CLS_CODE` 단발 검증
+- [x] `scripts/probe_kis_div_cls.py` 신규 + 6 호출 (3 ranking × 2 div_cls)
+- [x] 결과:
+  - [x] **volume_rank**: ✅ 우선주 source-level 차단 (5/7 005935 직접 검증) / ETF 미차단
+  - [x] **fluctuation**: 응답 변화 없음 (영향 없음)
+  - [x] **foreign_total**: 응답 변화 (지원 추정, 단 5/7 우선주 표본 부족)
+- [x] 결정: volume_rank만 native filter 활용. ETF/ETN은 universe_filters 차단 분기 의존
 
-### 0.3 5/7 universe + KOSPI/KOSDAQ 거래대금 top 100 분포 실측
-- [ ] `scripts/probe_etf_pref_distribution.py` 신규
-- [ ] 5/7 universe 18건 종목코드 + 종목명 list-up
-- [ ] KOSPI/KOSDAQ 거래대금 top 100 종목코드 + 종목명 (KIS volume-rank 호출)
-- [ ] 분석 항목:
-  - [ ] 6자리 종목코드 → pykrx ETF 리스트 매칭 → ETF 비율
-  - [ ] 끝자리 5/7/9 종목 → 종목명 "우/우B/우C/우K" 접미사 매칭 → 우선주 진성 / false positive 분포
-  - [ ] **false positive 후보 list-up**: 보통주가 끝자리 5/7/9 + 종목명 "우" 미포함 케이스
-- [ ] 결과를 CONTEXT.md "한국거래소 종목코드 체계" 섹션에 기록
+### 0.3 5/7 거래대금 top 30 ETF/우선주 분포 실측
+- [x] `scripts/probe_etf_pref_distribution.py` 신규 + 단발 실행
+- [x] 결과:
+  - [x] **ETF/ETN**: 13/30건 (43%) — KODEX 6 + TIGER 3 + 기타 4 (122630/069500/396500/102110/091160/252670/114800/379800/360750/487240/233740/494310/229200)
+  - [x] **우선주 진성**: 1건 (005935 삼성전자우)
+  - [x] **false positive 후보**: 0건 (끝자리 5/7/9 + 종목명 "우" 미포함 케이스 없음) ✅
+  - [x] **종목명 brand 매칭 정확도**: 13/13 = 100%
+- [x] 결정: AND 조건 + 종목명 brand prefix 매칭 안전 검증
 
-### 0.4 자기주식 비중 큰 종목 sample 단발 검증
-- [ ] SK하이닉스/셀트리온/네이버 등 sample 5종목
-- [ ] 각 종목에서 `stck_avls × 1억` vs `lstn_stcn × stck_prpr` 차이 측정
-- [ ] 차이가 5% 이상인 케이스 list-up → 시총 보강 우선순위(stck_avls × 1억 1순위) 결정 근거
+### 0.4 자기주식 영향 측정 (top 5 시총 종목)
+- [x] 단발 실행으로 stck_avls × 1억 vs lstn_stcn × stck_prpr 비교
+- [x] 결과: top 5 모두 차이 +0.000% (절대값 4천만~3억원, 시총 대비 무시 가능)
+- [x] 결정: 단위 2-9e CONTEXT "~0.01% 차이" 추정 과도. 두 방식 동등 → 우선순위는 가용성 기준
+  - [x] 1순위: stck_avls × 1억 (top 200)
+  - [x] 2순위: lstn_stcn × stck_prpr (top 30 보강)
 
-### 0.5 사전 조사 게이트 통과 조건
-- [ ] pykrx ETF 리스트 또는 정적 폴백 set 확보
-- [ ] KIS `FID_DIV_CLS_CODE` 지원 여부 확정
-- [ ] false positive 후보 종목코드 list-up + 단위 테스트 fixture 준비
-- [ ] 시총 보강 우선순위 결정 (stck_avls × 1억 우선 합의)
-- [ ] **모두 완료 후 Step 1 진입**
+### 0.5 사전 조사 게이트 통과 — ✅
+- [x] ETF 차단 방식 확정 (종목명 brand prefix)
+- [x] 우선주 차단 방식 확정 (끝자리 + 종목명 AND 조건)
+- [x] 시총 보강 우선순위 확정 (가용성 기준)
+- [x] 종목명 회수 경로 확정 (universe_provider_v2 → universe_filters name_lookup_map 주입)
+- [x] **Step 1 진입 가능**
 
 ## 구현 항목
 
-### Step 1 — `universe_filters.py` ETF/우선주 차단 분기
+### Step 1 — `universe_filters.py` ETF/우선주 차단 분기 (Step 0 결과 반영)
 
 #### 1.1 모듈 상수 + cfg fallback default
 - [ ] 모듈 상수:
   - `_BLOCK_ETF_DEFAULT = True`
   - `_BLOCK_PREF_STOCK_DEFAULT = False` (점진 활성화)
   - `_KIS_MARKET_CAP_PRIORITY_DEFAULT = False`
-  - `_KIS_DIV_CLS_CODE_DEFAULT = "0"` (Step 0 검증 후 "1")
+  - `_KIS_DIV_CLS_CODE_DEFAULT = "0"` (Step 0.2 검증 — volume_rank만 1 활성화 가능)
   - `_PREF_STOCK_LAST_DIGITS = frozenset({"5", "7", "9"})`
   - `_PREF_STOCK_NAME_SUFFIXES = ("우", "우B", "우C", "우K")`
-  - `_ETF_TICKER_CACHE_TTL_SEC = 86400`
-  - `_ETF_STATIC_FALLBACK = frozenset({...})` (Step 0 사전 합의 set)
+  - `_ETF_BRAND_PREFIXES = ("KODEX", "TIGER", "KOSEF", "HANARO", "ARIRANG", "ACE", "KBSTAR", "SOL", "KINDEX", "RISE", "PLUS", "SMART", "FOCUS", "TIMEFOLIO", "WOORI")` (Step 0.3 KOSPI top 30 100% 정확도 검증)
+  - `_ETN_NAME_KEYWORD = "ETN"`
   - `REJECTION_REASON_IS_ETF = "is_etf"`
   - `REJECTION_REASON_IS_PREF_STOCK = "is_pref_stock"`
 - [ ] `_load_filter_config()` 신규 4개 키 추가 + cfg fallback dict default reflect
 
-#### 1.2 ETF/우선주 헬퍼 함수
-- [ ] `_get_etf_ticker_set(today_str)` — pykrx 동적 조회 + lock 더블체크 캐시 + 정적 폴백
-- [ ] `_is_etf(ticker, today_str)` — 6자리 정규식 + ETF 리스트 매칭
-- [ ] `_is_pref_stock(ticker, name)` — 6자리 정규식 + 끝자리 AND 종목명 접미사
+#### 1.2 ETF/우선주 헬퍼 함수 (종목명 기반)
+- [ ] `_is_etf_or_etn(name)` — 종목명 brand prefix 매칭 (Step 0.3 검증) + ETN 키워드. None/빈 → False (보수)
+- [ ] `_is_pref_stock(ticker, name)` — 6자리 정규식 + 끝자리 AND 종목명 접미사 (Step 0.3 false positive 0건 검증)
 
 #### 1.3 차단 분기 (apply_attribute_filters)
 - [ ] **차단 분기 위치**: `for ticker in tickers:` 루프 첫 단계 (KIND severity if 블록 밖)
-- [ ] ETF → 우선주 순서 (first-rejection-only)
+- [ ] ETF/ETN → 우선주 순서 (first-rejection-only)
 - [ ] rejection_reason 모듈 상수 사용
-- [ ] `name_lookup_map` 인자 추가 또는 기존 KIS 응답에서 종목명 회수 (호출부 변경 영향 검증)
+- [ ] **`name_lookup_map: Optional[dict[str, str]] = None` keyword-only 인자 신규**
 - [ ] **로그 분해**: 카운트 4종 (`kind/etf/pref/attr`) + 첫 호출 1회 차단 list 진단 로그
+- [ ] py_compile 통과
+
+#### 1.4 universe_provider_v2.py 종목명 회수 (Step 0 신규 결정)
+- [ ] KIS ranking 응답에서 (ticker, name) 쌍 추출 헬퍼 신규
+- [ ] `get_universe_v2_filtered`가 name_lookup_map 누적 → universe_filters에 전달
+- [ ] 종목명 부재 종목은 `closing_bet_system/infra/name_lookup.py` 폴백 호출
 - [ ] py_compile 통과
 
 ### Step 2 — `kis_market_provider.py` lstn_stcn 자체 시총 계산
@@ -124,12 +123,12 @@
 
 ### Step 5 — 단위 테스트 (`scripts/test_closing_bet_unit_2_9f.py`) — 22건+
 
-#### 5.1 ETF 차단 (5건)
-- [ ] **ETF-1**: 069500 KODEX 200 → ETF 리스트 매칭 → 탈락
-- [ ] **ETF-2**: 102110 TIGER 200 → 매칭 → 탈락 (메이저 ETF 회귀)
-- [ ] **ETF-3**: 069080 웹젠 KOSDAQ 보통주 → ETF 리스트 미매칭 → **통과** (false positive 회귀)
-- [ ] **ETF-4**: 091990 셀트리온헬스케어 → 미매칭 → **통과** (false positive 회귀)
-- [ ] **ETF-5**: 토글 OFF → 069500 통과 (회귀)
+#### 5.1 ETF/ETN 차단 (5건, 종목명 기반 — Step 0.3 fixture)
+- [ ] **ETF-1**: name="KODEX 200" → brand 매칭 → 탈락
+- [ ] **ETF-2**: name="TIGER 반도체TOP10" → 매칭 → 탈락
+- [ ] **ETF-3**: name="삼성전자" → 미매칭 → **통과** (보통주 회귀)
+- [ ] **ETF-4**: name="신한 ETN-1F WTI원유 선물" 등 → ETN 키워드 → 탈락
+- [ ] **ETF-5**: 토글 OFF → "KODEX 200" 통과 (회귀)
 
 #### 5.2 우선주 차단 (5건)
 - [ ] **PREF-1**: 005935 삼성전자우 (끝자리 5 + 종목명 "삼성전자우") → AND → 탈락
@@ -155,9 +154,9 @@
 - [ ] **REGRESSION-3** (단위 2-9c): pykrx bulk 빈 응답 시 KIS 시총 보강 + 종목별 OHLCV 폴백 정상
 
 #### 5.6 Edge case (4건)
-- [ ] **EDGE-1**: ticker None/빈 문자열/5자리/7자리 → `_is_etf` / `_is_pref_stock` False (None safe)
+- [ ] **EDGE-1**: ticker None/빈 문자열/5자리/7자리 → `_is_etf_or_etn` / `_is_pref_stock` False (None safe)
 - [ ] **EDGE-2**: lstn_stcn 문자열 응답 (`"5846278608"`) → `_safe_int` 정상 처리
-- [ ] **EDGE-3**: pykrx ETF 리스트 호출 실패 → 정적 화이트리스트 폴백 + warning 로그
+- [ ] **EDGE-3**: name=None / 빈 문자열 → `_is_etf_or_etn` / `_is_pref_stock` False (보수적)
 - [ ] **EDGE-4**: ETF/우선주 토글 둘 다 OFF + 5/7 universe 18건 → 단위 2-9e 결과 그대로 재현 (회귀)
 
 ### Step 6 — code-tester 검증

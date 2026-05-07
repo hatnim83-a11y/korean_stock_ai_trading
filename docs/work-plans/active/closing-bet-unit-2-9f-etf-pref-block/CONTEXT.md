@@ -289,21 +289,105 @@ def _maybe_run_per_ticker_fallback(...) -> ...:
     return merged
 ```
 
-## 한국거래소 종목코드 체계 (사전 조사 결과 — Step 0에서 채워질 영역)
+## Step 0 사전 조사 결과 (2026-05-07 KST 19:50 완료)
 
-**우선주 코드 체계** (KOSPI 일반):
-- **일반 우선주**: 끝자리 5 (예: 005935 삼성전자우, 005385 현대차우)
-- **신형 우선주 (배당우선주)**: 끝자리 7 (예: 003547 대신증권1우C)
-- **사모전환우선주**: 끝자리 9 (드문 케이스)
-- **보통주**: 끝자리 0 (대다수)
+### 0.1 pykrx ETF 동적 조회 — ❌ **사용 불가 확정**
+- `pykrx.stock.get_etf_ticker_list("20260507")` → `KeyError: '시장'` (0.40초 만에 실패)
+- 단위 2-9c와 동일한 KRX API 정책 변경 영향
+- **결정**: ETF 차단을 정적 set이 아닌 **종목명 brand prefix 매칭** 방식으로 변경 (~800개 종목코드 set 유지보수 부담 회피)
+- probe 보존: `scripts/probe_pykrx_etf_list.py`
 
-**KOSDAQ 보통주 끝자리 5/7/9 사례** (사전 조사로 list-up 필요):
-- ?? (Step 0 결과 반영)
+### 0.2 KIS API `FID_DIV_CLS_CODE` 검증
 
-**ETF prefix 일반** (사전 조사 결과 반영):
-- 기존 추정: 069/091/114/117/153/292
-- 누락 추정: 102/122/233/252/360/419/466 등 38건+
-- **권장**: pykrx `get_etf_ticker_list()` 동적 조회 (정확) + 정적 폴백 (안전망)
+| Ranking | TR_ID | div_cls=0 (전체) 끝자리 분포 | div_cls=1 (보통주) 끝자리 분포 | 우선주 차단 | ETF 차단 |
+|---------|-------|---|---|:-:|:-:|
+| **volume_rank** | FHPST01710000 | 0:29건 / **5:1건 (005935)** + ETF 122630/069500 진입 | **0:30건** + ETF 그대로 진입 | ✅ | ❌ |
+| **fluctuation** | FHPST01700000 | 0:30건 (5/7 시점 우선주 0건) | 0:30건 (응답 동일) | 검증 불가 | ❌ |
+| **foreign_total** | FHPTJ04400000 | 0:30건 (응답 변화) | 0:30건 (응답 변화 — 지원 추정) | 검증 불가 | ❌ |
+
+**핵심 발견**:
+1. **volume_rank `FID_DIV_CLS_CODE=1`** → 우선주 source-level 차단 ✅ (5/7 005935 빠짐 직접 검증)
+2. **ETF는 native filter로 차단 안 됨** — 모든 ranking에서 div_cls=1로도 ETF 그대로 진입
+3. **5/7 우선주 005935 진입 출처 = volume_rank 확정** (top 5에 직접 발견)
+
+probe 보존: `scripts/probe_kis_div_cls.py`
+
+### 0.3 거래대금 top 30 ETF/우선주 분포 (5/7 19:48 KST 단발)
+
+**ETF/ETN 식별 결과 — 13/30건 = 43% 비중** (KIS volume-rank 자체에 ETF 다수):
+```
+KODEX 6건: 122630 KODEX 레버리지 / 069500 KODEX 200 / 091160 KODEX 반도체
+            252670 KODEX 200선물인버스2X / 114800 KODEX 인버스 / 379800 KODEX 미국S&P500
+            487240 KODEX AI전력핵심설비 / 233740 KODEX 코스닥150레버리지
+            494310 KODEX 반도체레버리지 / 229200 KODEX 코스닥150
+TIGER 3건: 396500 TIGER 반도체TOP10 / 102110 TIGER 200 / 360750 TIGER 미국S&P500
+```
+
+**우선주 식별 결과**:
+- 진성: 1건 (005935 삼성전자우, 끝자리 5 + 종목명 "우")
+- **false positive 후보 (끝자리 5/7/9 + 종목명 "우" 미포함): 0건** ✅
+- → KOSPI top 30 한정으로 AND 조건의 false positive 위험 검증 완료
+
+**종목명 brand 매칭 정확도**: 13/13 = **100%** — KODEX/TIGER prefix 단순 매칭으로 정확
+
+probe 보존: `scripts/probe_etf_pref_distribution.py`
+
+### 0.4 자기주식 영향 검증 (top 5 시총 종목, 5/7 19:48 KST)
+
+| 종목 | stck_avls × 1억 | lstn × prpr | 차이 |
+|---|---|---|---|
+| 005930 삼성전자 | 1,587,264,600,000,000 | 1,587,264,642,072,000 | **+0.000%** |
+| 000660 SK하이닉스 | 1,178,809,700,000,000 | 1,178,809,711,710,000 | **+0.000%** |
+| 005935 삼성전자우 | 148,759,600,000,000 | 148,759,621,036,200 | **+0.000%** |
+| 402340 SK스퀘어 | 145,022,300,000,000 | 145,022,266,214,000 | **-0.000%** |
+| 005380 현대차 | 117,121,400,000,000 | 117,121,442,152,000 | **+0.000%** |
+
+**핵심 발견**: 자기주식 영향 거의 0% (절대값 약 4천만~3억원, 시총 대비 0.000%대)
+- 단위 2-9e CONTEXT "~0.01~5% 차이" 추정 **과도** — 실제는 거의 동등
+- → 두 방식(`stck_avls × 1억` vs `lstn_stcn × stck_prpr`) 시총값 사실상 동등
+- → 우선순위 결정은 **정확도 차이가 아니라 데이터 가용성 차이**: top 200 한정 vs top 30 한정
+
+### Step 0 종합 결정사항 확정
+
+| 차단 대상 | 1차 방어 (source-level) | 2차 방어 (universe_filters) |
+|---|---|---|
+| **우선주** | volume_rank `FID_DIV_CLS_CODE=1` 토글 (Step 0.2 직접 검증) | 종목명 "우/우B/우C/우K" 접미사 + 끝자리 5/7/9 **AND 조건** |
+| **ETF/ETN** | 불가 (Step 0.2 검증) | **종목명 brand prefix 매칭** (KODEX/TIGER/... + ETN 키워드) |
+
+**자체 시총 계산 우선순위** (자기주식 영향 ≈ 0% 발견 반영):
+- 1순위: `stck_avls × 1억` (market_cap top 200 한정, 단위 2-9e 기존)
+- 2순위: `lstn_stcn × stck_prpr` (volume_rank top 30, top 200 외 종목 보강)
+- 3순위: 미매치 → `data_not_found` 탈락 (옵션 A 보수)
+
+**종목명 회수 경로** (신규 발견):
+- universe_filters는 ticker만 받음 → 종목명 회수 인프라 필요
+- 해결: universe_provider_v2.py가 KIS ranking 응답에서 (ticker, name) 쌍 회수 → name_lookup_map 누적 → universe_filters에 인자로 주입
+- 폴백: KIS ranking 응답에서 종목명 부재 시 closing_bet_system/infra/name_lookup.py (KIS get_stock_name + 캐시) 호출
+- 종목명 회수 실패 시 보수적 통과 (false positive 회피)
+
+### Step 0 게이트 통과
+- [x] pykrx 사용 불가 확정 → 종목명 brand 방식 채택
+- [x] KIS native filter 지원 범위 확정 (volume_rank 우선주만)
+- [x] 5/7 분포 실측 (top 30 ETF 13건, 우선주 1건, false positive 0건)
+- [x] 자기주식 영향 측정 (≈ 0% 확정 → 시총 보강 우선순위 = 가용성 기준)
+- [x] 종목명 회수 경로 결정 (universe_provider_v2 (ticker, name) 쌍 추출)
+
+## 한국거래소 종목코드 체계 (Step 0 결과로 갱신)
+
+**우선주 코드 체계**:
+- 일반 우선주: 끝자리 5 (예: 005935 삼성전자우, 005385 현대차우)
+- 신형 우선주 (배당우선주): 끝자리 7 (예: 003547 대신증권1우C)
+- 사모전환우선주: 끝자리 9 (드문 케이스)
+- 보통주: 끝자리 0 (대다수, KOSPI top 30 검증)
+
+**KOSPI 거래대금 top 30 (2026-05-07)**:
+- false positive 후보 0건 (끝자리 5/7/9 + 종목명 "우" 미포함 케이스 없음)
+- → AND 조건 안전 검증 완료
+
+**ETF brand 분포 (KOSPI top 30)**:
+- KODEX (삼성자산운용): 10건 (가장 빈번)
+- TIGER (미래에셋자산운용): 3건
+- (다른 brand는 top 30에 없음, 이외 시장에는 KOSEF/HANARO/ARIRANG/ACE/KBSTAR/SOL/KINDEX/RISE/PLUS/SMART 등 존재)
 
 ## 영향 범위
 - **universe v2 출력**: 5/7 18건 기준 우선주 1건 차단 → 17건. ETF 차단 추가 시 다른 영업일에 추가 감소 가능

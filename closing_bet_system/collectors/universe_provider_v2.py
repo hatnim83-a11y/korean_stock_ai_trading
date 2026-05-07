@@ -502,14 +502,51 @@ def get_universe_v2_filtered(
     if not universe_pool:
         return []
 
+    # 단위 2-9f — ETF/우선주 차단을 위한 종목명 회수 (보수적 폴백 — 실패 시 빈 dict)
+    # apply_all_filters는 name_lookup_map=None/빈 dict 시 ETF/우선주 단계 스킵 (false positive 회피).
+    name_lookup_map: dict[str, str] = {}
+    try:
+        from closing_bet_system.infra.name_lookup import get_name
+        for ticker in universe_pool:
+            try:
+                name = get_name(ticker)
+                if name and name != "(미상)":
+                    name_lookup_map[ticker] = name
+            except Exception:
+                continue
+        logger.info(
+            f"[universe_v2] 종목명 회수 — {len(name_lookup_map)}/{len(universe_pool)}건 "
+            f"(단위 2-9f ETF/우선주 차단용)"
+        )
+    except Exception as e:
+        logger.warning(
+            f"[universe_v2] 종목명 회수 실패 → ETF/우선주 차단 단계 스킵: {e}"
+        )
+
     try:
         from closing_bet_system.collectors.universe_filters import apply_all_filters
-        passed, rejected = apply_all_filters(universe_pool, severity_map=severity_map)
+        passed, rejected = apply_all_filters(
+            universe_pool,
+            severity_map=severity_map,
+            name_lookup_map=name_lookup_map or None,
+        )
         logger.info(
             f"[universe_v2] 필터 후 최종 universe: {len(passed)}/{len(universe_pool)}"
             f" (탈락 {len(rejected)})"
         )
         return passed
+    except TypeError:
+        # 단위 2-9b 패턴 — 호환성 폴백 (apply_all_filters가 구 시그니처일 경우)
+        try:
+            from closing_bet_system.collectors.universe_filters import apply_all_filters
+            passed, rejected = apply_all_filters(universe_pool, severity_map=severity_map)
+            logger.warning(
+                "[universe_v2] apply_all_filters 구 시그니처 폴백 — name_lookup_map 미전달"
+            )
+            return passed
+        except Exception as e:
+            logger.warning(f"[universe_v2] 필터 적용 실패 — unfiltered 반환: {e}")
+            return universe_pool
     except Exception as e:
         logger.warning(
             f"[universe_v2] 필터 적용 실패 — unfiltered 반환: {e}"

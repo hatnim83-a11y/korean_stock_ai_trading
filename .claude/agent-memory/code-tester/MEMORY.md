@@ -23,6 +23,19 @@
 - test 파일 `datetime.now()` / `date.today()` 사용: 테스트 파일이므로 배포 무관, P2 수준
 - test_schedule_constants 에서 `SUMMARY_SCHEDULE_MINUTE=35` 미검증 (테스트 커버리지 공백)
 
+### closing_bet_system universe_filters 단위 2-9f 패턴 (2026-05-07 검증 완료)
+- `_is_etf_or_etn(name)`: `name.startswith(tuple)` + ETN 키워드 — None/빈 str/비-string 모두 False (보수)
+- `_is_pref_stock(ticker, name)`: 끝자리 5/7/9 AND 종목명 접미사 "우/우B/우C/우K" AND 조건 — 6자리+isdigit 가드
+- `_compute_market_cap_from_response`: `_safe_int(lstn_stcn) × _safe_int(stck_prpr)` → int×int (IEEE754 정밀도 손실 없음), 0/음수/None → None 반환
+- 2순위 시총 보강 분기: `fallback_include_market_cap=True` 시에만 진입 + bulk 정상(`if bulk_result: return`) 보호 → ETF/우선주 차단과 독립
+- `_maybe_run_per_ticker_fallback` cfg fallback dict: 3개 키만(fallback_per_ticker_enabled/fallback_include_market_cap/kis_market_cap_top_n) — 신규 4개 키(etf_block_enabled 등)는 이 함수에서 참조 안 함 (apply_attribute_filters가 별도 _load_filter_config() 호출)
+- `get_top_value_data` 메서드 신규: get_top_value_codes 와 별도 유지 (호환성)
+- `_ETF_BRAND_PREFIXES` false positive 이론적 위험: WOORI/ACE/SOL 등 보통주 종목명이 이 prefix로 시작할 수 있음 → 실제 한국주식 종목명 한글 시작 특성상 false positive 0건 (Step 0.3 KOSPI top 30 실증)
+- `name_lookup_map or None` 전달 패턴: 빈 dict→None→차단 단계 스킵 (false positive 회피 보수)
+- TypeError 폴백 경로 (universe_provider_v2.py:538): 현 apply_all_filters 시그니처에서 TypeError 발생 불가 → dead code (기능 무관)
+- 테스트 헤더 주석 불일치: '24건' → 실제 34건 (116 기준 누적 계산 오류, 기능 무관)
+- `_maybe_run_per_ticker_fallback` 유효 라인 수: 126줄 — CONTEXT M2 helper 분리 미구현 (미래 확장 시 검토)
+
 ### kis_market_provider 핫픽스 패턴 (2026-05-07 단위 2-9d-hotfix 검증)
 - `_extract_ticker(item, ticker_keys)`: None 가드는 `if raw is None: continue` (str(None) 경로 차단)
   → int/bool 타입은 None 가드 통과 → str(0)='0', str(False)='False' 반환 → 정규식 탈락으로 무해

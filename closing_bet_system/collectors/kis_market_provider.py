@@ -89,6 +89,11 @@ DEFAULT_MARKET_CAP_TOP_N = 200
 # 005930: stck_avls=15,551,101 × 1억 = 1,555,110,100,000,000원 (= stck_prpr × lstn_stcn = inquire-price market_cap)
 _STCK_AVLS_UNIT_TO_WON = 100_000_000
 
+# 단위 2-9f — 발행주식수 응답 필드 (volume_rank/market_cap 응답에 존재)
+# Step 0.4 검증: lstn_stcn × stck_prpr ≈ stck_avls × 1억 (자기주식 영향 ≈ 0%, top 5 시총 종목 모두 +0.000% 차이)
+# 단위: lstn_stcn=주, stck_prpr=원, 곱=원 → 정규화 불필요
+_FIELD_LISTED_SHARES = "lstn_stcn"
+
 
 # ===== 헬퍼 =====
 
@@ -139,6 +144,26 @@ def _resolve_market_code(market: str) -> str:
     return _MARKET_TO_ISCD.get(market.upper(), _MARKET_TO_ISCD["ALL"])
 
 
+def _compute_market_cap_from_response(item: dict) -> Optional[int]:
+    """KIS ranking 응답 item에서 lstn_stcn × stck_prpr 자체 시총 계산 (단위 2-9f).
+
+    단위: lstn_stcn=주, stck_prpr=원, 곱=원 → 정규화 불필요.
+    `_safe_int` 둘 다 적용 → int × int = int (IEEE 754 정밀도 손실 없음).
+    Step 0.4 검증: stck_avls × 1억 (단위 2-9e) 대비 차이 ≈ 0% (자기주식 영향 무시 가능).
+
+    Args:
+        item: KIS ranking 응답의 한 종목 dict.
+
+    Returns:
+        시총(원, int) 또는 None (lstn_stcn/stck_prpr 부재 시).
+    """
+    lstn_stcn = _safe_int(item.get(_FIELD_LISTED_SHARES), default=0)
+    stck_prpr = _safe_int(item.get(_FIELD_PRICE), default=0)
+    if lstn_stcn <= 0 or stck_prpr <= 0:
+        return None
+    return lstn_stcn * stck_prpr  # int × int = int
+
+
 # ===== KISMarketProvider 클래스 =====
 
 
@@ -176,6 +201,80 @@ class KISMarketProvider:
         }
         items = self._call_ranking(_PATH_VOLUME_RANK, _TR_VOLUME_RANK, params, source="top_value")
         return _filter_valid_tickers(items, top_n)
+
+    def get_top_value_data(
+        self, top_n: int = DEFAULT_TOP_N, market: str = "ALL"
+    ) -> dict[str, dict]:
+        """거래대금 상위 N 종목 + lstn_stcn × stck_prpr 자체 시총 (단위 2-9f).
+
+        volume_rank 응답에 lstn_stcn (발행주식수) 존재 → market_cap top 200 한도 우회.
+        반환 dict 구조: ``{ticker: {market_cap, close, change_rate, lstn_stcn, name}}``
+
+        Args:
+            top_n: 상위 N (default DEFAULT_TOP_N=30).
+            market: ALL/KOSPI/KOSDAQ.
+
+        Returns:
+            ``{ticker: {market_cap, close, change_rate, lstn_stcn, name}}``.
+            mcap=None 종목은 entry["market_cap"] 키 미생성 (옵션 A 보수).
+        """
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": _resolve_market_code(market),
+            "FID_DIV_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "3",
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+            "FID_INPUT_PRICE_1": "",
+            "FID_INPUT_PRICE_2": "",
+            "FID_VOL_CNT": "",
+            "FID_INPUT_DATE_1": "",
+        }
+        items = self._call_ranking(_PATH_VOLUME_RANK, _TR_VOLUME_RANK, params, source="top_value_data")
+        result: dict[str, dict] = {}
+        if not items:
+            return result
+        seen: set[str] = set()
+        diagnosed = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            code = _extract_ticker(item)
+            if not _TICKER_PATTERN.match(code) or code in seen:
+                continue
+            seen.add(code)
+            entry: dict = {}
+            mcap = _compute_market_cap_from_response(item)
+            if mcap is not None:
+                entry["market_cap"] = mcap
+                # 단위 진단 로그 (첫 항목 1회) — 단위 2-9e 패턴 일관
+                if not diagnosed:
+                    lstn = _safe_int(item.get(_FIELD_LISTED_SHARES), default=0)
+                    prpr = _safe_int(item.get(_FIELD_PRICE), default=0)
+                    logger.info(
+                        f"[kis_market_provider] lstn_stcn × stck_prpr 자체 계산 — "
+                        f"{code} {lstn:,d} × {prpr:,d} = {mcap:,d}원 "
+                        f"(단위 2-9f, stck_avls × 1억 대비 차이 ≈ 0%)"
+                    )
+                    diagnosed = True
+            close = _safe_float(item.get(_FIELD_PRICE))
+            if close is not None and close > 0:
+                entry["close"] = close
+            chg = _safe_float(item.get(_FIELD_CHANGE_RATE))
+            if chg is not None:
+                entry["change_rate"] = chg
+            lstn_stcn = _safe_int(item.get(_FIELD_LISTED_SHARES), default=0)
+            if lstn_stcn > 0:
+                entry["lstn_stcn"] = lstn_stcn
+            name = item.get(_FIELD_NAME)
+            if name:
+                entry["name"] = str(name).strip()
+            if entry:
+                result[code] = entry
+            if len(result) >= top_n:
+                break
+        return result
 
     # ----- 출처 3: 등락률 상위 -----
 
