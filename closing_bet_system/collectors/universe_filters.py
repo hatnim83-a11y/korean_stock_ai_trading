@@ -419,6 +419,92 @@ def _fetch_market_data_bulk(
         return _merge_with_fallback_cache(result, today_str)
 
 
+def _enrich_market_cap_from_kis_top(
+    candidates: list[str],
+    fallback: dict[str, dict],
+    mcap_top_n: int,
+    n_input: int,
+) -> int:
+    """단위 2-9d/2-9e — KIS market-cap top N 으로 1순위 시총 보강.
+
+    호출자가 ``cfg.fallback_include_market_cap=True`` 분기 내부에서만 호출.
+    fallback dict 를 in-place mutate. matched 건수 반환.
+    예외 발생 시 caller 가 try/except 격리 (None 반환 대신 raise 전파).
+    """
+    from closing_bet_system.collectors.kis_market_provider import (
+        get_kis_market_provider,
+    )
+    mcap_data = get_kis_market_provider().get_top_market_cap_data(top_n=mcap_top_n)
+    matched = 0
+    for ticker in candidates:
+        if ticker in mcap_data:
+            fallback[ticker] = dict(mcap_data[ticker])
+            matched += 1
+    logger.info(
+        f"[universe_filters] 시총 보강 1순위 (단위 2-9d) — KIS market-cap top {mcap_top_n} "
+        f"중 {matched}/{n_input}건 매치"
+    )
+    return matched
+
+
+def _enrich_market_cap_from_volume_rank(
+    candidates: list[str],
+    fallback: dict[str, dict],
+) -> int:
+    """단위 2-9f — 1순위 미매치 종목에 volume_rank lstn_stcn × stck_prpr 자체 계산 (2순위 시총 보강).
+
+    Step 0.4 검증: stck_avls × 1억 ≈ lstn_stcn × stck_prpr (자기주식 영향 ≈ 0%).
+    KIS market-cap top 200 한도 우회 (top 30~50 등 추가 보강).
+    fallback dict mutate. unmatched 자동 산출 (fallback 미진입 candidates). matched 건수 반환.
+    """
+    unmatched = [t for t in candidates if t not in fallback]
+    if not unmatched:
+        return 0
+    from closing_bet_system.collectors.kis_market_provider import (
+        get_kis_market_provider,
+    )
+    # volume_rank DEFAULT_TOP_N=30 (kis_market_provider) — 단위 2-9f 시총 보강 2순위
+    vol_data = get_kis_market_provider().get_top_value_data(top_n=30)
+    matched = 0
+    for ticker in unmatched:
+        entry = vol_data.get(ticker)
+        if entry and "market_cap" in entry:
+            fallback[ticker] = dict(entry)
+            matched += 1
+    logger.info(
+        f"[universe_filters] 시총 보강 2순위 (단위 2-9f) — volume_rank 자체 계산 "
+        f"{matched}/{len(unmatched)}건 매치 (1순위 미매치 종목 대상)"
+    )
+    return matched
+
+
+def _enrich_ohlcv_per_ticker(
+    candidates: list[str],
+    fallback: dict[str, dict],
+    today_str: str,
+    krx,
+) -> tuple[int, float]:
+    """단위 2-9c — pykrx 종목별 by_date 폴백으로 OHLCV(close/change/value) 보강.
+
+    시총 보강(1순위/2순위) 데이터 위에 ``setdefault().update()`` 로 누적.
+    각 종목 호출 사이 ``FALLBACK_RATE_LIMIT_SEC`` 초 sleep (KRX 차단 방어).
+    (success_count, elapsed_sec) 반환.
+    """
+    success = 0
+    start = time.monotonic()
+    for ticker in candidates:
+        data = _fetch_per_ticker_today_data(ticker, today_str, krx)
+        if data:
+            fallback.setdefault(ticker, {}).update(data)
+            success += 1
+        try:
+            time.sleep(FALLBACK_RATE_LIMIT_SEC)
+        except Exception:
+            pass
+    elapsed = time.monotonic() - start
+    return success, elapsed
+
+
 def _maybe_run_per_ticker_fallback(
     today_str: str,
     tickers: Optional[list[str]],
@@ -429,8 +515,7 @@ def _maybe_run_per_ticker_fallback(
 
     **반드시 ``bulk_result`` 가 빈 dict 일 때만 호출되어야 한다** (단위 2-9c 설계).
     이 함수는 현재 ``_fetch_market_data_bulk`` 한 곳에서만 호출되며, 라인 354 의
-    ``if bulk_result: return`` 가드로 진입 자체가 차단된다. 다른 호출 지점이 추가될
-    경우 이 가드 외부에서 호출되지 않도록 주의.
+    ``if bulk_result: return`` 가드로 진입 자체가 차단된다.
 
     호출 조건 (모두 AND):
         - bulk_result 가 빈 dict (KRX bulk API 차단 시그널)
@@ -441,11 +526,12 @@ def _maybe_run_per_ticker_fallback(
     호출량 가드:
         ``MAX_FALLBACK_TICKERS=100`` (hard_cap 정합), 사이 ``FALLBACK_RATE_LIMIT_SEC=0.05``초.
 
-    시총 보강 우선순위 (단위 2-9d/2-9f):
-        1순위 (단위 2-9d): KIS market-cap top 200 매치 — `fallback_include_market_cap=True` 시.
-        2순위 (단위 2-9f): volume_rank lstn_stcn × stck_prpr 자체 계산 — 1순위 미매치 종목 대상.
-            **2순위도 `fallback_include_market_cap=True` 블록 안에 중첩됨** — 토글 OFF 시 두 단계 모두 스킵.
-        3순위: 미매치 종목은 market_cap None 유지 → apply_attribute_filters에서 옵션 A 보수 탈락.
+    시총 보강 우선순위 (헬퍼 분리, 단위 2-9 리팩토링):
+        1순위 (단위 2-9d): :func:`_enrich_market_cap_from_kis_top` — KIS market-cap top 200 매치.
+        2순위 (단위 2-9f): :func:`_enrich_market_cap_from_volume_rank` — 1순위 미매치 종목 대상.
+            **두 단계 모두 ``fallback_include_market_cap=True`` 블록 안에 중첩** — 토글 OFF 시 둘 다 스킵.
+        3순위: 미매치 → market_cap None 유지 → apply_attribute_filters 옵션 A 보수 탈락.
+        OHLCV 보강(단위 2-9c): :func:`_enrich_ohlcv_per_ticker` — 시총 위에 누적.
     """
     if bulk_result:
         return  # bulk 정상 → 폴백 스킵
@@ -487,75 +573,20 @@ def _maybe_run_per_ticker_fallback(
 
     fallback: dict[str, dict] = {}
 
-    # 단위 2-9d — KIS market-cap ranking 으로 시총 보강 (1순위, top 200 한도)
-    # KIS top N(default 200) 시총 데이터를 1회 호출 → candidates 중 매칭된 종목에 market_cap 채움.
-    # 매칭 안 된 종목은 단위 2-9f의 volume_rank 자체 계산으로 2순위 보강 후, 최종 미매치는
-    # market_cap None 유지 → 옵션 A 보수 탈락 (PRD 4-1 정합).
+    # 시총 보강 (1순위/2순위) — 토글 ON 시에만 실행, 단계별 try/except 격리
     if cfg.get("fallback_include_market_cap", DEFAULT_FALLBACK_INCLUDE_MARKET_CAP):
+        mcap_top_n = int(cfg.get("kis_market_cap_top_n", DEFAULT_KIS_MARKET_CAP_TOP_N))
         try:
-            from closing_bet_system.collectors.kis_market_provider import (
-                get_kis_market_provider,
-            )
-            mcap_top_n = int(
-                cfg.get("kis_market_cap_top_n", DEFAULT_KIS_MARKET_CAP_TOP_N)
-            )
-            mcap_data = get_kis_market_provider().get_top_market_cap_data(top_n=mcap_top_n)
-            matched = 0
-            for ticker in candidates:
-                if ticker in mcap_data:
-                    fallback[ticker] = dict(mcap_data[ticker])
-                    matched += 1
-            logger.info(
-                f"[universe_filters] 시총 보강 1순위 (단위 2-9d) — KIS market-cap top {mcap_top_n} "
-                f"중 {matched}/{n_input}건 매치"
-            )
+            _enrich_market_cap_from_kis_top(candidates, fallback, mcap_top_n, n_input)
         except Exception as e:
-            logger.warning(
-                f"[universe_filters] 1순위 시총 보강 실패 → 2순위 시도: {e}"
-            )
-
-        # 단위 2-9f — 1순위 미매치 종목에 대해 volume_rank lstn_stcn × stck_prpr 자체 계산 (2순위)
-        # Step 0.4 검증: stck_avls × 1억 ≈ lstn_stcn × stck_prpr (자기주식 영향 ≈ 0%)
-        # → KIS market-cap top 200 한도 우회 (top 30~50 등 추가 보강)
-        unmatched = [t for t in candidates if t not in fallback]
-        if unmatched:
-            try:
-                from closing_bet_system.collectors.kis_market_provider import (
-                    get_kis_market_provider,
-                )
-                # volume_rank top 30 호출 (기본값) → 자체 시총 계산
-                # 거래대금 큰 종목 위주로 candidates 와 겹칠 가능성 높음
-                # volume_rank DEFAULT_TOP_N=30 (kis_market_provider) — 단위 2-9f 시총 보강 2순위
-                vol_data = get_kis_market_provider().get_top_value_data(top_n=30)
-                matched_2 = 0
-                for ticker in unmatched:
-                    entry = vol_data.get(ticker)
-                    if entry and "market_cap" in entry:
-                        fallback[ticker] = dict(entry)
-                        matched_2 += 1
-                logger.info(
-                    f"[universe_filters] 시총 보강 2순위 (단위 2-9f) — volume_rank 자체 계산 "
-                    f"{matched_2}/{len(unmatched)}건 매치 (1순위 미매치 종목 대상)"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[universe_filters] 2순위 시총 보강 실패 → 옵션 A 보수 적용: {e}"
-                )
-
-    # 종목별 by_date 폴백 (close/change/value 채움 — 시총 보강 데이터 위에 누적)
-    success = 0
-    start = time.monotonic()
-    for ticker in candidates:
-        data = _fetch_per_ticker_today_data(ticker, today_str, krx)
-        if data:
-            # 시총 보강 데이터(있다면) 위에 OHLCV 추가
-            fallback.setdefault(ticker, {}).update(data)
-            success += 1
+            logger.warning(f"[universe_filters] 1순위 시총 보강 실패 → 2순위 시도: {e}")
         try:
-            time.sleep(FALLBACK_RATE_LIMIT_SEC)
-        except Exception:
-            pass
-    elapsed = time.monotonic() - start
+            _enrich_market_cap_from_volume_rank(candidates, fallback)
+        except Exception as e:
+            logger.warning(f"[universe_filters] 2순위 시총 보강 실패 → 옵션 A 보수 적용: {e}")
+
+    # OHLCV 보강 (단위 2-9c) — 시총 위에 누적
+    success, elapsed = _enrich_ohlcv_per_ticker(candidates, fallback, today_str, krx)
 
     _per_ticker_market_cache[today_str] = fallback
     logger.info(
