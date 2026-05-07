@@ -23,6 +23,16 @@
 - test 파일 `datetime.now()` / `date.today()` 사용: 테스트 파일이므로 배포 무관, P2 수준
 - test_schedule_constants 에서 `SUMMARY_SCHEDULE_MINUTE=35` 미검증 (테스트 커버리지 공백)
 
+### kis_market_provider 핫픽스 패턴 (2026-05-07 단위 2-9d-hotfix 검증)
+- `_extract_ticker(item, ticker_keys)`: None 가드는 `if raw is None: continue` (str(None) 경로 차단)
+  → int/bool 타입은 None 가드 통과 → str(0)='0', str(False)='False' 반환 → 정규식 탈락으로 무해
+  → KIS API JSON 응답은 항상 string 타입이므로 실전 발생 불가 (P3 이하)
+- `_TICKER_KEYS_DEFAULT = (mksc_shrn_iscd, stck_shrn_iscd)`: mksc 우선, stck fallback
+  → volume_rank/foreign_total/market_cap은 mksc만 반환 → fallback 경로 미사용 → 기존 동작 100% 보존
+  → fluctuation만 stck 반환 → fallback 경로로 정상 처리 (5/7 단발 조사 확인)
+- 두 키가 공존 시 mksc 우선 → 다른 종목코드 선택 위험 없음
+- 테스트 파일 헤더 주석 불일치: "91 + 14 = 105건" → 실제 25건 (116 누적이 맞음, 기능 무관)
+
 ### closing_bet_system universe_filters DEFAULT 방어 패턴 (2026-05-06 확인)
 - `DEFAULT_FALLBACK_INCLUDE_MARKET_CAP=False` (설정 로드 실패 시 안전 방향)
   settings.yaml=true, DEFAULT=false의 방향 역전은 의도적 (롤백/장애 안전망)

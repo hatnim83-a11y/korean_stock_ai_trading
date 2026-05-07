@@ -57,8 +57,13 @@ _PATH_FLUCTUATION = "/uapi/domestic-stock/v1/ranking/fluctuation"
 _PATH_FOREIGN_TOTAL = "/uapi/domestic-stock/v1/quotations/foreign-institution-total"
 _PATH_MARKET_CAP = "/uapi/domestic-stock/v1/ranking/market-cap"
 
-# 응답 컬럼명 (volume_rank 검증, 다른 ranking 동일 패턴 추정)
-_FIELD_TICKER = "mksc_shrn_iscd"            # 단축종목코드 (6자리)
+# 응답 컬럼명 — ranking 종류별 종목코드 필드명 차이 (단위 2-9d 핫픽스 / 5-7 단발 검증):
+#   volume_rank / foreign_total / market_cap → mksc_shrn_iscd
+#   fluctuation → stck_shrn_iscd (mksc 키 부재)
+# `_TICKER_KEYS_DEFAULT` 우선순위로 fallback. 두 키 모두 있으면 mksc 우선 사용.
+_FIELD_TICKER = "mksc_shrn_iscd"            # 단축종목코드 (6자리, primary)
+_FIELD_TICKER_ALT = "stck_shrn_iscd"        # fluctuation 응답용 alternate
+_TICKER_KEYS_DEFAULT: tuple[str, ...] = (_FIELD_TICKER, _FIELD_TICKER_ALT)
 _FIELD_NAME = "hts_kor_isnm"                # 종목명
 _FIELD_PRICE = "stck_prpr"                  # 현재가
 _FIELD_CHANGE_RATE = "prdy_ctrt"            # 등락률 (%)
@@ -88,17 +93,39 @@ _STCK_AVLS_UNIT_TO_WON = 100_000_000
 # ===== 헬퍼 =====
 
 
-def _filter_valid_tickers(items: list[dict], top_n: int) -> list[str]:
+def _extract_ticker(item: dict, ticker_keys: tuple[str, ...] = _TICKER_KEYS_DEFAULT) -> str:
+    """item에서 ticker_keys 순서로 빈 문자열/None이 아닌 첫 값을 종목코드로 반환.
+
+    단위 2-9d 핫픽스: KIS ranking 종류별 종목코드 필드명 차이 대응.
+    `mksc_shrn_iscd` 와 `stck_shrn_iscd` 양쪽 모두 시도하여 fluctuation 회귀 차단.
+    """
+    for key in ticker_keys:
+        raw = item.get(key)
+        if raw is None:
+            continue
+        code = str(raw).strip()
+        if code:
+            return code
+    return ""
+
+
+def _filter_valid_tickers(
+    items: list[dict],
+    top_n: int,
+    *,
+    ticker_keys: tuple[str, ...] = _TICKER_KEYS_DEFAULT,
+) -> list[str]:
     """output 리스트에서 6자리 종목코드만 추출 (중복 제거 + top_n 절단).
 
     KIS 응답이 비-6자리 코드를 포함할 수 있어 정규식으로 사전 필터링.
+    `ticker_keys` 우선순위로 fallback (단위 2-9d 핫픽스 — fluctuation `stck_shrn_iscd` 대응).
     """
     seen: set[str] = set()
     result: list[str] = []
     for item in items or []:
         if not isinstance(item, dict):
             continue
-        code = str(item.get(_FIELD_TICKER, "")).strip()
+        code = _extract_ticker(item, ticker_keys)
         if _TICKER_PATTERN.match(code) and code not in seen:
             seen.add(code)
             result.append(code)
@@ -232,7 +259,8 @@ class KISMarketProvider:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            code = str(item.get(_FIELD_TICKER, "")).strip()
+            # 단위 2-9d 핫픽스 — _extract_ticker 재사용으로 다중 필드 fallback
+            code = _extract_ticker(item)
             if not _TICKER_PATTERN.match(code) or code in seen:
                 continue
             seen.add(code)
