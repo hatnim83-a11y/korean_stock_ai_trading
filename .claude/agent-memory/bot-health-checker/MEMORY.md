@@ -70,6 +70,25 @@
 - **config.py:394-426** 신규 파라미터 7개: RSI_DYNAMIC_ENABLED=True, RSI_BULL_THRESHOLD=1.0, RSI_BEAR_THRESHOLD=-1.0, RSI_UPPER_BULL=75, RSI_UPPER_NORMAL=70, RSI_UPPER_BEAR=65, THEME_MIN_SLOT_ENABLED=True, THEME_SAFETY_FLOOR=25.0
 - **screening_log v14 컬럼**: rsi_at_screen, theme_slot_protected (집계 가능)
 
+## Daily Health Check 16:10 (확장 2026-05-07)
+**main.py:run_daily_health_check** (스케줄러 `daily_health_check` 잡, 평일 16:10 KST `_skip_on_holiday`).
+- 기존 7개 항목 + 신규 헬퍼 11개 = 18개 모니터링
+- 헬퍼 메서드 `_hc_*` (모두 `{"info": str|None, "issue": str|None}` 반환):
+  - `_hc_theme_score_pinning`: 테마 0 박제(zero=issue), NULL(info 폴백 대기), 정상 분리
+  - `_hc_screening_log_stages`: filter/gap_filter/ai_verify 3-stage 적재
+  - `_hc_phase_a_metrics`: theme_slot_protected 발동 + RSI 평균/최대
+  - `_hc_midweek_replacement`: midweek 교체 발생 시 알림
+  - `_hc_makeup_reselection`: 보정 재선정 발화 여부 (5/6 도입 검증)
+  - `_hc_trade_review_coverage`: 오늘 SELL vs trade_reviews 카운트
+  - `_hc_slippage_coverage`: 매도 slippage NULL 비율
+  - `_hc_systemd_dashboard`: trading_dashboard active 검증
+  - `_hc_disk_usage`: shutil.disk_usage, 90% 초과 시 issue
+  - `_hc_closing_bet_universe`: closing_bet.db candidates 오늘 건수
+  - `_hc_sell_lock_residual`: sell_lock.snapshot()로 잔존 락 카운트 (15:30 clear_all 검증)
+- 공휴일 false alarm 수정: yesterday 영업일 체크는 `is_trading_day(yesterday_date)` 사용
+- 텔레그램 메시지 ~534자 운영 범위 (4096 한계 여유)
+- 단위 테스트: tests/test_health_check.py 21건 PASS (운영 DB 시뮬레이션 + Stub 인스턴스)
+
 ## Recent Health Checks
 - **2026-04-27 10:50 KST (월)**: Phase A 첫 실전일. uptime 2일 정상. 09:05 스크리닝 78종목 중 12개 필터 통과(슬롯 보장 5건 첫 기록), AI 검증 5종목 → Yes 1건(한화오션 7.5점)/Hold 4건. 한화오션은 보유 종목이라 후보풀에서 제외 → 매수 후보 0개. 09:15 한화오션 보유기간 만료 매도(+2.24%). 09:25 매수 잡 정상 실행, MarketGuard NORMAL(+1.15%/+0.94%), 매수 후보 없어 스킵. 현 포트폴리오 LG디스플레이 1종목(-1.09%). KIS API 500 에러 2건/403 1건(자동 회복). Phase A 의도대로 작동 중.
 - **2026-04-10 09:10 KST (금)**: 테마 DB 버그 수정 후 재시작(09:04). 금융 1개 테마 운영. 09:05 스크리닝 20종목 중 7개 필터 통과→AI 검증 0건 통과(전부 Hold). 포트폴리오 4종목(클래시스 -1.31%, HD한국조선해양 -0.51%, HJ중공업 -2.14%, HPSP -2.31%). 누적 P&L +332,031원(+6.60%), 승률 70%. 디스크 65%. 좀비 프로세스 2개.

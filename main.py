@@ -37,7 +37,9 @@ import asyncio
 import argparse
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -3134,24 +3136,294 @@ class TradingSystem:
             logger.error(f"전략별 성과 집계 실패: {e}")
     
     # ===== 16:10 일일 시스템 헬스체크 =====
+    # 헬퍼 메서드들은 각자 dict를 반환:
+    #   {"info": str | None, "issue": str | None}
+    # info는 정상 상태 표시(없으면 메시지 생략), issue는 이상 항목
+
+    def _hc_theme_score_pinning(self, db: Database, today_str: str) -> dict:
+        """🔴 테마 점수 박제 회귀 감지 (selected=1 momentum/ai/news 모두 0/NULL)
+
+        2026-05-04~07 박제 회귀(theme-score-zero-fix)의 모니터링 항목.
+        3건 이상 발견 시 즉시 알림.
+        """
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT theme_name, momentum, ai_sentiment, news_count "
+                "FROM themes WHERE date=? AND selected=1",
+                (today_str,)
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return {"info": None, "issue": None}
+
+            # 박제 분류:
+            # - zero_pinned: 셋 다 실제 0 (회귀 의심) → issue
+            # - null_only: 셋 다 NULL (폴백 대기, 정상 흐름) → info
+            # - mixed_zero: 일부만 0 (정상 momentum_score=0 케이스 등) → 정상 처리
+            zero_pinned = [
+                r for r in rows
+                if r[1] == 0 and r[2] == 0 and r[3] == 0
+            ]
+            null_only = [
+                r for r in rows
+                if r[1] is None and r[2] is None and r[3] is None
+            ]
+            normal_count = len(rows) - len(zero_pinned) - len(null_only)
+
+            if len(zero_pinned) >= 3:
+                names = ", ".join(r[0] for r in zero_pinned[:3])
+                return {
+                    "info": None,
+                    "issue": f"테마 점수 박제 의심 {len(zero_pinned)}건 (셋 다 0): {names}",
+                }
+            info = f"테마 점수: 정상 {normal_count}건"
+            if null_only:
+                info += f" / NULL {len(null_only)}건 (폴백 대기, 다음 트리거 자동 복원)"
+            return {"info": info, "issue": None}
+        except Exception as e:
+            return {"info": None, "issue": f"테마 박제 체크 실패: {str(e)[:40]}"}
+
+    def _hc_screening_log_stages(self, db: Database, today_str: str) -> dict:
+        """🟡 screening_log 3단계 stage 적재 검증 (filter / gap_filter / ai_verify)"""
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT stage, COUNT(*) FROM screening_log WHERE date=? GROUP BY stage",
+                (today_str,)
+            )
+            stages = dict(cursor.fetchall())
+            filter_n = stages.get("filter", 0)
+            gap_n = stages.get("gap_filter", 0)
+            ai_n = stages.get("ai_verify", 0)
+
+            if filter_n == 0:
+                if not is_trading_day(now_kst().date()):
+                    return {"info": "스크리닝: 휴장일 (정상)", "issue": None}
+                return {"info": None, "issue": "screening_log filter stage 0건"}
+
+            return {
+                "info": f"스크리닝 로그: filter={filter_n} / gap={gap_n} / ai={ai_n}",
+                "issue": None,
+            }
+        except Exception as e:
+            return {"info": None, "issue": f"screening_log stage 체크 실패: {str(e)[:40]}"}
+
+    def _hc_phase_a_metrics(self, db: Database, today_str: str) -> dict:
+        """🟡 Phase A: theme_slot_protected 발동 + RSI 동적 임계값 분포"""
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*), AVG(rsi_at_screen), MAX(rsi_at_screen) "
+                "FROM screening_log WHERE date=? AND stage='filter' "
+                "AND rsi_at_screen IS NOT NULL",
+                (today_str,)
+            )
+            row = cursor.fetchone()
+            total, avg_rsi, max_rsi = row[0], row[1], row[2]
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM screening_log "
+                "WHERE date=? AND theme_slot_protected=1 AND passed=1",
+                (today_str,)
+            )
+            protected = cursor.fetchone()[0]
+
+            if total == 0:
+                return {"info": None, "issue": None}
+
+            info = f"Phase A: 슬롯 보장 {protected}건"
+            if avg_rsi is not None:
+                info += f" / RSI 평균 {avg_rsi:.1f} 최대 {max_rsi:.1f}"
+            return {"info": info, "issue": None}
+        except Exception as e:
+            return {"info": None, "issue": f"Phase A 체크 실패: {str(e)[:40]}"}
+
+    def _hc_midweek_replacement(self) -> dict:
+        """🟡 midweek 교체 발생 알림"""
+        if self._midweek_dropped_theme:
+            new_name = (
+                self._midweek_new_theme.get("theme_name")
+                if self._midweek_new_theme else "?"
+            )
+            return {
+                "info": f"주중 교체: ❌{self._midweek_dropped_theme} → 🆕{new_name}",
+                "issue": None,
+            }
+        return {"info": None, "issue": None}
+
+    def _hc_makeup_reselection(self) -> dict:
+        """🟡 보정 재선정 발화 감지 (오늘이 보정일이면 발화 여부 표시)"""
+        try:
+            today = now_kst().date()
+            is_makeup, missed_tue = is_makeup_reselection_day(today)
+            if not is_makeup or missed_tue is None:
+                return {"info": None, "issue": None}
+            rotation_date = self._last_theme_rotation_date
+            if rotation_date and rotation_date >= missed_tue:
+                return {
+                    "info": f"보정 재선정: 발화함 (직전 화 {missed_tue} 휴장)",
+                    "issue": None,
+                }
+            return {
+                "info": None,
+                "issue": (
+                    f"보정 재선정 미발화 의심 (오늘 보정일이나 "
+                    f"_last_theme_rotation_date={rotation_date} < {missed_tue})"
+                ),
+            }
+        except Exception as e:
+            return {"info": None, "issue": f"보정 재선정 체크 실패: {str(e)[:40]}"}
+
+    def _hc_trade_review_coverage(self, db: Database, today_str: str) -> dict:
+        """🟢 trade_reviews 누락 감지 (오늘 SELL vs review 카운트)"""
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM trades WHERE date=? AND action='sell'",
+                (today_str,)
+            )
+            sell_count = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT COUNT(*) FROM trade_reviews WHERE DATE(created_at)=?",
+                (today_str,)
+            )
+            review_count = cursor.fetchone()[0]
+
+            if sell_count == 0:
+                return {"info": None, "issue": None}
+            if review_count < sell_count:
+                return {
+                    "info": None,
+                    "issue": (
+                        f"trade_reviews 누락 의심 "
+                        f"(SELL {sell_count}건 vs review {review_count}건)"
+                    ),
+                }
+            return {"info": f"매도 review: {review_count}/{sell_count}건 적재", "issue": None}
+        except Exception as e:
+            return {"info": None, "issue": f"trade_reviews 체크 실패: {str(e)[:40]}"}
+
+    def _hc_slippage_coverage(self, db: Database, today_str: str) -> dict:
+        """🟢 매도 slippage 측정 적재율"""
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*), SUM(CASE WHEN slippage IS NULL THEN 1 ELSE 0 END) "
+                "FROM trades WHERE date=? AND action='sell'",
+                (today_str,)
+            )
+            row = cursor.fetchone()
+            total = row[0]
+            null_count = row[1] or 0
+            if total == 0:
+                return {"info": None, "issue": None}
+            if null_count == total:
+                return {
+                    "info": None,
+                    "issue": f"slippage 미측정 ({null_count}/{total}건 NULL)",
+                }
+            return {
+                "info": f"매도 slippage: {total - null_count}/{total}건 측정",
+                "issue": None,
+            }
+        except Exception as e:
+            return {"info": None, "issue": f"slippage 체크 실패: {str(e)[:40]}"}
+
+    def _hc_systemd_dashboard(self) -> dict:
+        """🟢 trading_dashboard 서비스 active 검증"""
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "trading_dashboard"],
+                capture_output=True, text=True, timeout=5
+            )
+            status = result.stdout.strip()
+            if status == "active":
+                return {"info": "trading_dashboard: active", "issue": None}
+            return {"info": None, "issue": f"trading_dashboard: {status}"}
+        except Exception as e:
+            return {"info": None, "issue": f"systemctl 체크 실패: {str(e)[:40]}"}
+
+    def _hc_disk_usage(self) -> dict:
+        """🟢 디스크 사용률"""
+        try:
+            usage = shutil.disk_usage(str(Path(__file__).parent))
+            used_pct = (usage.used / usage.total) * 100
+            free_gb = usage.free / (1024 ** 3)
+            if used_pct > 90:
+                return {
+                    "info": None,
+                    "issue": f"디스크 사용률 {used_pct:.0f}% (잔여 {free_gb:.1f}GB)",
+                }
+            return {
+                "info": f"디스크: {used_pct:.0f}% 사용 (잔여 {free_gb:.1f}GB)",
+                "issue": None,
+            }
+        except Exception as e:
+            return {"info": None, "issue": f"디스크 체크 실패: {str(e)[:40]}"}
+
+    def _hc_closing_bet_universe(self, today_str: str) -> dict:
+        """🔵 종가베팅 candidates 오늘 건수"""
+        try:
+            import sqlite3
+            cb_db = Path(__file__).parent / "data" / "closing_bet.db"
+            if not cb_db.exists():
+                return {"info": None, "issue": None}
+
+            conn = sqlite3.connect(str(cb_db))
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='candidates'"
+                )
+                if not cursor.fetchone():
+                    return {"info": None, "issue": None}
+                cursor.execute(
+                    "SELECT COUNT(*) FROM candidates WHERE trade_date=?", (today_str,)
+                )
+                count = cursor.fetchone()[0]
+            finally:
+                conn.close()
+
+            if count == 0:
+                return {"info": None, "issue": None}
+            return {"info": f"종가베팅 candidates: {count}건", "issue": None}
+        except Exception:
+            return {"info": None, "issue": None}  # 종가베팅은 옵션, 실패 무시
+
+    def _hc_sell_lock_residual(self) -> dict:
+        """🔵 SellLock 잔존 락 카운트 (15:30 stop_monitoring clear_all 검증)"""
+        try:
+            snap = sell_lock.snapshot()
+            count = len(snap)
+            if count == 0:
+                return {"info": "SellLock: 잔존 락 0건", "issue": None}
+            # 16:10 시점은 장 마감(15:30) 이후 — clear_all 발동했으면 0이어야 함
+            return {
+                "info": None,
+                "issue": (
+                    f"SellLock 잔존 의심 (장 마감 후 {count}건 — "
+                    f"15:30 clear_all 미발동 가능): {list(snap.keys())[:3]}"
+                ),
+            }
+        except Exception as e:
+            return {"info": None, "issue": f"SellLock 체크 실패: {str(e)[:40]}"}
 
     async def run_daily_health_check(self) -> None:
-        """일일 시스템 상태 점검 및 텔레그램 보고 (16:10)"""
+        """일일 시스템 상태 점검 및 텔레그램 보고 (16:10 KST)"""
         logger.info("=" * 60)
         logger.info("🏥 일일 시스템 헬스체크 (16:10)")
         logger.info("=" * 60)
 
         try:
-            issues = []
-            info_lines = []
+            issues: list[str] = []
+            info_lines: list[str] = []
             today_str = str(now_kst().date())
 
-            # 1. 프로세스 상태
-            import os
-            pid = os.getpid()
-            info_lines.append(f"PID: {pid}")
+            # ===== 1. 프로세스 PID =====
+            info_lines.append(f"PID: {os.getpid()}")
 
-            # 2. DB 상태
+            # ===== 2. DB 기반 항목 =====
             db = Database()
             db.connect()
             try:
@@ -3162,53 +3434,54 @@ class TradingSystem:
                     prate = (h.get("profit_rate", 0) or 0) * 100
                     info_lines.append(f"  {h['stock_name']} {prate:+.1f}%")
 
-                # 오늘 매매
+                # 오늘 매매 + 실현 손익
                 today_trades = db.get_trades(now_kst().date())
                 buys = [t for t in today_trades if t.get("action") == "buy"]
                 sells = [t for t in today_trades if t.get("action") == "sell"]
                 info_lines.append(f"오늘 매매: 매수 {len(buys)}건, 매도 {len(sells)}건")
-
-                # 실현 손익
                 if sells:
                     realized = sum(t.get("profit_amount", 0) or 0 for t in sells)
                     info_lines.append(f"실현 손익: {realized:+,.0f}원")
 
-                # 테마 데이터 수집 확인 (전일분 — 당일 17:05는 아직 미실행)
+                # 전일 테마 수집 확인 (공휴일 false alarm 방지: is_trading_day 사용)
                 cursor = db.conn.cursor()
-                yesterday_str = str((now_kst() - timedelta(days=1)).date())
+                yesterday_date = (now_kst() - timedelta(days=1)).date()
+                yesterday_str = str(yesterday_date)
                 cursor.execute(
                     "SELECT COUNT(*) FROM themes WHERE date = ?", (yesterday_str,)
                 )
                 theme_count = cursor.fetchone()[0]
                 if theme_count > 0:
-                    info_lines.append(f"테마 수집(전일): {theme_count}개 저장됨")
+                    info_lines.append(f"테마 수집(전일): {theme_count}개")
+                elif not is_trading_day(yesterday_date):
+                    info_lines.append(f"테마 수집: 전일 휴장 (정상, {yesterday_str})")
                 else:
-                    # 월요일이면 금요일 확인
-                    if now_kst().weekday() == 0:
-                        info_lines.append("테마 수집: 주말 미실행 (정상)")
-                    else:
-                        issues.append(f"테마 수집 미확인 ({yesterday_str})")
+                    issues.append(f"테마 수집 미확인 ({yesterday_str})")
 
                 # 스냅샷 확인
                 cursor.execute(
                     "SELECT COUNT(*) FROM daily_snapshots WHERE date = ?", (today_str,)
                 )
-                snap = cursor.fetchone()[0]
-                if snap == 0:
+                if cursor.fetchone()[0] == 0:
                     issues.append("일일 스냅샷 미저장")
 
-                # screening_log 확인
-                cursor.execute(
-                    "SELECT COUNT(*) FROM screening_log WHERE date = ?", (today_str,)
-                )
-                screen_count = cursor.fetchone()[0]
-                info_lines.append(f"스크리닝 로그: {screen_count}건")
-
+                # 신규 헬퍼 호출 (DB 의존 항목)
+                # 2026-05-07 추가: 박제/3-stage/Phase A/midweek/makeup/review/slippage
+                for hc in (
+                    self._hc_theme_score_pinning(db, today_str),
+                    self._hc_screening_log_stages(db, today_str),
+                    self._hc_phase_a_metrics(db, today_str),
+                    self._hc_trade_review_coverage(db, today_str),
+                    self._hc_slippage_coverage(db, today_str),
+                ):
+                    if hc.get("info"):
+                        info_lines.append(hc["info"])
+                    if hc.get("issue"):
+                        issues.append(hc["issue"])
             finally:
                 db.close()
 
-            # 3. API 연결 상태
-            # KIS API
+            # ===== 3. KIS API =====
             try:
                 bal = self.trading_engine.get_balance()
                 if bal:
@@ -3219,30 +3492,45 @@ class TradingSystem:
             except Exception as e:
                 issues.append(f"KIS API: {str(e)[:40]}")
 
-            # Telegram (이미 보내고 있으면 정상)
+            # ===== 4. Telegram (수신 자체가 정상 증거) =====
             info_lines.append("Telegram: 정상 (이 메시지 수신 시)")
 
-            # 4. pause 상태
+            # ===== 5. pause 상태 =====
             if self.trading_paused:
                 info_lines.append("매매 상태: ⏸️ 일시정지")
             else:
                 info_lines.append("매매 상태: ▶️ 활성")
 
-            # 5. 테마 정보
+            # ===== 6. 활성 테마 =====
             if self.today_themes:
                 theme_names = [t.get("theme", t.get("name", "?")) for t in self.today_themes]
                 info_lines.append(f"활성 테마: {', '.join(theme_names)}")
             else:
                 issues.append("활성 테마 없음")
 
-            # 6. 스케줄러 상태
+            # ===== 7. 스케줄러 =====
             if self.scheduler.is_running:
                 jobs = self.scheduler.scheduler.get_jobs()
                 info_lines.append(f"스케줄러: 정상 ({len(jobs)}개 작업)")
             else:
                 issues.append("스케줄러 중지됨")
 
-            # 보고서 작성
+            # ===== 8. 신규 헬퍼 (DB 비의존) =====
+            # 2026-05-07 추가: midweek/makeup/dashboard/disk/closing-bet/sell-lock
+            for hc in (
+                self._hc_midweek_replacement(),
+                self._hc_makeup_reselection(),
+                self._hc_systemd_dashboard(),
+                self._hc_disk_usage(),
+                self._hc_closing_bet_universe(today_str),
+                self._hc_sell_lock_residual(),
+            ):
+                if hc.get("info"):
+                    info_lines.append(hc["info"])
+                if hc.get("issue"):
+                    issues.append(hc["issue"])
+
+            # ===== 보고서 작성 =====
             status = "⚠️ 이상 발견" if issues else "✅ 정상"
             msg = f"🏥 *일일 헬스체크* ({now_kst().strftime('%m/%d %H:%M')})\n\n"
             msg += f"상태: {status}\n\n"
