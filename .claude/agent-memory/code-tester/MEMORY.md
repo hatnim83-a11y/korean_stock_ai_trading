@@ -23,6 +23,14 @@
 - test 파일 `datetime.now()` / `date.today()` 사용: 테스트 파일이므로 배포 무관, P2 수준
 - test_schedule_constants 에서 `SUMMARY_SCHEDULE_MINUTE=35` 미검증 (테스트 커버리지 공백)
 
+### closing_bet_system universe_filters DEFAULT 방어 패턴 (2026-05-06 확인)
+- `DEFAULT_FALLBACK_INCLUDE_MARKET_CAP=False` (설정 로드 실패 시 안전 방향)
+  settings.yaml=true, DEFAULT=false의 방향 역전은 의도적 (롤백/장애 안전망)
+- `_maybe_run_per_ticker_fallback`: 유일 호출자는 `_fetch_market_data_bulk` (라인 333)
+  → `DEFAULT_FALLBACK_INCLUDE_MARKET_CAP` 변경의 영향 범위 = 해당 함수만
+- patch.object(uf, "time")으로 time 모듈 전체 교체 가능 (`import time` 방식이라 유효)
+- pandas import가 테스트 함수 내 로컬 import(`import pandas as pd`) — 상단 전역 import 없음 (정상)
+
 ### closing_bet_system candidate_logger 패턴 (2026-05-04 검증 완료)
 - `log_labels INSERT OR REPLACE`: 두 번째 호출 시 미전달 컬럼(next_open_pct 등) NULL로 덮어씌워짐
   → T+1 09:30 라벨링 시 모든 컬럼을 한 번에 전달해야 함 (부분 UPDATE 불가)
@@ -320,6 +328,18 @@
 - 더블체크 lock 패턴: v1과 동일, race condition 없음 확인
 - isinstance(t, str) 필터: pykrx str 인덱스 → 항상 True (no-op이지만 방어 목적으로 유지)
 - 18개 단위 테스트 전체 PASS 확인 (2026-05-04, 수정 후 재실행)
+
+### 테마 점수 박제 회귀 핫픽스 패턴 (2026-05-07 검증)
+- `_coalesce_zero` + `_pick_momentum` 헬퍼: main.py 모듈 레벨, 테스트 import 정상
+- `is_zero_pinned` 조건의 **알려진 false positive**: momentum=0.0 + ai=0.0 + news=0 동시 충족 시
+  오탐 가능. 단, 이 경우 get_score_fallback이 None 반환하면 원본값 보존 (기능 안전)
+  반면 직전에 양수값이 있으면 이전 양수값으로 덮어쓰기 발생 — 미래 위험 요소로 기록
+  → momentum=0.0 발생 조건: avg_return <= -10% (클램프 하한 정확히 도달 시)
+- `get_score_fallback_for_theme`: momentum > 0 필터 → momentum=0.0인 정상값 소스 배제 (의도됨)
+- repair_theme_zeros_2026_05.py: `shutil.copy2(.db만)` 백업 — **WAL 4.1MB 미포함**
+  → 서비스 구동 중 실행 시 WAL의 변경사항 backup에 없음 → 롤백 시 유실
+  → 안전 실행 순서: systemctl stop → repair → systemctl start 권장 (스크립트에 안내 없음)
+- repair_theme_zeros_2026_05.py line 44: `datetime.now()` UTC → 백업 파일 타임스탬프 KST+9h 불일치 (기능 무관)
 
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`

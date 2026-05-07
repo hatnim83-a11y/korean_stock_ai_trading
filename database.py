@@ -692,6 +692,38 @@ class Database:
 
             return [dict(row) for row in rows]
 
+    def get_score_fallback_for_theme(
+        self, theme_name: str, target_date: date
+    ) -> Optional[dict]:
+        """
+        selected=1 row의 momentum/ai/news가 0/NULL 박제일 때 폴백 데이터 조회.
+
+        UNIQUE(date, theme_name) 제약으로 같은 (date, theme_name)에 selected=0/1 공존 불가 →
+        직전 selected=1 정상값에서 폴백.
+
+        Args:
+            theme_name: 테마명
+            target_date: 박제 발생한 날짜
+
+        Returns:
+            {"momentum", "supply_ratio", "news_count", "ai_sentiment"} dict
+            또는 None (폴백 데이터 없음)
+        """
+        with self.get_cursor() as cursor:
+            # 직전 selected=1 정상값 조회 (가장 최근부터)
+            cursor.execute("""
+                SELECT momentum, supply_ratio, news_count, ai_sentiment
+                FROM themes
+                WHERE theme_name = ? AND date < ? AND selected = 1
+                  AND momentum IS NOT NULL AND momentum > 0
+                ORDER BY date DESC LIMIT 1
+            """, (theme_name, target_date))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+
+            return None
+
     def get_last_theme_analysis_date(self) -> Optional[date]:
         """
         마지막 테마 선정 날짜 조회 (서비스 재시작 시 7일 로테이션 복원용)

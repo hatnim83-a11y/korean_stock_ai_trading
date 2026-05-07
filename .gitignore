@@ -45,6 +45,9 @@ logs/
 # Database
 data/*.db
 data/*.bak.*
+data/*.backup_*
+data/*.db-wal
+data/*.db-shm
 *.sqlite3
 
 # Cache

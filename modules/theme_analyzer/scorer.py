@@ -649,6 +649,8 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
         selection_reason = ", ".join(reasons) if reasons else "기본조건충족"
 
         # 원본 테마 정보에 점수 추가
+        # 주의: main.py:_pick_momentum 폴백 체인이 momentum/momentum_score 양쪽 키 존재에 의존.
+        #       한쪽 키만 남기는 변경은 main.py 수정과 동시 진행 필수 (회귀 방지).
         scored_theme = {
             **theme,
             "theme": theme_name,

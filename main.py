@@ -73,6 +73,33 @@ from modules.morning_filter.candidate_observer import CandidateObserver
 from modules.post_trade_analyzer import PostTradeAnalyzer
 
 
+def _coalesce_zero(v):
+    """SQL NULL → 0, 실제 0/0.0 → 그대로 보존.
+
+    momentum=0.0 (5일 수익률 -10% 정상값)을 NULL과 구분하기 위해 `or 0` 대신 사용.
+    """
+    return 0 if v is None else v
+
+
+def _pick_momentum(t: dict):
+    """테마 dict에서 momentum 값을 안전하게 추출.
+
+    polling 순서: momentum_score → momentum → 0
+    - 정규 재선정 직후 today_themes (scorer.py:658-659): 양쪽 키 보유, momentum_score 우선 매치
+    - DB 복원본 (database.py:693, themes 컬럼명): momentum 키만 보유 → 폴백
+    - 둘 다 없는 회귀 박제 시나리오: 0 반환
+
+    is None 체크로 momentum_score=0.0 (실제 정상값) 보존.
+
+    의존: scorer.py:658-659 momentum/momentum_score 양쪽 키 동시 출력 (변경 시 동시 수정 필수)
+    """
+    for key in ("momentum_score", "momentum"):
+        v = t.get(key)
+        if v is not None:
+            return v
+    return 0
+
+
 class TradingSystem:
     """
     한국 주식 AI 스윙 트레이딩 시스템
@@ -183,7 +210,35 @@ class TradingSystem:
             # DB에서 최근 테마도 복원
             themes_from_db = self.db.get_top_themes(last_date, count=settings.TOP_THEME_COUNT)
             if themes_from_db:
+                # 박제 데이터 폴백: selected=1 row의 momentum/ai/news 모두 0/NULL이면
+                # 같은 날 selected=0 일별 수집 또는 직전 정상값에서 보강.
+                # 5/4 박제 회귀 같은 케이스 사후 자동 회복 (subsequent restart 시 발동)
+                for t in themes_from_db:
+                    mom = t.get("momentum")
+                    ai = t.get("ai_sentiment")
+                    nc = t.get("news_count")
+                    is_zero_pinned = (
+                        (mom is None or mom == 0) and
+                        (ai is None or ai == 0) and
+                        (nc is None or nc == 0)
+                    )
+                    if is_zero_pinned:
+                        fb = self.db.get_score_fallback_for_theme(t["theme_name"], last_date)
+                        if fb:
+                            old_mom = mom
+                            t["momentum"] = fb.get("momentum") if fb.get("momentum") is not None else mom
+                            t["supply_ratio"] = fb.get("supply_ratio") if fb.get("supply_ratio") is not None else t.get("supply_ratio")
+                            t["news_count"] = fb.get("news_count") if fb.get("news_count") is not None else nc
+                            t["ai_sentiment"] = fb.get("ai_sentiment") if fb.get("ai_sentiment") is not None else ai
+                            logger.info(
+                                f"   📊 박제 데이터 폴백: {t['theme_name']} "
+                                f"momentum {old_mom}→{t['momentum']}, ai_sentiment →{t['ai_sentiment']}"
+                            )
+
                 # DB 행을 코드 내부 형식으로 정규화 (name+theme 양쪽 키 포함)
+                # 점수 4개 키(momentum/supply_ratio/news_count/ai_sentiment)도 포함하여
+                # 다음 영업일 "기존 테마 유지" 분기 저장 시 0 박제 방지
+                # SQL NULL과 실제 0(정상값)을 구분하기 위해 _coalesce_zero 사용
                 normalized = [
                     {
                         "name": t["theme_name"],
@@ -192,6 +247,10 @@ class TradingSystem:
                         "total_score": t["score"],
                         "url": t.get("url", ""),
                         "category": t.get("category", "기타"),
+                        "momentum": _coalesce_zero(t.get("momentum")),
+                        "supply_ratio": _coalesce_zero(t.get("supply_ratio")),
+                        "news_count": _coalesce_zero(t.get("news_count")),
+                        "ai_sentiment": _coalesce_zero(t.get("ai_sentiment")),
                     }
                     for t in themes_from_db
                 ]
@@ -431,14 +490,18 @@ class TradingSystem:
 
                 # 서비스 재시작 시 테마 복원을 위해 당일 날짜로 DB 저장
                 try:
+                    # today_themes 출처에 따라 momentum 키명이 다름:
+                    # - 정규 재선정 직후 (scorer 결과): momentum_score + momentum 양쪽 키 보유
+                    # - DB 복원본 (get_top_themes): momentum 키만 보유
+                    # _pick_momentum이 폴백 체인으로 양쪽 처리 (is None 체크로 실제 0 보존)
                     themes_to_save = [
                         {
                             "theme": t.get("theme", t.get("name", "")),
                             "score": t.get("score", 0),
-                            "momentum": t.get("momentum", 0),
-                            "supply_ratio": t.get("supply_ratio", 0),
-                            "news_count": t.get("news_count", 0),
-                            "ai_sentiment": t.get("ai_sentiment", 0),
+                            "momentum": _pick_momentum(t),
+                            "supply_ratio": _coalesce_zero(t.get("supply_ratio")),
+                            "news_count": _coalesce_zero(t.get("news_count")),
+                            "ai_sentiment": _coalesce_zero(t.get("ai_sentiment")),
                             "category": t.get("category", "기타"),
                             "url": t.get("url", ""),
                         }
@@ -1947,6 +2010,9 @@ class TradingSystem:
             t for t in self.today_themes
             if t.get("theme", t.get("name", "")) != dropped_name
         ]
+        # replacement는 db.get_daily_theme_scores 결과 (themes 테이블 SELECT *) →
+        # momentum/supply_ratio/news_count/ai_sentiment 컬럼 보유 (NULL 가능)
+        # _coalesce_zero로 NULL → 0 폴백, 다음 영업일 "기존 테마 유지" 분기 0 박제 방지
         self.today_themes.append({
             "name": replacement["theme_name"],
             "theme": replacement["theme_name"],
@@ -1954,18 +2020,24 @@ class TradingSystem:
             "total_score": replacement["score"],
             "category": replacement.get("category", "기타"),
             "url": replacement.get("url", ""),
+            "momentum": _coalesce_zero(replacement.get("momentum")),
+            "supply_ratio": _coalesce_zero(replacement.get("supply_ratio")),
+            "news_count": _coalesce_zero(replacement.get("news_count")),
+            "ai_sentiment": _coalesce_zero(replacement.get("ai_sentiment")),
         })
 
         # DB themes 테이블에 전체 활성 테마 selected=1 마킹 (교체 결과 반영)
+        # today_themes는 정규 재선정 결과(momentum_score 키) 또는 DB 복원본(momentum 키) 혼재 →
+        # _pick_momentum 폴백 체인 + _coalesce_zero NULL 방어
         try:
             all_active = [
                 {
                     "theme": t.get("theme", t.get("name", "")),
                     "score": t.get("score", 0),
-                    "momentum": t.get("momentum", 0),
-                    "supply_ratio": t.get("supply_ratio", 0),
-                    "news_count": t.get("news_count", 0),
-                    "ai_sentiment": t.get("ai_sentiment", 0),
+                    "momentum": _pick_momentum(t),
+                    "supply_ratio": _coalesce_zero(t.get("supply_ratio")),
+                    "news_count": _coalesce_zero(t.get("news_count")),
+                    "ai_sentiment": _coalesce_zero(t.get("ai_sentiment")),
                     "category": t.get("category", "기타"),
                     "url": t.get("url", ""),
                 }
