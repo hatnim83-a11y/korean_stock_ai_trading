@@ -463,8 +463,8 @@ def _enrich_market_cap_from_volume_rank(
     from closing_bet_system.collectors.kis_market_provider import (
         get_kis_market_provider,
     )
-    # volume_rank DEFAULT_TOP_N=30 (kis_market_provider) — 단위 2-9f 시총 보강 2순위
-    vol_data = get_kis_market_provider().get_top_value_data(top_n=30)
+    # top_n 은 kis_market_provider.DEFAULT_TOP_N(=30) 단일 source — 명시 인자 미사용
+    vol_data = get_kis_market_provider().get_top_value_data()
     matched = 0
     for ticker in unmatched:
         entry = vol_data.get(ticker)
