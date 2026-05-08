@@ -175,6 +175,7 @@ class Database:
             (12, "themes에 url 컬럼 추가", self._migrate_v12),
             (13, "themes 산업재→금융 재분류", self._migrate_v13),
             (14, "screening_log 관찰 컬럼 2개 추가 (RSI·슬롯 보호)", self._migrate_v14),
+            (15, "portfolio buy_message 컬럼 추가", self._migrate_v15),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -474,6 +475,16 @@ class Database:
                 )
             except Exception:
                 pass
+
+    def _migrate_v15(self) -> None:
+        """portfolio 테이블에 buy_message 컬럼 추가.
+
+        매수 시점 텔레그램 알림 메시지 전문(테마/수급/기술지표/AI 사유 등)을 종목별로 보존하여
+        대시보드 호버 툴팁에서 매수 컨텍스트를 즉시 확인할 수 있도록 한다.
+        """
+        with self.get_cursor() as cursor:
+            if not self._has_column("portfolio", "buy_message"):
+                cursor.execute("ALTER TABLE portfolio ADD COLUMN buy_message TEXT")
 
     def init_tables(self) -> None:
         """
@@ -903,6 +914,26 @@ class Database:
 
         logger.info(f"포트폴리오 조회: {len(portfolio)}개 종목 ({status})")
         return portfolio
+
+    def update_portfolio_buy_message(self, stock_code: str, message: str) -> int:
+        """포트폴리오의 가장 최근 holding row에 매수 시점 텔레그램 메시지 저장.
+
+        같은 종목 재매수 케이스에서 옛 행은 status='replaced'로 보존되므로
+        가장 최근 holding row(id DESC LIMIT 1)만 갱신한다.
+
+        Returns:
+            업데이트된 row 수 (0이면 holding row 없음)
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE portfolio SET buy_message = ?
+                WHERE id = (
+                    SELECT id FROM portfolio
+                    WHERE stock_code = ? AND status = 'holding'
+                    ORDER BY id DESC LIMIT 1
+                )
+            """, (message, stock_code))
+            return cursor.rowcount
 
     def update_portfolio_price(
         self,

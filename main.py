@@ -1509,6 +1509,7 @@ class TradingSystem:
                 f"({settings.MAX_STOCKS_PER_THEME}→{settings.MAX_STOCKS_PER_THEME_RELAXED})"
             )
         lines.append(f"\n📥 신규 매수: {bought_count}종목\n")
+        per_stock_messages: dict[str, str] = {}
         for i, o in enumerate(new_buy_orders, 1):
             code = o.get('stock_code', '')
             name = o.get('stock_name', code)
@@ -1518,6 +1519,7 @@ class TradingSystem:
             price = o.get('price', 0)
             ai = ai_lookup.get(code, {})
 
+            block_start = len(lines)
             lines.append(f"{i}. {name} ({code}) — {amount:,}원")
 
             # 테마
@@ -1559,12 +1561,11 @@ class TradingSystem:
             reason = ai.get('ai_reason', '')
             if sentiment:
                 conf_pct = f"{confidence * 100:.0f}%" if confidence else ""
-                reason_short = reason[:40] if reason else ""
                 ai_line = f"🤖 AI {sentiment:.1f}/10"
                 if conf_pct:
                     ai_line += f" ({conf_pct})"
-                if reason_short:
-                    ai_line += f" — {reason_short}"
+                if reason:
+                    ai_line += f" — {reason}"
                 lines.append(ai_line)
 
             # 손절/목표
@@ -1575,7 +1576,20 @@ class TradingSystem:
             elif stop_loss or take_profit:
                 lines.append(f"⚡ 손절 {stop_loss:,.0f}원 / 목표 {take_profit:,.0f}원")
 
+            # 종목별 메시지 블록 추출 (빈 줄 추가 전 시점까지)
+            if code:
+                per_stock_messages[code] = "\n".join(lines[block_start:]).rstrip()
+
             lines.append("")  # 종목 간 빈 줄
+
+        # 매수 메시지 DB 저장 (송신 실패와 무관하게 보존)
+        for code, msg in per_stock_messages.items():
+            try:
+                rowcount = self.db.update_portfolio_buy_message(code, msg)
+                if rowcount == 0:
+                    logger.warning(f"buy_message UPDATE 0 row: {code} (holding row 없음)")
+            except Exception as e:
+                logger.warning(f"buy_message 저장 실패 {code}: {e}")
 
         # 탈락 종목 (매수 있는 경우에도 표시)
         if excluded_lines:
@@ -1583,7 +1597,10 @@ class TradingSystem:
             lines.append(f"\n❌ 탈락: {len(excluded_lines)}종목")
             lines.extend(excluded_lines)
 
-        self.notifier.send_message("\n".join(lines))
+        final_msg = "\n".join(lines)
+        if len(final_msg) > 4000:
+            final_msg = final_msg[:4000] + "\n…(메시지 길이 초과로 일부 생략)"
+        self.notifier.send_message(final_msg)
     
     # ===== 모니터링 (V2: 분할 익절 + 트레일링 스탑) =====
     

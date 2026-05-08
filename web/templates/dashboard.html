@@ -460,6 +460,27 @@ tr:hover td { background: var(--bg-elevated); }
   .chart-container { padding: var(--sp-sm); margin-bottom: 10px; }
   .error-log { font-size: 0.68rem; }
 }
+
+/* ===== Buy-message hover tooltip ===== */
+.buy-msg-tooltip {
+  position: fixed;
+  max-width: 480px;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  z-index: 9999;
+  pointer-events: none;
+  display: none;
+}
+#portfolio-table tbody tr[data-buy-msg] td:nth-child(1) {
+  cursor: help;
+}
 </style>
 </head>
 <body>
@@ -656,6 +677,9 @@ const fmtPct = n => n != null ? (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%'
 const profitClass = n => n >= 0 ? 'profit-plus' : 'profit-minus';
 const valueClass = n => n >= 0 ? 'plus' : 'minus';
 const badgeLvl = l => `<span class="badge badge-l${l}">L${l}</span>`;
+const escapeHtml = s => s == null ? '' : String(s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
 // ===== Clock =====
 function updateClock() {
@@ -708,9 +732,9 @@ async function loadPortfolio() {
   if (!holdingsData.length) {
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-tertiary)">보유 종목 없음</td></tr>';
   } else {
-    tbody.innerHTML = holdingsData.map(h => `<tr>
-      <td><strong>${h.stock_name}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${h.stock_code}</span></td>
-      <td>${h.theme || '-'}</td>
+    tbody.innerHTML = holdingsData.map(h => `<tr data-buy-msg="${escapeHtml(h.buy_message || '')}">
+      <td><strong>${escapeHtml(h.stock_name)}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${escapeHtml(h.stock_code)}</span></td>
+      <td>${escapeHtml(h.theme || '-')}</td>
       <td>${fmt(h.shares)}</td>
       <td>${fmt(h.buy_price)}</td>
       <td>${fmt(h.current_price)}</td>
@@ -1112,9 +1136,9 @@ function updatePortfolioTable(d) {
 
   const tbody = document.getElementById('portfolio-body');
   if (!d.holdings.length) return;
-  tbody.innerHTML = d.holdings.map(h => `<tr>
-    <td><strong>${h.stock_name}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${h.stock_code}</span></td>
-    <td>${h.theme || '-'}</td>
+  tbody.innerHTML = d.holdings.map(h => `<tr data-buy-msg="${escapeHtml(h.buy_message || '')}">
+    <td><strong>${escapeHtml(h.stock_name)}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${escapeHtml(h.stock_code)}</span></td>
+    <td>${escapeHtml(h.theme || '-')}</td>
     <td>${fmt(h.shares)}</td>
     <td>${fmt(h.buy_price)}</td>
     <td>${fmt(h.current_price)}</td>
@@ -1125,6 +1149,59 @@ function updatePortfolioTable(d) {
     <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
   </tr>`).join('');
 }
+
+// ===== Buy-message Hover Tooltip (종목명 셀 한정, 셀 기준 고정 위치) =====
+(function setupBuyMsgTooltip() {
+  const tooltipEl = document.createElement('div');
+  tooltipEl.className = 'buy-msg-tooltip';
+  document.body.appendChild(tooltipEl);
+
+  const tbody = document.getElementById('portfolio-body');
+  if (!tbody) return;
+
+  const FALLBACK = '이 종목은 매수 메시지 저장 기능 도입 전 매수되어 컨텍스트가 없습니다.';
+  const TOOLTIP_W = 480;
+  const TOOLTIP_MAX_H = 320;
+
+  function showFor(td) {
+    const tr = td.closest('tr[data-buy-msg]');
+    if (!tr) return;
+    const msg = tr.dataset.buyMsg;
+    tooltipEl.textContent = msg && msg.length > 0 ? msg : FALLBACK;
+    tooltipEl.style.display = 'block';
+
+    const rect = td.getBoundingClientRect();
+    // 우측에 띄우되 화면 우측 넘으면 좌측으로
+    let left = rect.right + 12;
+    if (left + TOOLTIP_W > window.innerWidth - 8) {
+      left = rect.left - TOOLTIP_W - 12;
+      if (left < 8) left = Math.max(8, window.innerWidth - TOOLTIP_W - 8);
+    }
+    // 셀 상단에 정렬, 화면 하단 넘으면 위로 끌어올림
+    let top = rect.top;
+    if (top + TOOLTIP_MAX_H > window.innerHeight - 8) {
+      top = window.innerHeight - TOOLTIP_MAX_H - 8;
+    }
+    tooltipEl.style.left = Math.max(8, left) + 'px';
+    tooltipEl.style.top = Math.max(8, top) + 'px';
+  }
+
+  tbody.addEventListener('mouseover', (e) => {
+    const td = e.target.closest('#portfolio-table tbody td:first-child');
+    if (!td) return;
+    showFor(td);
+  });
+  tbody.addEventListener('mouseout', (e) => {
+    const td = e.target.closest('#portfolio-table tbody td:first-child');
+    if (!td) return;
+    // 같은 셀 내부 자식으로 이동하는 경우는 무시
+    if (e.relatedTarget && td.contains(e.relatedTarget)) return;
+    tooltipEl.style.display = 'none';
+  });
+  window.addEventListener('scroll', () => {
+    tooltipEl.style.display = 'none';
+  }, { passive: true });
+})();
 
 // ===== Initial Load =====
 loadPortfolio();

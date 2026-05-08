@@ -143,6 +143,7 @@ async def get_portfolio_data() -> dict:
             "trailing_stop_price": ts.get("trailing_stop_price"),
             "highest_price": ts.get("highest_price"),
             "max_profit_rate": ts.get("max_profit_rate"),
+            "buy_message": h.get("buy_message") or "",
         })
 
     unrealized_pnl = total_eval - total_invest
