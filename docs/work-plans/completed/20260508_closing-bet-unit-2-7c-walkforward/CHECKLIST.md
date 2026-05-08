@@ -137,11 +137,11 @@
   - `scripts/test_phase25_simulator.py` (수정)
   - `scripts/test_phase25_walkforward.py` (신규)
   - `docs/improvements/phase25_ev_report_20260508.md` (생성된 리포트)
-- [ ] git commit + push (완료 게이트 직전 진행)
+- [x] git commit (커밋 65d42c6, 5/8 KST 22:00)
 
 ## 문서 업데이트 항목
-- [ ] `docs/improvements/change_log.md` 1줄 추가 (단위 2-7c)
-- [ ] `memory/project_closing_bet_followups.md` 단위 2-7c 완료 + 단위 2-8 진입 표시
+- [x] `docs/improvements/change_log.md` 1줄 추가 (단위 2-7c)
+- [x] `memory/project_closing_bet_followups.md` 단위 2-7c 완료 + 후속 단위 2-3 / 2-7c 실측 / 2-8 진입 권고 표시
 - [x] (선택) `memory/project_closing_bet_system.md` 2-7c 단락 추가 — 본 단위에서는 followups에 흡수
 
 ## 완료 게이트 (선언 전 체크)
@@ -150,9 +150,9 @@
 - [x] 단위 테스트 15건+ PASS (실측 26 + 13 = 39건)
 - [x] code-tester 통과 (심각 0건, 주의 2건 모두 즉시 수정 — datetime.now→now_kst, win_loss n_stop_risk=0 inf 처리)
 - [x] 통합 검증 + md 리포트 생성 전부 `[x]`
-- [ ] 배포 항목 전부 `[x]` (commit + push 잔여)
-- [ ] 문서 업데이트 항목 전부 `[x]` (change_log + followups 잔여)
-- [ ] active → completed/20260508_closing-bet-unit-2-7c-walkforward/ 아카이브
+- [x] 배포 항목 전부 `[x]` (커밋 65d42c6)
+- [x] 문서 업데이트 항목 전부 `[x]` (change_log + followups)
+- [x] active → completed/20260508_closing-bet-unit-2-7c-walkforward/ 아카이브 (5/8 KST 22:00)
 
 ## 비범위 (명시)
 - 자동매매 진입 결정 → **단위 2-8** (100건 게이트 + 사용자 승인)
