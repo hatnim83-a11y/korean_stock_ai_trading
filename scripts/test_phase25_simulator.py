@@ -22,6 +22,7 @@ from closing_bet_system.backtest.phase25_simulator import (
     SCENARIO_EXCLUDED,
     SCENARIO_MARKET_OPEN,
     SCENARIO_MORNING_EXIT,
+    SCENARIO_SPLIT,
     SCENARIO_STOP_RISK,
     EVReport,
     SimulationResult,
@@ -140,6 +141,59 @@ def test_SC_6_cost_deduction_verified():
     print(f"✅ SC-6 비용 차감: morning_exit +1.2% → net {result.simulated_net_pnl_pct:.4%}")
 
 
+def test_SC_9_aggressive_both_labels():
+    """SC-9: policy='aggressive' + 양립 라벨 → morning_exit 우선 (옵션 B)."""
+    engine = _make_engine()
+    row = _row(label_stop_risk=True, label_morning_exit=True, next_open_pct=0.0)
+    result = simulate_candidate(row, policy="aggressive", cost_engine=engine)
+    assert result.scenario == SCENARIO_MORNING_EXIT, f"aggressive=익절 우선 (실제: {result.scenario})"
+    assert result.simulated_exit_pct == _MORNING_EXIT_TARGET_PCT
+    assert result.simulated_net_pnl_pct > 0  # 익절 net 양수
+    print("✅ SC-9 aggressive 양립 라벨 → morning_exit 우선")
+
+
+def test_SC_10_split_both_labels_average():
+    """SC-10: policy='split' + 양립 라벨 → SCENARIO_SPLIT, net_pnl=morning/stop 평균."""
+    engine = _make_engine()
+    row = _row(label_stop_risk=True, label_morning_exit=True, next_open_pct=0.0)
+    result = simulate_candidate(row, policy="split", cost_engine=engine)
+    assert result.scenario == SCENARIO_SPLIT
+    # exit_pct 평균: (+0.012 + -0.010) / 2 = +0.001
+    expected_exit = (_MORNING_EXIT_TARGET_PCT + _STOP_RISK_TARGET_PCT) / 2.0
+    assert abs(result.simulated_exit_pct - expected_exit) < 1e-10
+
+    # net_pnl 평균 = (morning_net + stop_net) / 2 — 양수와 음수 평균이라 음수 경향
+    # morning_net ≈ +0.0079, stop_net ≈ -0.0141 → 평균 ≈ -0.0031
+    morning_only = _row(label_morning_exit=True)
+    stop_only = _row(label_stop_risk=True)
+    rm = simulate_candidate(morning_only, cost_engine=engine)
+    rs = simulate_candidate(stop_only, cost_engine=engine)
+    expected_pnl = (rm.simulated_net_pnl_pct + rs.simulated_net_pnl_pct) / 2.0
+    assert abs(result.simulated_net_pnl_pct - expected_pnl) < 1e-10
+    print(f"✅ SC-10 split 양립 라벨 → 평균 net_pnl={result.simulated_net_pnl_pct:+.5f}")
+
+
+def test_SC_11_options_equivalent_for_single_label():
+    """SC-11: 단일 라벨 행은 옵션 A/B/C 모두 동일 결과 (회귀)."""
+    engine = _make_engine()
+    # 단일 morning 라벨
+    row_m = _row(label_morning_exit=True)
+    r_a = simulate_candidate(row_m, policy="conservative", cost_engine=engine)
+    r_b = simulate_candidate(row_m, policy="aggressive", cost_engine=engine)
+    r_c = simulate_candidate(row_m, policy="split", cost_engine=engine)
+    assert r_a.scenario == r_b.scenario == r_c.scenario == SCENARIO_MORNING_EXIT
+    assert r_a.simulated_net_pnl_pct == r_b.simulated_net_pnl_pct == r_c.simulated_net_pnl_pct
+
+    # 단일 stop 라벨
+    row_s = _row(label_stop_risk=True)
+    r_a2 = simulate_candidate(row_s, policy="conservative", cost_engine=engine)
+    r_b2 = simulate_candidate(row_s, policy="aggressive", cost_engine=engine)
+    r_c2 = simulate_candidate(row_s, policy="split", cost_engine=engine)
+    assert r_a2.scenario == r_b2.scenario == r_c2.scenario == SCENARIO_STOP_RISK
+    assert r_a2.simulated_net_pnl_pct == r_b2.simulated_net_pnl_pct == r_c2.simulated_net_pnl_pct
+    print("✅ SC-11 단일 라벨 → 옵션 A/B/C 동일 (회귀)")
+
+
 def test_SC_8_one_side_null_to_market_open():
     """SC-8: 한쪽 라벨 NULL → 나머지 라벨로 판단 (excluded 아님).
 
@@ -168,7 +222,7 @@ def test_SC_7_invalid_policy():
     engine = _make_engine()
     row = _row(label_morning_exit=True)
     try:
-        simulate_candidate(row, policy="aggressive", cost_engine=engine)
+        simulate_candidate(row, policy="not_a_policy", cost_engine=engine)
         raise AssertionError("ValueError 발생해야 함")
     except ValueError as e:
         assert "scenario_policy" in str(e)
@@ -371,7 +425,7 @@ def test_EDGE_2_unsupported_policy_dataset():
     engine = _make_engine()
     df = pd.DataFrame([_row(label_morning_exit=True)])
     try:
-        simulate_dataset(df, policy="aggressive", cost_engine=engine)
+        simulate_dataset(df, policy="not_a_policy", cost_engine=engine)
         raise AssertionError("ValueError 발생해야 함")
     except ValueError:
         pass
@@ -412,6 +466,9 @@ def main():
         test_SC_6_cost_deduction_verified,
         test_SC_7_invalid_policy,
         test_SC_8_one_side_null_to_market_open,
+        test_SC_9_aggressive_both_labels,
+        test_SC_10_split_both_labels_average,
+        test_SC_11_options_equivalent_for_single_label,
         # DS: simulate_dataset 통합
         test_DS_1_normal_dataframe,
         test_DS_2_empty_df,

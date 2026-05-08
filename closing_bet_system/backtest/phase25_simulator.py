@@ -25,12 +25,26 @@ PRD 12-2 EV 계산식::
 
     (cost_slippage_engine.compute_pnl이 net_pnl_pct에 이미 비용 차감 → 이중 차감 X)
 
-시나리오 매핑 우선순위 (옵션 A "conservative"):
+시나리오 매핑 우선순위:
+
+옵션 A "conservative" (손실 회피):
 1. ``label_stop_risk=True`` → ``stop_risk`` 시나리오 (-1.0% 매도)
 2. ``label_morning_exit=True`` → ``morning_exit`` 시나리오 (+1.2% 매도)
 3. 둘 다 False → ``market_open`` 시나리오 (next_open_pct 매도)
-4. 라벨 **둘 다 NULL** → ``excluded`` (시뮬 제외).
-   한쪽만 NULL이면 나머지 라벨로 판단 (예: stop=None, morning=False → market_open).
+4. 라벨 **둘 다 NULL** → ``excluded``.
+
+옵션 B "aggressive" (낙관, 익절 우선):
+1. ``label_morning_exit=True`` → ``morning_exit`` 시나리오 (+1.2% 매도)
+2. ``label_stop_risk=True`` → ``stop_risk`` 시나리오 (-1.0% 매도)
+3. 둘 다 False → ``market_open`` / 둘 다 NULL → ``excluded``.
+
+옵션 C "split" (50/50 평균):
+1. 양립 라벨(stop=morning=True) → ``split`` 시나리오 (morning_exit/stop_risk 평균 net_pnl)
+2. 단일 라벨 → ``stop_risk`` 또는 ``morning_exit`` (conservative와 동일)
+3. 둘 다 False → ``market_open`` / 둘 다 NULL → ``excluded``.
+
+옵션 A/B/C 공통:
+- 한쪽만 NULL이면 나머지 라벨로 판단 (예: stop=None, morning=False → market_open).
 
 실행 예시:
     >>> from closing_bet_system.backtest.phase25_data_loader import load_phase25_dataset
@@ -72,14 +86,15 @@ _STOP_RISK_TARGET_PCT = -0.010     # -1.0%
 _DEFAULT_BUY_PRICE = 10000.0
 _DEFAULT_SHARES = 1
 
-# 시나리오 정책
+# 시나리오 정책 (단위 2-7c 옵션 B/C 추가, 2026-05-08)
 _DEFAULT_SCENARIO_POLICY = "conservative"
-_VALID_SCENARIO_POLICIES = ("conservative",)  # 옵션 B/C는 단위 2-7c
+_VALID_SCENARIO_POLICIES = ("conservative", "aggressive", "split")
 
 # 시나리오 식별자
 SCENARIO_STOP_RISK = "stop_risk"
 SCENARIO_MORNING_EXIT = "morning_exit"
 SCENARIO_MARKET_OPEN = "market_open"
+SCENARIO_SPLIT = "split"          # 옵션 C: 양립 라벨 평균 (단위 2-7c)
 SCENARIO_EXCLUDED = "excluded"
 
 # 결과 컬럼명 (simulate_dataset 가 추가)
@@ -111,7 +126,11 @@ class EVReport:
     """전체 데이터셋 EV 통계 (PRD 12-2 정합).
 
     Phase 2.5 (단위 2-7b): ``raw_ev == net_ev`` (cost_engine.compute_pnl이 이미 비용
-    차감, 이중 차감 방지). 옵션 B/C 도입 (단위 2-7c) 시 raw_ev ≠ net_ev 분기 가능.
+    차감, 이중 차감 방지).
+
+    옵션 C "split" 도입 (단위 2-7c) 시 split 시나리오 카운트는 별도 항으로 분리:
+    raw_ev = p_morning * mean_profit + p_stop * mean_loss + p_open * mean_open
+           + p_split * mean_split. 옵션 A/B에서는 n_split=0 / p_split=0 / mean_split=0.
     """
 
     n_total: int
@@ -132,6 +151,11 @@ class EVReport:
     net_ev: float               # raw_ev (단위 2-7b는 이미 비용 차감, 이중 차감 X)
     cost_basis: float           # 참고: cost_engine.round_trip_cost (include_slippage=True)
 
+    # 옵션 C "split" 전용 (옵션 A/B에서는 0). default 추가로 회귀 영향 방지.
+    n_split: int = 0
+    p_split: float = 0.0
+    mean_split_pct: float = 0.0
+
 
 # ===== Public API =====
 
@@ -147,7 +171,8 @@ def simulate_candidate(
     Args:
         row: candidate row (dict 또는 pd.Series).
             필수 키: candidate_id, ticker, label_stop_risk, label_morning_exit, next_open_pct.
-        policy: 시나리오 우선순위 정책. 현재 ``"conservative"`` 만 지원.
+        policy: 시나리오 우선순위 정책.
+            ``"conservative"`` (옵션 A) / ``"aggressive"`` (옵션 B) / ``"split"`` (옵션 C).
         cost_engine: 의존성 주입 (테스트용). None 시 ``get_engine()`` 싱글톤.
 
     Returns:
@@ -173,7 +198,22 @@ def simulate_candidate(
             excluded_reason=excluded_reason,
         )
 
-    # 가상 매수/매도 PnL — buy_price 정규화 단위(10000원)에 등락률 적용
+    # 옵션 C "split": morning_exit + stop_risk 결과 평균
+    if scenario == SCENARIO_SPLIT:
+        morning_pnl = _compute_pnl_pct(engine, _MORNING_EXIT_TARGET_PCT)
+        stop_pnl = _compute_pnl_pct(engine, _STOP_RISK_TARGET_PCT)
+        avg_pnl = (morning_pnl + stop_pnl) / 2.0
+        avg_exit_pct = (_MORNING_EXIT_TARGET_PCT + _STOP_RISK_TARGET_PCT) / 2.0
+        return SimulationResult(
+            candidate_id=cid,
+            ticker=ticker,
+            scenario=scenario,
+            simulated_exit_pct=float(avg_exit_pct),
+            simulated_net_pnl_pct=float(avg_pnl),
+            excluded_reason=None,
+        )
+
+    # 단일 시나리오: 가상 매수/매도 PnL (buy_price 10000원 정규화 + 등락률)
     sell_price = _DEFAULT_BUY_PRICE * (1.0 + exit_pct)
     breakdown = engine.compute_pnl(
         buy_price=_DEFAULT_BUY_PRICE,
@@ -281,23 +321,28 @@ def compute_ev(
     morning_mask = valid["scenario"] == SCENARIO_MORNING_EXIT
     stop_mask = valid["scenario"] == SCENARIO_STOP_RISK
     open_mask = valid["scenario"] == SCENARIO_MARKET_OPEN
+    split_mask = valid["scenario"] == SCENARIO_SPLIT
 
     n_morning = int(morning_mask.sum())
     n_stop = int(stop_mask.sum())
     n_open = int(open_mask.sum())
+    n_split = int(split_mask.sum())
 
     p_morning = n_morning / n_simulated
     p_stop = n_stop / n_simulated
     p_open = n_open / n_simulated
+    p_split = n_split / n_simulated
 
     mean_profit = _safe_mean(valid.loc[morning_mask, "simulated_net_pnl_pct"])
     mean_loss = _safe_mean(valid.loc[stop_mask, "simulated_net_pnl_pct"])
     mean_market_open = _safe_mean(valid.loc[open_mask, "simulated_net_pnl_pct"])
+    mean_split = _safe_mean(valid.loc[split_mask, "simulated_net_pnl_pct"])
 
     raw_ev = (
         p_morning * mean_profit
         + p_stop * mean_loss
         + p_open * mean_market_open
+        + p_split * mean_split
     )
     # 이중 차감 방지: simulated_net_pnl_pct 가 이미 비용/슬리피지 차감 후 순수익률.
     # cost_basis 는 참고 메타일 뿐, raw_ev 에서 추가로 빼면 안 됨.
@@ -318,6 +363,9 @@ def compute_ev(
         raw_ev=raw_ev,
         net_ev=net_ev,
         cost_basis=cost_basis,
+        n_split=n_split,
+        p_split=p_split,
+        mean_split_pct=mean_split,
     )
 
 
@@ -330,7 +378,10 @@ def _map_scenario(
 ) -> tuple[str, Optional[float], Optional[str]]:
     """시나리오 매핑 → (scenario, exit_pct, excluded_reason).
 
-    옵션 A "conservative": stop_risk → morning_exit → market_open → excluded.
+    정책별 우선순위:
+    - "conservative" (옵션 A): stop_risk → morning_exit → market_open → excluded
+    - "aggressive"   (옵션 B): morning_exit → stop_risk → market_open → excluded
+    - "split"        (옵션 C): 양립 시 SCENARIO_SPLIT, 단일 라벨은 conservative 동일
     """
     stop = _safe_bool(row.get("label_stop_risk"))
     morning = _safe_bool(row.get("label_morning_exit"))
@@ -340,18 +391,40 @@ def _map_scenario(
     if stop is None and morning is None:
         return SCENARIO_EXCLUDED, None, "missing_labels"
 
-    if stop is True:
-        return SCENARIO_STOP_RISK, _STOP_RISK_TARGET_PCT, None
+    # 옵션 C "split": 양립 라벨 시 SCENARIO_SPLIT (exit_pct는 평균 계산을 simulate_candidate에서)
+    if policy == "split" and stop is True and morning is True:
+        return SCENARIO_SPLIT, None, None
 
-    if morning is True:
-        return SCENARIO_MORNING_EXIT, _MORNING_EXIT_TARGET_PCT, None
+    # 옵션 B "aggressive": morning 우선
+    if policy == "aggressive":
+        if morning is True:
+            return SCENARIO_MORNING_EXIT, _MORNING_EXIT_TARGET_PCT, None
+        if stop is True:
+            return SCENARIO_STOP_RISK, _STOP_RISK_TARGET_PCT, None
+    else:
+        # 옵션 A "conservative" 또는 옵션 C "split"의 단일 라벨 분기
+        if stop is True:
+            return SCENARIO_STOP_RISK, _STOP_RISK_TARGET_PCT, None
+        if morning is True:
+            return SCENARIO_MORNING_EXIT, _MORNING_EXIT_TARGET_PCT, None
 
-    # 둘 다 False (또는 한쪽이 None이고 다른 쪽이 False)
+    # 둘 다 False (또는 한쪽 None + 다른쪽 False)
     open_pct = _safe_float(open_pct_raw)
     if open_pct is None:
         return SCENARIO_EXCLUDED, None, "missing_open_pct"
 
     return SCENARIO_MARKET_OPEN, open_pct, None
+
+
+def _compute_pnl_pct(engine: CostSlippageEngine, exit_pct: float) -> float:
+    """단일 등락률에 대한 net_pnl_pct 계산 (옵션 C split의 평균 계산용)."""
+    sell_price = _DEFAULT_BUY_PRICE * (1.0 + exit_pct)
+    breakdown = engine.compute_pnl(
+        buy_price=_DEFAULT_BUY_PRICE,
+        sell_price=sell_price,
+        shares=_DEFAULT_SHARES,
+    )
+    return float(breakdown.net_pnl_pct)
 
 
 def _safe_bool(value) -> Optional[bool]:

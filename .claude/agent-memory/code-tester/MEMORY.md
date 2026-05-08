@@ -23,6 +23,17 @@
 - test 파일 `datetime.now()` / `date.today()` 사용: 테스트 파일이므로 배포 무관, P2 수준
 - test_schedule_constants 에서 `SUMMARY_SCHEDULE_MINUTE=35` 미검증 (테스트 커버리지 공백)
 
+### phase25_walkforward 패턴 (단위 2-7c, 2026-05-08 검증 완료)
+- `compute_sharpe` line 161: `simulated_df["scenario"]` 컬럼 없을 시 KeyError → 실전 경로는 안전(generate_report 내부만 사용), 공개 API 취약점 P3
+- `compute_sharpe` line 167: `valid["trade_date"].dt.date` 직접 접근 → str 타입 전달 시 AttributeError. `_walkforward_from_df`는 `pd.to_datetime()` 변환 후 `.dt.date` 사용 (안전). 실전 경로(load_phase25_dataset→datetime64) 안전
+- `generate_report` line 299/471: `datetime.now()` 2곳 → UTC 서버 이슈. 파일명 날짜 오기재(UTC 15:30 이후 날짜 엇갈림) + 본문 'KST' 오표기 → P2 (배포 전 수정 권장)
+- `_win_loss_ratio`: n_stop_risk=0 → mean_loss_pct=0.0 → 0.0 반환 → 게이트 Win/Loss FAIL. 손절 없음 = ratio 무한대가 정확하지만 보수적으로 0 처리. 실전 100건+에서 재검토 필요 (P2)
+- `simulate_candidate` docstring line 174: "현재 conservative만 지원" → 실제 A/B/C 모두 지원 (도큐스트링 불일치, P3)
+- EVReport 회귀 안전성: 옵션 A/B에서 n_split=0/p_split=0/mean_split_pct=0 확인됨 (breaking change 없음)
+- Sortino downside_std: 동일 cost_engine 계산 결과 반복 시 numpy std(ddof=1)=0.0 (정확히) → overflow 없음
+- PRD 12-2 split 항 추가 수학적 일관성: p_morning+p_stop+p_open+p_split=1.0, A/B에서 p_split=0 → 기존 3항 공식과 동일 (설계 적합)
+- `score_bucket_analysis` NaN total_score: 어느 버킷도 미포함, 암묵적 무시 → 의도된 동작으로 판단
+
 ### closing_bet_system universe_filters 단위 2-9f 패턴 (2026-05-07 검증 완료)
 - `_is_etf_or_etn(name)`: `name.startswith(tuple)` + ETN 키워드 — None/빈 str/비-string 모두 False (보수)
 - `_is_pref_stock(ticker, name)`: 끝자리 5/7/9 AND 종목명 접미사 "우/우B/우C/우K" AND 조건 — 6자리+isdigit 가드
