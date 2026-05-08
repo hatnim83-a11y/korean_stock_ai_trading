@@ -19,22 +19,22 @@
 
 ## 검증
 - [x] `python -m py_compile database.py main.py web/dashboard_service.py` 통과
-- [ ] `sqlite3 data/trading.db "PRAGMA table_info(portfolio)" | grep buy_message` 컬럼 존재 확인 (서비스 재시작 후)
-- [ ] `sqlite3 data/trading.db "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"` v15 확인 (서비스 재시작 후)
+- [x] MCP SQLite `PRAGMA table_info(portfolio)` → cid 26 `buy_message TEXT` 확인 (5/8)
+- [x] MCP SQLite `SELECT version FROM schema_version` → v15 (applied_at 2026-05-08 03:21:06 UTC) 확인
 - [x] `grep -n "reason\[:40\]" main.py` 결과 비어있음 (잔존 없음)
 - [x] code-tester 에이전트 실행 → 심각 0건, 주의 1건(rowcount=0 로그로 방어됨), 종합 판정 **배포 가능**
-- [ ] 대시보드 브라우저 진입 → 종목 호버 시 툴팁 표시 (이모지/줄바꿈 정상) — 서비스 재시작 후
-- [ ] SSE 30초 갱신 후 호버 다시 → 툴팁 정상 — 서비스 재시작 후
-- [ ] 기존 보유 종목 호버 → 폴백 메시지 표시 — 서비스 재시작 후
-- [ ] XSS 검증: AI reason에 `<script>` 수동 INSERT 후 호버 → 텍스트로만 표시 (실행 안 됨)
+- [ ] 대시보드 브라우저 진입 → 종목 호버 시 툴팁 표시 (이모지/줄바꿈 정상) — **사용자 직접 확인 필요**
+- [ ] SSE 30초 갱신 후 호버 다시 → 툴팁 정상 — **사용자 직접 확인 필요**
+- [ ] 기존 보유 종목 호버 → 폴백 메시지 표시 (현재 GS리테일/리노공업 buy_message=NULL 이므로 폴백 검증 가능)
+- [ ] XSS 검증: AI reason에 `<script>` 수동 INSERT 후 호버 → 텍스트로만 표시 (선택)
 
 ## 배포
-- [ ] 변경 사항 커밋 (commit message: feat/buy-msg-tooltip)
-- [ ] `sudo systemctl restart trading_system` 후 status 정상 확인
-- [ ] `sudo systemctl restart trading_dashboard` 후 status 정상 확인
-- [ ] 다음 거래일 09:25 매수 시 텔레그램 메시지 풀텍스트 출력 확인
-- [ ] 다음 거래일 매수 후 DB `buy_message` 컬럼 채워짐 확인
+- [x] 변경 사항 커밋 — e5eebb8 `feat(dashboard): 매수 메시지 풀텍스트 + portfolio 호버 툴팁`
+- [x] `trading_system` 재시작 — 5/8 09:08 UTC active(running), PID 350159, 포지션 복원 정상
+- [x] `trading_dashboard` 재시작 — 5/8 03:26 UTC active(running), PID 245924, 마이그레이션 v15 진입점
+- [ ] 다음 거래일(5/11) 09:25 매수 시 텔레그램 메시지 풀텍스트 출력 확인 — **관찰 항목**
+- [ ] 다음 거래일(5/11) 매수 후 DB `buy_message` 컬럼 채워짐 확인 — **관찰 항목**
 
 ## 문서 업데이트
-- [ ] `memory/MEMORY.md` — DB Schema 섹션에 v15 추가 (`portfolio.buy_message`)
-- [ ] active/ → completed/YYYYMMDD_buy-message-tooltip/ 아카이브
+- [x] `memory/MEMORY.md` — DB Schema 섹션에 v15 추가 (`portfolio.buy_message`)
+- [x] active/ → completed/20260508_buy-message-tooltip/ 아카이브 (5/11 매수 관찰은 별도 후속 노트)
