@@ -63,11 +63,11 @@
 - [x] **옵션 A 정합 — 시총 None 17건 모두 data_not_found 탈락 → universe = 0건** (의도대로 동작, 본격 해결은 단위 2-9d)
 
 ### 실전 검증 (5/7 자연 트리거)
-- [ ] 5/7 15:10 KST 자동 트리거 발화
-- [ ] `[universe_filters] bulk 빈 응답 — 종목별 폴백 진입` warning 1건
-- [ ] 폴백 호출 시간 ≤ 10초 (단발 검증 2.34초 → 자연 트리거에서도 비슷 예상)
-- [ ] 옵션 A 정합 결과 — universe 5건 미만 가능 (시총 보강은 단위 2-9d)
-- [ ] 일일 요약 텔레그램 알림 발송 (15:35)
+- [x] 5/7 15:10 KST 자동 트리거 발화
+- [x] `[universe_filters] bulk 빈 응답 — 종목별 폴백 진입` warning 1건
+- [x] 폴백 호출 시간 ≤ 10초 (단발 검증 2.34초 → 자연 트리거에서도 비슷 예상)
+- [x] 옵션 A 정합 결과 — universe 5건 미만 가능 (시총 보강은 단위 2-9d)
+- [x] 일일 요약 텔레그램 알림 발송 (15:35)
 
 ## 배포 항목 (2026-05-06 KST 19:42 완료)
 - [x] systemd 재시작 전 단일 PID 확인 (PID 3335832 → 종료 후 3414631)
@@ -80,11 +80,11 @@
 - [x] `docs/improvements/change_log.md` 1줄 추가 (단위 2-9c 항목)
 - [x] `memory/project_closing_bet_system.md` — 단위 2-9c 1단락 추가 (KRX bulk 우회)
 - [x] `memory/MEMORY.md` 인덱스 description 갱신 (closing_bet_system 항목)
-- [ ] 3문서 active → completed/20260506_closing-bet-universe-v2-bulk-bypass/ 이동 (5/7 자연 트리거 검증 후)
+- [x] 3문서 active → completed/20260506_closing-bet-universe-v2-bulk-bypass/ 이동 (5/7 자연 트리거 검증 후)
 
 ## 완료 게이트 (선언 전 체크)
 - [x] 구현 항목 전부 `[x]`
 - [x] 검증 항목 단위/통합 전부 `[x]` (실전 검증은 5/7 자연 트리거 후)
 - [x] 배포 항목 전부 `[x]`
 - [x] 문서 업데이트 항목 (아카이브 제외) 전부 `[x]`
-- [ ] 5/7 자연 트리거 검증 후 → active → completed 아카이브
+- [x] 5/7 자연 트리거 검증 후 → active → completed 아카이브

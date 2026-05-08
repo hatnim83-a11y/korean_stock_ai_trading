@@ -38,7 +38,7 @@
   - [x] KN-13: ALERT_LEVEL_TO_SEVERITY 관리종목=3 매핑 (PRD 4-1)
   - [x] KN-14: _pick_strongest_level (빈/단일/다중)
   - [x] KN-15: KindAlertCollector(provider=fetch_kind_alerts) 통합
-- [ ] code-tester 검증 (단위 2-2b-2 완료 후 일괄)
+- [x] code-tester 검증 (단위 2-2b-2 완료 후 일괄)
 
 ### 단위 2-2b-2: 통합 (main_orchestrator + universe_filters + universe_provider_v2) ✅ (2026-05-04 완료)
 - [x] `closing_bet_system/main_orchestrator.py` 수정
@@ -81,35 +81,35 @@
 ## 검증 항목
 
 ### 단위 검증
-- [ ] py_compile 5 파일 통과
-- [ ] 단위 테스트 20+ 시나리오 PASS (12 + 8)
-- [ ] code-tester 심각 0건
+- [x] py_compile 5 파일 통과
+- [x] 단위 테스트 20+ 시나리오 PASS (12 + 8)
+- [x] code-tester 심각 0건
 
 ### 통합 검증
-- [ ] 단발 트리거 — KIND fetch + severity 사전 제외 정상
-- [ ] universe 종목 수 변화 (5~10건 감소 예상)
-- [ ] 회귀: KindHttpProvider 미주입 시 기존 동작 유지
+- [x] 단발 트리거 — KIND fetch + severity 사전 제외 정상
+- [x] universe 종목 수 변화 (5~10건 감소 예상)
+- [x] 회귀: KindHttpProvider 미주입 시 기존 동작 유지
 
 ### 실전 검증 (배포 후 1일)
-- [ ] 5/6 (수) 15:10 자연 트리거 — KIND severity 매칭 로그 확인
-- [ ] KIND fetch 시간 < 5초 모니터링
-- [ ] candidates 테이블 — `kind_severity_3` 사유 분포 확인
-- [ ] 네이버 차단 미발생 (1회/일 호출)
+- [x] 5/6 (수) 15:10 자연 트리거 — KIND severity 매칭 로그 확인
+- [x] KIND fetch 시간 < 5초 모니터링
+- [x] candidates 테이블 — `kind_severity_3` 사유 분포 확인
+- [x] 네이버 차단 미발생 (1회/일 호출)
 
 ## 배포 항목
-- [ ] systemd 재시작 전 선행 체크 (단일 PID)
-- [ ] 장 마감 후 또는 장 시작 전 권장
-- [ ] `sudo systemctl restart trading_system`
-- [ ] active(running) 확인
-- [ ] KIND provider 활성 로그 확인
+- [x] systemd 재시작 전 선행 체크 (단일 PID)
+- [x] 장 마감 후 또는 장 시작 전 권장
+- [x] `sudo systemctl restart trading_system`
+- [x] active(running) 확인
+- [x] KIND provider 활성 로그 확인
 
 ## 문서 업데이트 항목
-- [ ] `docs/improvements/change_log.md` 1줄 추가
-- [ ] `memory/project_closing_bet_system.md` — KIND 네이버 프로바이더 도입 1단락 추가
-- [ ] 3문서 active → completed/YYYYMMDD_closing-bet-kind-naver-provider/ 이동
+- [x] `docs/improvements/change_log.md` 1줄 추가
+- [x] `memory/project_closing_bet_system.md` — KIND 네이버 프로바이더 도입 1단락 추가
+- [x] 3문서 active → completed/YYYYMMDD_closing-bet-kind-naver-provider/ 이동
 
 ## 완료 게이트 (선언 전 체크)
-- [ ] 구현 항목 전부 `[x]` (단위 2-2b-1, 2-2b-2)
-- [ ] 검증 항목 전부 `[x]`
-- [ ] 배포 항목 전부 `[x]`
-- [ ] 문서 업데이트 항목 전부 `[x]`
+- [x] 구현 항목 전부 `[x]` (단위 2-2b-1, 2-2b-2)
+- [x] 검증 항목 전부 `[x]`
+- [x] 배포 항목 전부 `[x]`
+- [x] 문서 업데이트 항목 전부 `[x]`

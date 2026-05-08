@@ -24,6 +24,7 @@ PRD 9-2 라벨 정의:
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,12 @@ LABEL_GAP_UP_THRESHOLD_PCT = 0.005       # T+1 시초가 +0.5%↑ → gap_up=Tru
 LABEL_STOP_RISK_THRESHOLD_PCT = -0.015   # T+1 저가 -1.5%↓ → stop_risk=True
 
 # label_morning_exit / label_net_ev_positive 는 cost_engine.minimum_target_return() 사용
+
+# ===== KIS API 재시도 정책 =====
+# 5/8 셀트리온(068270) 라벨링 누락 사례: KIS 일별시세 500 에러 1회 발생 → None 반환 → 영구 누락.
+# 재시도로 일시 장애 흡수 (KIS 토큰 1분 발급 제한과 무관 — 토큰은 캐시 유지, 데이터 호출만 재시도).
+_KIS_FETCH_MAX_ATTEMPTS = 3
+_KIS_FETCH_BACKOFF_SEC = 5.0
 
 
 # ===== 메인 진입점 =====
@@ -120,13 +127,12 @@ def _fetch_recent_ohlc(ticker: str) -> Optional[tuple[dict, float]]:
     """KIS get_daily_price → (today_ohlc dict, prev_close float). 실패 시 None.
 
     KIS 응답: 최신순 내림차순 (첫 행=오늘, 둘째 행=어제).
+
+    재시도 정책: 일시 장애(예: 500 에러) 대응 위해 ``_KIS_FETCH_MAX_ATTEMPTS`` 회까지
+    ``_KIS_FETCH_BACKOFF_SEC`` 초 간격 재시도. 모두 실패 시 None.
     """
-    try:
-        from closing_bet_system.infra.kis_client import get_kis_api
-        kis = get_kis_api()
-        rows = kis.get_daily_price(ticker, period="D", count=5)
-    except Exception as e:
-        logger.warning(f"[label_provider] {ticker} KIS get_daily_price 예외: {e}")
+    rows = _fetch_daily_price_with_retry(ticker)
+    if rows is None:
         return None
 
     if not rows or len(rows) < 2:
@@ -161,6 +167,34 @@ def _fetch_recent_ohlc(ticker: str) -> Optional[tuple[dict, float]]:
         "close": _to_float(today_row.get("close")),
     }
     return today_ohlc, prev_close
+
+
+def _fetch_daily_price_with_retry(ticker: str) -> Optional[list]:
+    """KIS get_daily_price 호출 + 재시도. 모든 시도 실패 시 None.
+
+    빈 응답(rows=[])은 정상 응답이므로 즉시 반환 (재시도 X). 예외만 재시도.
+    """
+    last_exc = None
+    for attempt in range(1, _KIS_FETCH_MAX_ATTEMPTS + 1):
+        try:
+            from closing_bet_system.infra.kis_client import get_kis_api
+            kis = get_kis_api()
+            return kis.get_daily_price(ticker, period="D", count=5)
+        except Exception as e:
+            last_exc = e
+            if attempt < _KIS_FETCH_MAX_ATTEMPTS:
+                logger.warning(
+                    f"[label_provider] {ticker} KIS get_daily_price 시도 "
+                    f"{attempt}/{_KIS_FETCH_MAX_ATTEMPTS} 실패: {e} — "
+                    f"{_KIS_FETCH_BACKOFF_SEC}초 후 재시도"
+                )
+                time.sleep(_KIS_FETCH_BACKOFF_SEC)
+            else:
+                logger.warning(
+                    f"[label_provider] {ticker} KIS get_daily_price 최종 실패 "
+                    f"({_KIS_FETCH_MAX_ATTEMPTS}회 재시도 모두 실패): {last_exc}"
+                )
+    return None
 
 
 def _pct(value: Optional[float], base: float) -> Optional[float]:

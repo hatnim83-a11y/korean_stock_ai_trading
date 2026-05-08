@@ -435,7 +435,8 @@ class MainOrchestrator:
             ticker = row.get("ticker")
             cid = row.get("candidate_id")
             try:
-                label_data = provider(ticker)
+                # provider 내부 KIS 재시도(time.sleep)가 이벤트루프를 블로킹하지 않도록 to_thread 위임
+                label_data = await asyncio.to_thread(provider, ticker)
                 if not label_data:
                     continue
                 await asyncio.to_thread(
