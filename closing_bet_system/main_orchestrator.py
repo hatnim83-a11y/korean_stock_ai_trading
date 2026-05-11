@@ -71,6 +71,10 @@ SUMMARY_SCHEDULE_MINUTE = 35
 LABEL_SCHEDULE_HOUR = 10
 LABEL_SCHEDULE_MINUTE = 0
 
+# 단위 2-3 (Phase 2 옵션 H, 2026-05-11) — flow 신뢰도 매칭 (19:27 — 네이버 18~19시 갱신 후)
+FLOW_RELIABILITY_SCHEDULE_HOUR = 19
+FLOW_RELIABILITY_SCHEDULE_MINUTE = 27
+
 # 1-9 운영 점검 게이트 (settings.yaml gate.operational_review 와 동기화)
 DEFAULT_GATE_OPERATIONAL_REVIEW = 30
 
@@ -468,6 +472,146 @@ class MainOrchestrator:
         )
         return {"date": str(yesterday), "labeled": labeled, "errors": errors}
 
+    # ===== 단위 2-3 (Phase 2 옵션 H) — flow 신뢰도 매칭 잡 =====
+
+    async def run_flow_reliability_check(
+        self,
+        for_date: Optional[date_cls] = None,
+    ) -> dict:
+        """매일 19:27 — KIS 추정치 vs 네이버 확정값 방향 일치율 매칭.
+
+        흐름:
+            1. 직전 영업일(또는 ``for_date``) 산출
+            2. 해당 일자 candidates 조회 → ticker + candidate_features.{inst,foreign}_net_buy_estimated
+            3. 네이버 frgn.naver 크롤링 (services.flow_reliability_tracker.fetch_naver_confirmed_flow)
+            4. 각 ticker 별 ``candidate_logger.log_flow_reliability`` 호출 (UNIQUE 충돌 시 REPLACE)
+
+        Args:
+            for_date: 특정 영업일 강제 지정 (수동 백필용). None 이면 직전 영업일 자동 산출.
+
+        Returns:
+            ``{"date", "n_candidates", "n_estimated", "n_confirmed", "n_logged", "errors"}``
+
+            카운터 의미:
+                - ``n_candidates``: 해당 일자 candidates 총 건수
+                - ``n_estimated``: inst/foreign estimated 중 1개라도 보유한 candidate 수
+                  (네이버 호출 대상 ticker 수와 동일)
+                - ``n_confirmed``: 네이버 확정값 수집 성공 ticker 수
+                - ``n_logged``: flow_data_reliability INSERT 성공 행 수 (= n_candidates,
+                  estimated 없는 candidate도 NULL,NULL 로 저장)
+                - ``errors``: log_flow_reliability 호출 예외 발생 건수
+
+        주의:
+            네이버 frgn.naver 갱신 시점 = T일 18~19시 KST. 19:27 잡은 그 이후 호출이라
+            확정값 반영. 단 네이버 갱신 지연 시 ``n_confirmed=0`` 으로 graceful (로그만).
+
+            **foreign_direction_match 는 본 단위에서 항상 NULL** — estimated 가
+            ``foreign_net_buy_3d`` (3일 누적, 원) vs confirmed 가 당일 1일 (주) 로 기간
+            불일치. 후속 단위에서 candidate_features 컬럼 또는 confirmed 합산 방식 재설계.
+        """
+        from closing_bet_system.services.flow_reliability_tracker import (
+            fetch_naver_confirmed_flow,
+        )
+
+        today = now_kst().date()
+        if for_date is not None:
+            target_date = for_date
+        else:
+            # 직전 영업일 (run_label_yesterday 와 동일 패턴)
+            target_date = today - timedelta(days=1)
+            while not is_trading_day(target_date):
+                target_date = target_date - timedelta(days=1)
+
+        # 1) 후보 + features 조회 (raw SQL — candidate_features 에 ticker 없음, candidates JOIN)
+        rows = await asyncio.to_thread(
+            self._fetch_candidates_with_features, target_date
+        )
+        n_candidates = len(rows)
+        if n_candidates == 0:
+            logger.info(
+                f"[orchestrator] flow_reliability — {target_date} 후보 0건, 스킵"
+            )
+            return {
+                "date": str(target_date),
+                "n_candidates": 0, "n_estimated": 0, "n_confirmed": 0,
+                "n_logged": 0, "errors": 0,
+            }
+
+        # 2) estimated 보유 ticker 리스트
+        tickers_with_estimate = [
+            r["ticker"] for r in rows
+            if r.get("inst_net_buy_estimated") is not None
+            or r.get("foreign_net_buy_3d") is not None
+        ]
+        n_estimated = len(tickers_with_estimate)
+
+        # 3) 네이버 확정값 수집 (이벤트 루프 블로킹 방지 — to_thread)
+        confirmed_map = await asyncio.to_thread(
+            fetch_naver_confirmed_flow, target_date, tickers_with_estimate
+        )
+        n_confirmed = len(confirmed_map)
+
+        # 4) candidate 별 매칭 INSERT
+        # estimated 없는 candidate (features 누락 또는 모두 None)도 NULL,NULL로 저장 →
+        # 향후 IS NULL 쿼리로 재처리 대상 식별 용이.
+        logged = 0
+        errors = 0
+        for r in rows:
+            ticker = r["ticker"]
+            inst_est = r.get("inst_net_buy_estimated")
+            # foreign_net_buy_3d (3일 누적, 원) vs 네이버 frgn_qty (당일, 주) — 기간 불일치.
+            # 부호 비교 무의미하므로 foreign_est 강제 None → foreign_direction_match=NULL.
+            # 후속 단위 (예: foreign_net_buy_today 신설 또는 네이버 3일 합산) 에서 재설계.
+            foreign_est = None
+            confirmed = confirmed_map.get(ticker, {})
+            inst_conf = confirmed.get("inst_confirmed_qty")
+            foreign_conf = confirmed.get("foreign_confirmed_qty")
+
+            try:
+                await asyncio.to_thread(
+                    self.candidate_logger.log_flow_reliability,
+                    target_date, ticker,
+                    inst_est, inst_conf,
+                    foreign_est, foreign_conf,
+                )
+                logged += 1
+            except Exception as e:
+                errors += 1
+                logger.error(f"[orchestrator] {ticker} flow_reliability 저장 실패: {e}")
+
+        logger.info(
+            f"[orchestrator] flow_reliability {target_date} — "
+            f"후보 {n_candidates} / 추정치 보유 {n_estimated} / 확정값 수집 {n_confirmed} / "
+            f"저장 {logged} / 예외 {errors}"
+        )
+        return {
+            "date": str(target_date),
+            "n_candidates": n_candidates,
+            "n_estimated": n_estimated,
+            "n_confirmed": n_confirmed,
+            "n_logged": logged,
+            "errors": errors,
+        }
+
+    def _fetch_candidates_with_features(self, target_date: date_cls) -> list[dict]:
+        """단위 2-3 헬퍼 — target_date candidates + candidate_features JOIN.
+
+        candidate_features 에 ticker 컬럼 없음 → candidates 와 candidate_id JOIN 필수.
+        """
+        with self.candidate_logger.db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT c.candidate_id, c.ticker,
+                       cf.inst_net_buy_estimated, cf.foreign_net_buy_3d
+                FROM candidates c
+                LEFT JOIN candidate_features cf ON cf.candidate_id = c.candidate_id
+                WHERE c.trade_date = ?
+                ORDER BY c.candidate_id
+                """,
+                (target_date.isoformat(),),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     # ===== 단일 종목 파이프라인 =====
 
     def _process_ticker(
@@ -598,12 +742,13 @@ class MainOrchestrator:
     # ===== APScheduler 통합 =====
 
     def register_jobs(self, scheduler) -> None:
-        """기존 main.py ``scheduler`` 에 종가베팅 잡 3건 등록.
+        """기존 main.py ``scheduler`` 에 종가베팅 잡 4건 등록.
 
-        잡 시간 (PRD 16-3 / Phase 1 단순화):
+        잡 시간 (PRD 16-3 / Phase 1 + 단위 2-3 옵션 H):
             - 평일 15:10 → ``run_daily_pipeline``
             - 평일 15:35 → ``run_daily_summary``
             - 평일 10:00 → ``run_label_yesterday`` (T+1 라벨링, label_provider 미설정 시 무동작)
+            - 평일 19:27 → ``run_flow_reliability_check`` (네이버 18~19시 갱신 후 매칭, 단위 2-3)
 
         Args:
             scheduler: ``apscheduler.schedulers.asyncio.AsyncIOScheduler`` 인스턴스.
@@ -637,11 +782,23 @@ class MainOrchestrator:
             id="closing_bet_label_yesterday",
             replace_existing=True,
         )
+        scheduler.add_job(
+            self.run_flow_reliability_check,
+            CronTrigger(
+                hour=FLOW_RELIABILITY_SCHEDULE_HOUR,
+                minute=FLOW_RELIABILITY_SCHEDULE_MINUTE,
+                day_of_week="mon-fri", timezone=kst,
+            ),
+            id="closing_bet_flow_reliability",
+            replace_existing=True,
+        )
         logger.info(
-            f"[orchestrator] 종가베팅 잡 3건 등록 — "
+            f"[orchestrator] 종가베팅 잡 4건 등록 — "
             f"pipeline {PIPELINE_SCHEDULE_HOUR:02d}:{PIPELINE_SCHEDULE_MINUTE:02d} / "
             f"summary {SUMMARY_SCHEDULE_HOUR:02d}:{SUMMARY_SCHEDULE_MINUTE:02d} / "
-            f"label {LABEL_SCHEDULE_HOUR:02d}:{LABEL_SCHEDULE_MINUTE:02d}"
+            f"label {LABEL_SCHEDULE_HOUR:02d}:{LABEL_SCHEDULE_MINUTE:02d} / "
+            f"flow_reliability {FLOW_RELIABILITY_SCHEDULE_HOUR:02d}:"
+            f"{FLOW_RELIABILITY_SCHEDULE_MINUTE:02d}"
         )
 
 

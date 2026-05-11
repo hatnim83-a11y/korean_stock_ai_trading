@@ -16,11 +16,17 @@ PRD 5-Layer 1 — 장중 수급 지표 스냅샷 수집기.
 =========================================  ===================================
 지표                                       Phase 1 가용성
 =========================================  ===================================
-``inst_net_buy_estimated``                 ✅ KIS ``get_investor_trading`` 의 당일 기관 순매수
-``foreign_net_buy_3d``                     ✅ 동일 API 의 3일 외국인 누적
+``inst_net_buy_estimated``                 ✅ KIS ``get_investor_trend_estimate`` (HHPTJ04160200) 14:30 가집계 누계
+                                            폴백: ``get_investor_trading`` daily[0] (15:10 시점 inst=0 박제 가능)
+``foreign_net_buy_3d``                     ✅ ``get_investor_trading`` 의 3일 외국인 누적
 ``program_net_buy_change``                 ⚠️ 종목별 프로그램 매매 TR 미확인 → ``None``
 ``closing_flow_concentration``             ⚠️ 분단위 수급 데이터 필요 → ``None``
 =========================================  ===================================
+
+**inst_net_buy_estimated 데이터 소스 우선순위** (단위 2-3 옵션 H, 2026-05-11 도입):
+1. HHPTJ04160200 ``latest_inst_qty * latest_close`` (14:30 가집계, 15:10 시점 가용)
+2. 폴백: FHKST01010900 ``daily[0].institution * close_price`` (장중 inst=0 박제 위험)
+3. 둘 다 실패: ``None``
 
 **Layer 1 가중치 정책 (P2-6)**: settings.yaml ``score.layer1_weight=0.0`` 으로 시작.
 flow_reliability 누적 후 KRX 확정값과의 방향 일치율 70% 이상 검증되면 활성화.
@@ -149,7 +155,14 @@ class KisIntradayFlowCollector:
                 ticker=ticker, snapshot_time=ts, is_valid=False, raw_payload=payload
             )
 
-        return self._parse_payload(ticker, ts, payload)
+        # HHPTJ04160200 가집계 (inst 보강용, 단위 2-3 옵션 H). 실패 시 None → FHKST 폴백.
+        try:
+            trend_payload = self.kis.get_investor_trend_estimate(ticker)
+        except Exception as e:
+            logger.warning(f"[flow_collector] {ticker} HHPTJ 호출 예외 (FHKST 폴백): {e}")
+            trend_payload = None
+
+        return self._parse_payload(ticker, ts, payload, trend_payload)
 
     # ===== 다종목 =====
 
@@ -179,8 +192,9 @@ class KisIntradayFlowCollector:
         ticker: str,
         snapshot_time: datetime,
         payload: dict,
+        trend_payload: Optional[dict] = None,
     ) -> IntradayFlowSnapshot:
-        """KIS API ``get_investor_trading`` 응답 → ``IntradayFlowSnapshot``.
+        """KIS API ``get_investor_trading`` (+ HHPTJ 가집계) 응답 → ``IntradayFlowSnapshot``.
 
         KIS 반환 형식 (``modules/stock_screener/kis_api.py:594``):
         ::
@@ -199,6 +213,16 @@ class KisIntradayFlowCollector:
             }
 
         ``daily[0]`` = 가장 최근 일자 (장중에는 추정값일 가능성 높음 — Phase 2 신뢰도 추적).
+
+        ``trend_payload`` (HHPTJ04160200, 단위 2-3 옵션 H):
+        ::
+
+            {
+                "code", "latest_inst_qty", "latest_foreign_qty", "latest_sum_qty",
+                "by_slot": [{"slot_gb", "frgn", "orgn", "sum"}, ...]
+            }
+
+        inst_net_buy_estimated 산출 시 HHPTJ ``latest_inst_qty`` 우선, 실패 시 FHKST daily[0] 폴백.
         """
         daily = payload.get("daily") or []
         if not isinstance(daily, list) or not daily:
@@ -226,18 +250,37 @@ class KisIntradayFlowCollector:
 
         # 1) 당일 기관 순매수 (원) = institution qty × close_price
         # close_price 가 0/None 이면 NaN 방지 위해 None 반환 (장 시작 직후 미체결 상태 대응)
+        # 단위 2-3 옵션 H: HHPTJ 가집계 우선 (FHKST daily[0].institution=0 박제 회피)
         latest_close = _to_float(latest.get("close_price"))
-        latest_inst_qty = _to_float(latest.get("institution"))
         if latest_close is None or latest_close <= 0:
             inst_net_buy_estimated = None
             if latest_close == 0:
                 logger.warning(
                     f"[flow_collector] {ticker} close_price=0 — 미체결 상태 (inst_net=None 처리)"
                 )
-        elif latest_inst_qty is None:
-            inst_net_buy_estimated = None
         else:
-            inst_net_buy_estimated = latest_inst_qty * latest_close
+            inst_qty: Optional[float] = None
+            if isinstance(trend_payload, dict):
+                # HHPTJ 우선. 0이면 FHKST 폴백 (단, 실제 0주 거래와 미집계(빈 필드→_safe_int=0) 구분 불가).
+                # Phase 2 점수 반영 시 by_slot[latest_slot] 유무로 미집계 상태 세분화 예정.
+                trend_qty = _to_float(trend_payload.get("latest_inst_qty"))
+                if trend_qty is not None and trend_qty != 0:
+                    inst_qty = trend_qty
+            # 폴백: FHKST daily[0].institution
+            if inst_qty is None:
+                fallback_qty = _to_float(latest.get("institution"))
+                if fallback_qty is not None:
+                    inst_qty = fallback_qty
+                    if isinstance(trend_payload, dict):
+                        # HHPTJ는 호출 성공했으나 inst=0 → FHKST 폴백 사용 명시
+                        logger.debug(
+                            f"[flow_collector] {ticker} HHPTJ inst=0 → FHKST 폴백 사용"
+                        )
+
+            if inst_qty is None:
+                inst_net_buy_estimated = None
+            else:
+                inst_net_buy_estimated = inst_qty * latest_close
 
         # 2) 3일 외국인 누적 (원) = sum of (foreign qty × close_price) for daily[0:3]
         foreign_3d_total = 0.0

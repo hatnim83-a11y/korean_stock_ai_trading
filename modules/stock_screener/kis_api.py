@@ -692,7 +692,104 @@ class KISApi:
         except Exception as e:
             logger.error(f"[{stock_code}] 수급 조회 실패: {e}")
             return None
-    
+
+    def get_investor_trend_estimate(self, stock_code: str) -> Optional[dict]:
+        """종목별 외인기관 추정가집계 (HHPTJ04160200).
+
+        KIS 직원이 장중에 집계/입력한 자료의 단순 누계.
+        입력시간(공식): 외국인 09:30/11:20/13:20/14:30, 기관종합 10:00/11:20/13:20/14:30.
+        ``FHKST01010900`` 의 daily[0] 가 15:10 시점에 institution=0 박제 반환하는 문제 우회용.
+
+        Args:
+            stock_code: 6자리 종목코드
+
+        Returns:
+            성공 시:
+            ::
+
+                {
+                    "code": "005930",
+                    "latest_inst_qty": 1442000,        # bsop_hour_gb=='5' (14:30 누계, 단위: 주)
+                    "latest_foreign_qty": -2906000,
+                    "latest_sum_qty": -1464000,
+                    "by_slot": [
+                        {"slot_gb": "1", "frgn": -1135000, "orgn": 0, "sum": -1135000},
+                        ...,
+                        {"slot_gb": "5", "frgn": -2906000, "orgn": 1442000, "sum": -1464000},
+                    ],
+                }
+
+            실패/응답 이상 시 ``None``.
+        """
+        self._rate_limit()
+
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/investor-trend-estimate"
+        tr_id = "HHPTJ04160200"
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "MKSC_SHRN_ISCD": stock_code,
+        }
+
+        try:
+            response = self.client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+            data = response.json()
+
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    f"[{stock_code}] HHPTJ 추정가집계 조회 실패: {data.get('msg1')}"
+                )
+                return None
+
+            output2 = data.get("output2") or []
+            if not isinstance(output2, list) or not output2:
+                logger.warning(f"[{stock_code}] HHPTJ output2 비어있음 또는 list 아님")
+                return None
+
+            by_slot: list[dict] = []
+            latest = {"frgn": 0, "orgn": 0, "sum": 0}
+            latest_slot = ""
+            latest_slot_num = -1
+
+            for row in output2:
+                if not isinstance(row, dict):
+                    continue
+                slot_gb = str(row.get("bsop_hour_gb") or "").strip()
+                f = _safe_int(row.get("frgn_fake_ntby_qty"))
+                o = _safe_int(row.get("orgn_fake_ntby_qty"))
+                s = _safe_int(row.get("sum_fake_ntby_qty"))
+                by_slot.append({"slot_gb": slot_gb, "frgn": f, "orgn": o, "sum": s})
+                # 마지막 입력 차수 (공식상 '5'=14:30 누계, 추가 입력 시 '6'+ 가능성 대비)
+                # 정수 변환 비교 — 사전순 비교 시 '10' < '9' 역전 위험 차단
+                slot_num = _safe_int(slot_gb, default=-1)
+                if slot_num >= 0 and slot_num >= latest_slot_num:
+                    latest_slot_num = slot_num
+                    latest_slot = slot_gb
+                    latest = {"frgn": f, "orgn": o, "sum": s}
+
+            if not by_slot:
+                logger.warning(f"[{stock_code}] HHPTJ 유효 슬롯 없음")
+                return None
+
+            logger.debug(
+                f"[{stock_code}] HHPTJ 가집계: slot={latest_slot} "
+                f"기관 {latest['orgn']:+,}주, 외인 {latest['frgn']:+,}주"
+            )
+
+            return {
+                "code": stock_code,
+                "latest_inst_qty": latest["orgn"],
+                "latest_foreign_qty": latest["frgn"],
+                "latest_sum_qty": latest["sum"],
+                "by_slot": by_slot,
+            }
+
+        except Exception as e:
+            logger.error(f"[{stock_code}] HHPTJ 추정가집계 조회 실패: {e}")
+            return None
+
     # ===== 기술적 지표 계산 =====
     
     def get_technical_indicators(
