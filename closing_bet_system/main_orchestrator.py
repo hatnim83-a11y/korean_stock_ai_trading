@@ -397,6 +397,7 @@ class MainOrchestrator:
     async def run_label_yesterday(
         self,
         label_provider: Optional[Callable[[str], dict]] = None,
+        for_date: Optional[date_cls] = None,
     ) -> dict:
         """T+1 10:00 사후 라벨링.
 
@@ -412,12 +413,19 @@ class MainOrchestrator:
                 ``label_gap_up`` (bool), ``label_morning_exit`` (bool),
                 ``label_stop_risk`` (bool), ``label_net_ev_positive`` (bool).
                 None 이면 라벨링 스킵 (수집기 미구현 단계).
+            for_date: 특정 날짜 후보를 라벨링 (수동 백필용). None 이면 직전 영업일 자동 산출.
 
         Returns:
             ``{"date", "labeled", "errors"}``
         """
         today = now_kst().date()
-        yesterday = today - timedelta(days=1)
+        if for_date is not None:
+            yesterday = for_date
+        else:
+            # 직전 영업일 (월요일 → 금요일, 공휴일 건너뛰기)
+            yesterday = today - timedelta(days=1)
+            while not is_trading_day(yesterday):
+                yesterday = yesterday - timedelta(days=1)
         # 인스턴스 폴백 (APScheduler 가 인자 없이 호출하는 경로)
         provider = label_provider if label_provider is not None else self._label_provider
         if provider is None:

@@ -89,8 +89,24 @@
 - 텔레그램 메시지 ~534자 운영 범위 (4096 한계 여유)
 - 단위 테스트: tests/test_health_check.py 21건 PASS (운영 DB 시뮬레이션 + Stub 인스턴스)
 
+## Closing Bet System (data/closing_bet.db)
+- **테이블**: candidates(22컬럼), candidate_features(20), candidate_labels(9), orderbook_snapshots, flow_data_reliability, schema_version, sqlite_sequence
+- **candidate_labels 컬럼**: candidate_id, next_open_pct, next_morning_high_pct, next_morning_low_pct, label_gap_up, label_morning_exit, label_stop_risk, label_net_ev_positive, labeled_at
+- **누적 통계 (5/11 기준)**: 4개일자 79건 후보 (recommended 69 / rejected 10), gate_threshold=30 이미 돌파 — 자동매매 게이트 통과 상태이나 Phase 1 정책상 알림형 유지
+- **일자별**: 5/4 19건, 5/7 18건, 5/8 19건, 5/11 23건
+- **라벨링 현황**: 5/4(19/19, 5/5 10:00 자동), 5/7(18/18, 5/8 manual_backfill+자동 혼합), 5/8(0/19 누락!), 5/11(미도래)
+
+## BUG: T+1 라벨링 — 월요일 영업일 미반영 (2026-05-11 발견, 심각)
+- **위치**: `closing_bet_system/main_orchestrator.py:419-420` `run_label_yesterday`
+- **현상**: `yesterday = today - timedelta(days=1)` — 단순 캘린더 -1일 사용
+- **결과**: 월요일 10:00 라벨링 잡이 일요일을 조회 → 금요일 후보 영구 미라벨
+- **5/11 검증**: 5/8 후보 19건 모두 labeled_at=NULL, 잡 로그 "라벨링 완료 — 0/0 저장"
+- **수정 방향**: `is_trading_day()` 기반 직전 영업일 탐색 (config.py 함수 활용)
+- **5/7 → 5/8 manual_backfill 흔적**: 사람이 수동 보정한 적 있음 → 운영 부담
+
 ## Recent Health Checks
-- **2026-04-27 10:50 KST (월)**: Phase A 첫 실전일. uptime 2일 정상. 09:05 스크리닝 78종목 중 12개 필터 통과(슬롯 보장 5건 첫 기록), AI 검증 5종목 → Yes 1건(한화오션 7.5점)/Hold 4건. 한화오션은 보유 종목이라 후보풀에서 제외 → 매수 후보 0개. 09:15 한화오션 보유기간 만료 매도(+2.24%). 09:25 매수 잡 정상 실행, MarketGuard NORMAL(+1.15%/+0.94%), 매수 후보 없어 스킵. 현 포트폴리오 LG디스플레이 1종목(-1.09%). KIS API 500 에러 2건/403 1건(자동 회복). Phase A 의도대로 작동 중.
+- **2026-05-11 15:36 KST (월)**: 종가베팅 점검. 5/11 15:10 파이프라인 정상(universe 94→23, recommended 20/rejected_filter 3 모두 atr_overheat>1.8). 5/8 19건 라벨링 누락(영업일 -1 버그, 위 BUG 항목). 누적 라벨 37건 중 EV+ 20건(54.1%). 5/4 84% 단일 결과는 비대표적, 5/7 EV+ 22%로 저조. 5/4 "005930 (테스트)" 라벨 1건 잔존 — 정합성 점검 필요.
+- **2026-04-27 10:50 KST (월)**: Phase A 첫 실전일. uptime 2일 정상. 09:05 스크리닝 78종목 중 12개 필터 통과(슬롯 보장 5건 첫 기록), AI 검증 5종목 → Yes 1건(한화오션 7.5점)/Hold 4건. 한화오션은 보유 종목이라 후보풀에서 제외 → 매수 후보 0개.
 - **2026-04-10 09:10 KST (금)**: 테마 DB 버그 수정 후 재시작(09:04). 금융 1개 테마 운영. 09:05 스크리닝 20종목 중 7개 필터 통과→AI 검증 0건 통과(전부 Hold). 포트폴리오 4종목(클래시스 -1.31%, HD한국조선해양 -0.51%, HJ중공업 -2.14%, HPSP -2.31%). 누적 P&L +332,031원(+6.60%), 승률 70%. 디스크 65%. 좀비 프로세스 2개.
 - **2026-04-06 10:13 KST (월)**: 전 서비스 정상. 포트폴리오 3종목. 삼성SDI 손절가 -11.1% 이상 발견. 누적 +167,031원(+3.26%), 승률 67.6%.
 - **2026-04-05 20:47 KST (일)**: 전 서비스 정상 가동(4일째). 포트폴리오 2종목.
