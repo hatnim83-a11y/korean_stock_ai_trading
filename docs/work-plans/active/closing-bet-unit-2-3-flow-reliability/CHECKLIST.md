@@ -1,6 +1,20 @@
 # CHECKLIST — 단위 2-3 flow_reliability_tracker
 
-## Step 1: inst_net_buy_estimated 수집 버그 fix
+## 🚨 2026-05-11 발견 사항 — 옵션 G 결정 (세션 종료 + 재설계)
+- [x] KIS API 응답 검증: 16:06 호출 시 institution 정상값 (005930 +1,604,512 등)
+- [x] 가설 D 확정: KIS `FHKST01010900` 15:10 시점에 inst=0 반환 정책 (코드 버그 아님)
+- [x] **사용자 핵심 통찰**: 16:00 재수집은 매수 결정 시점 지난 후라 무효 — 옵션 A 철회
+- [x] pykrx 빈 응답 확인: `get_market_net_purchases_of_equities_by_ticker` 모든 날짜/투자자에서 shape=(0,0)
+- [x] PLAN/CONTEXT/CHECKLIST 갱신: 재설계 결정 + Step 0 (데이터 소스 재조사) 추가
+
+## Step 0 (재조사) — 다음 세션 진입 시
+- [ ] **0a**: pykrx 종목별 함수 탐색 — `from pykrx import stock as krx; help(krx)` 로 종목별 투자자 매매 함수 존재 여부 확인 (30분)
+- [ ] **0b**: KRX 정보데이터시스템 직접 크롤링 평가 (data.krx.co.kr — OTP 발급 후 매매대금 API)
+- [ ] **0c**: 5/12(화) 실시간 KIS 호출로 inst 갱신 시점 추적 — 15:10/15:15/15:20/15:25/15:28/15:30/15:35 분 단위 호출 + 응답 비교
+- [ ] **0d**: KIS 다른 TR 탐색 — `FHKST01010800` (장중 외인/기관 가집계) 또는 `FHPST01040000` 등 (1~2시간)
+- [ ] **결정**: 0a~0d 결과 종합 → 단위 2-3 본체 진행 방식 선택 (원래 PLAN / 0c 기반 시간 변경 / 옵션 D 단순화 / 영구 비활성)
+
+## (보류) Step 1: inst_net_buy_estimated 수집 버그 fix
 - [ ] `kis_intraday_flow_collector.py:230-240` 코드 정독 + KIS API 응답 직접 디버깅
 - [ ] KIS `get_investor_trading` 응답 raw dump 확보 (이번 주 후보 1~3종목)
 - [ ] `latest_inst_qty` 추출 키 확인 (`acml_ntby_qty` vs 다른 키)

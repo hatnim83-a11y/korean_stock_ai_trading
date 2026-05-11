@@ -1,7 +1,40 @@
-# 단위 2-3 — flow_reliability_tracker 구현
+# 단위 2-3 — flow_reliability_tracker 구현 (재설계 진행 중)
 
 ## 작업 ID
-`closing-bet-unit-2-3-flow-reliability` — 2026-05-11 PLAN 작성, 다음 세션에서 `/resume`
+`closing-bet-unit-2-3-flow-reliability` — 2026-05-11 1차 PLAN 작성 + 발견사항 반영 재설계, 다음 세션에서 `/resume`
+
+## 🚨 2026-05-11 1차 시도 후 재설계 결정 (옵션 G)
+
+### 발견 사항
+1. **KIS API `FHKST01010900` 15:10 시점에 inst=0 반환 정책** (가설 D 확정):
+   - 15:10 KIS 응답: institution=0 (장중 미집계)
+   - 16:06 KIS 응답: institution=정상값 (마감 후 갱신)
+   - **코드 버그 아님** — KIS API 시간대별 정책 문제
+2. **사용자 핵심 통찰**: "16:00 재수집은 매수 결정 시점 지난 후라 무효" — 동시호가 매수 결정에 사후 데이터 의미 없음
+3. **pykrx KRX 투자자별 매매 함수 전체 빈 응답**:
+   - `get_market_net_purchases_of_equities_by_ticker` 모든 날짜/투자자에서 shape=(0,0)
+   - `get_market_trading_value_by_date` 빈 응답
+   - `get_market_ohlcv_by_ticker` KeyError (응답 구조 깨짐)
+   - **단위 2-9c bulk 빈 응답 컨텍스트와 동일** — pykrx KRX API 정책 변경
+4. **결과**: 원래 PLAN의 단위 2-3 (KIS 추정치 vs **KRX 확정값** 매칭)은 데이터 소스가 근본 흔들림 → 옵션 G 결정 (세션 종료 + 재설계)
+
+### 다음 세션 진입 시 추가 조사 Step (Step 0)
+| 조사 항목 | 작업량 | 가능성 |
+|---|---|---|
+| **0a**: pykrx 종목별 함수 탐색 (`get_market_trading_value_by_date(ticker)` 등) | 30분 | 중 |
+| **0b**: KRX 정보데이터시스템 직접 크롤링 (data.krx.co.kr OTP API) | 1~2일 | 높 |
+| **0c**: 5/12(화) 실시간 KIS 호출로 inst 갱신 시점 추적 (15:10/15:15/15:20/15:25/15:28/15:30/15:35) | 1시간 (5/12) | 높 |
+| **0d**: KIS 다른 TR 탐색 (`FHKST01010800` 등 장중 추정치) | 1~2시간 | 불확실 |
+
+### 옵션별 재설계 방향
+- **0a/0b 성공 시**: 원래 PLAN (Step 2~6) 그대로 진행. 데이터 소스만 교체.
+- **0c 성공 시 (15:25 정상 inst 갱신)**: `daily_pipeline` 시간을 15:10 → 15:25로 변경 + 15:10 alert는 제거. 점수 산출은 동시호가 시작 후. 단점: 매수 결정 시간 5분만 남음 (15:25~15:30).
+- **0d 성공 시**: collector를 다른 TR로 교체.
+- **모두 실패 시**: 단위 2-3 본체 의미 X. Layer 1 가중치 영구 비활성. Layer 2/3만으로 점수 산식 운영 + Layer 1 점수 영영 보류.
+
+---
+
+## (원래 PLAN — 데이터 소스 검증 후 재진입)
 
 ## 배경
 

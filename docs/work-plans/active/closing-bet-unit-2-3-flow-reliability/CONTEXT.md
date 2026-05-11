@@ -1,5 +1,56 @@
 # CONTEXT — 단위 2-3 flow_reliability_tracker
 
+## 🚨 2026-05-11 1차 시도 발견 사항 (재설계 결정 근거)
+
+### 1. KIS API 시간대별 응답 정책 (가설 D 확정)
+- 5/11 16:06 KIS `get_investor_trading('005930', days=5)` 호출 → daily[0] institution=+1,604,512 정상 반환
+- 5/11 15:10 daily_pipeline 시점: candidate_features.inst_net_buy_estimated = **0.0** (DB 저장값)
+- **결론**: KIS `FHKST01010900` TR이 장중 15:10 시점에는 inst 추정치 미집계 (0 반환), 마감 후 갱신
+- **코드 버그 아님** — KIS API 정책
+
+### 2. 사용자 핵심 통찰 (2026-05-11 KST)
+> "동시호가 시점에 필요한 데이터가 아닌가??"
+
+→ **종가베팅 매수 결정 시점은 15:20~15:28 동시호가**. 16:00 사후 재수집 데이터는 매수 결정에 못 씀.
+→ 옵션 A "16:00 inst 재수집"은 본질적으로 잘못된 방향. 철회.
+
+### 3. pykrx KRX 투자자별 매매 함수 마비
+```python
+from pykrx import stock as krx
+# 모든 날짜 (5/4/7/30, 2024-01-31) + 모든 투자자 (기관합계/외국인합계/개인)
+krx.get_market_net_purchases_of_equities_by_ticker('20260507', '20260507', 'KOSPI', '기관합계')
+# → shape=(0, 0), cols=[]
+krx.get_market_trading_value_by_date('20260504', '20260504', 'KOSPI')
+# → shape=(0, 0)
+krx.get_market_ohlcv_by_ticker('20260507', market='KOSPI')
+# → KeyError: "시가/고가/저가/종가 컬럼 없음"
+```
+- **단위 2-9c bulk 빈 응답과 동일** — pykrx KRX API 정책 변경
+- universe_v2 수집은 종목별 폴백(`_fetch_per_ticker_today_data`)으로 우회 작동 중
+
+### 4. 옵션 G 결정 — 세션 종료 + 데이터 소스 재조사
+원래 PLAN의 단위 2-3은 KIS 추정치 vs **KRX 확정값** 매칭이지만:
+- pykrx로 KRX 확정값 수집 불가 (3 발견)
+- inst는 15:10 시점에 0이라 매칭 의미 약함 (1 발견)
+
+→ **데이터 소스 재조사 (Step 0) 후 재설계 필요**. 자세한 옵션은 PLAN.md "다음 세션 진입 시 추가 조사 Step (Step 0)" 참조.
+
+### 5. 다음 세션 5/12 실시간 검증 스크립트 (참고)
+```python
+# 5/12(화) 15:00~15:35 동안 5분 간격 호출 → inst 갱신 시점 추적
+from closing_bet_system.infra.kis_client import get_kis_api
+from datetime import datetime, time
+import time as t
+kis = get_kis_api()
+for slot in ('15:00', '15:10', '15:15', '15:20', '15:25', '15:28', '15:30', '15:35'):
+    # 해당 시각까지 sleep 또는 즉시 호출
+    payload = kis.get_investor_trading('005930', days=2)
+    daily0 = payload['daily'][0]
+    print(f"{slot}: date={daily0['date']} foreign={daily0['foreign']:+,} institution={daily0['institution']:+,}")
+```
+
+---
+
 ## 변경 이유
 
 종가베팅 시스템 Phase 1 (알림형) 가동 중 점수 산식 분석:
