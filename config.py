@@ -682,6 +682,50 @@ class Settings(BaseSettings):
         description="수급 반전 감지 활성화"
     )
 
+    # ===== 외국인/기관 수급 신호 도입 (v16, supply-signal-integration Phase 1-A) =====
+    # 종가베팅 시스템이 검증한 외국인 수급 데이터 소스(HHPTJ04160200, FHPTJ04400000, 네이버 frgn.naver)를
+    # 메인 시스템에 이식. T-1 마감 데이터를 17:10에 1회 수집하여 다음날 아침 KIS 재호출 없이 사용.
+    SUPPLY_SIGNAL_ENABLED: bool = Field(
+        default=True,
+        description="외국인/기관 수급 신호 활성화 (False면 17:10 잡 미등록 + AI 프롬프트 미사용)"
+    )
+    SUPPLY_COLLECT_HOUR: int = Field(
+        default=17,
+        description="수급 수집 시각 시 (KST)"
+    )
+    SUPPLY_COLLECT_MINUTE: int = Field(
+        default=10,
+        description="수급 수집 시각 분 (KST). 17:05 일별테마수집 직후, 종가베팅 19:27 잡과 간격 확보"
+    )
+    SUPPLY_UNIVERSE_TOP_MARKET_CAP: int = Field(
+        default=200,
+        description="수급 수집 시총 상위 종목 수 (0이면 테마+보유만, 약 200종목 합집합 시 22초 소요)"
+    )
+    SUPPLY_RANKING_TOP_N: int = Field(
+        default=200,
+        description="FHPTJ04400000 외국인/기관 순매수 TOP 수집 개수"
+    )
+    SUPPLY_THEME_TOP_K: int = Field(
+        default=10,
+        description="수급 수집 시 universe에 포함할 테마 상위 K개"
+    )
+    SUPPLY_STOCK_LOOKBACK_DAYS: int = Field(
+        default=7,
+        description="테마 종목 후보 룩백 일수 (stocks/screening_log JOIN)"
+    )
+    SUPPLY_RANKING_CALL_SLEEP_SEC: float = Field(
+        default=0.3,
+        description="FHPTJ04400000 외인/기관 호출 사이 추가 sleep (rate limit 보호)"
+    )
+    SUPPLY_RETRY_JOB_HOUR: int = Field(
+        default=18,
+        description="17:10 잡 전체 실패 시 자동 재시도 잡 시 (0이면 미등록)"
+    )
+    SUPPLY_RETRY_JOB_MINUTE: int = Field(
+        default=0,
+        description="17:10 잡 전체 실패 시 자동 재시도 잡 분"
+    )
+
     # ===== 스케줄 시간 =====
     SCHEDULE_THEME_ANALYSIS: str = Field(
         default="08:30",

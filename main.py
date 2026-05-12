@@ -366,6 +366,7 @@ class TradingSystem:
         self.scheduler.on_theme_check = self.check_theme_rotation        # 08:00 테마 체크
         self.scheduler.on_post_trade_analysis = self.run_post_trade_analysis  # 17:00 사후 분석
         self.scheduler.on_daily_theme_collection = self.run_daily_theme_collection  # 17:05 일별 테마 수집
+        self.scheduler.on_supply_collection = self.run_supply_collection  # 17:10 외국인/기관 수급 수집 (v16)
         self.scheduler.on_weekly_trade_review = self.run_weekly_trade_review  # 금 17:30 주간 복기
         self.scheduler.on_daily_health_check = self.run_daily_health_check  # 16:10 헬스체크
         self.scheduler.on_midweek_sell_profit = self._execute_midweek_profit_sells  # 09:00 주중 교체 수익 매도
@@ -3055,6 +3056,87 @@ class TradingSystem:
 
         except Exception as e:
             logger.error(f"일별 테마 수집 실패: {e}")
+
+    # ===== 17:10 외국인/기관 수급 수집 (v16, Phase 1-A) =====
+
+    async def run_supply_collection(self) -> None:
+        """외국인/기관 수급 데이터 수집 (17:10, 장 마감 후).
+
+        종가베팅 시스템이 검증한 데이터 소스(FHKST01010900 + FHPTJ04400000)를 이용하여
+        T-1 수급을 DB에 저장. 다음날 아침 KIS 재호출 없이 supply 신호 활용 가능.
+
+        Phase 1-A: 데이터 파이프라인만. 점수/필터/AI 통합은 Phase 1-B~D에서 단계적 진행.
+
+        토글: SUPPLY_SIGNAL_ENABLED=False 시 즉시 비활성화.
+
+        18:00 재시도 잡(supply_collection_retry)이 같은 메서드를 호출할 때를 대비하여,
+        오늘 이미 일정 행 수 이상 수집되었으면 스킵 (중복 호출 방어).
+        """
+        if not settings.SUPPLY_SIGNAL_ENABLED:
+            logger.info("[supply_collection] SUPPLY_SIGNAL_ENABLED=False — 잡 스킵")
+            return
+
+        # 18:00 재시도 잡 중복 호출 방어: 오늘 이미 충분한 행이 저장되었으면 skip
+        # 임계값: universe의 50% 이상 (보수적). count_supply_snapshots_for_date 사용.
+        try:
+            today = now_kst().date()
+            existing = self.db.count_supply_snapshots_for_date(today)
+            # 50건 이상이면 1차 수집이 의미있게 완료된 것으로 간주 (재시도 불필요)
+            if existing >= 50:
+                logger.info(
+                    f"[supply_collection] 오늘 ({today}) 이미 {existing}건 수집됨 → 재시도 스킵"
+                )
+                return
+        except Exception as e:
+            logger.warning(f"[supply_collection] 사전 행 수 확인 실패 (계속 진행): {e}")
+
+        logger.info("=" * 60)
+        logger.info("📊 외국인/기관 수급 수집 시작")
+        logger.info("=" * 60)
+
+        try:
+            from modules.supply_collector import SupplyCollector
+            from modules.stock_screener.kis_api import KISApi
+
+            # KIS 인스턴스 (토큰은 _shared_token으로 다른 인스턴스와 공유)
+            kis = KISApi()
+
+            # market_provider는 종가베팅 모듈에 있음. 로드 실패해도 종목별 수급은 계속 진행.
+            market_provider = None
+            try:
+                from closing_bet_system.collectors.kis_market_provider import (
+                    get_kis_market_provider,
+                )
+                market_provider = get_kis_market_provider()
+            except Exception as mp_err:
+                logger.warning(f"market_provider 로드 실패 (외인 TOP 스킵): {mp_err}")
+
+            collector = SupplyCollector(self.db, kis, market_provider=market_provider)
+            trade_date = now_kst().date()
+            result = await asyncio.to_thread(collector.run_collection, trade_date)
+
+            # 텔레그램 알림
+            msg = (
+                f"📊 수급 수집 완료 ({result.get('trade_date')})\n"
+                f"- daily_supply_snapshot: {result.get('success', 0)}/{result.get('codes', 0)} "
+                f"(실패 {result.get('failure', 0)})\n"
+                f"- foreign_top_ranking: 외인 {result.get('foreign_ranking_count', 0)}건 / "
+                f"기관 {result.get('institution_ranking_count', 0)}건\n"
+                f"- 처리 시간: {result.get('duration_sec', 0)}초"
+            )
+            try:
+                self.notifier.send_message(msg)
+            except Exception as tg_err:
+                logger.warning(f"수급 수집 알림 발송 실패: {tg_err}")
+
+            logger.info(f"수급 수집 완료: {result}")
+
+        except Exception as e:
+            logger.error(f"수급 수집 실패: {e}", exc_info=True)
+            try:
+                self.notifier.send_error_alert("수급 수집 (17:10)", str(e))
+            except Exception:
+                pass
 
     # ===== 17:00 매매 사후 분석 =====
 

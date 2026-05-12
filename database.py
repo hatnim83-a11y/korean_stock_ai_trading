@@ -176,6 +176,7 @@ class Database:
             (13, "themes 산업재→금융 재분류", self._migrate_v13),
             (14, "screening_log 관찰 컬럼 2개 추가 (RSI·슬롯 보호)", self._migrate_v14),
             (15, "portfolio buy_message 컬럼 추가", self._migrate_v15),
+            (16, "외국인/기관 수급 신호 도입 (daily_supply_snapshot, foreign_top_ranking, supply_score_observation + portfolio/trade_reviews 보강)", self._migrate_v16),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -485,6 +486,131 @@ class Database:
         with self.get_cursor() as cursor:
             if not self._has_column("portfolio", "buy_message"):
                 cursor.execute("ALTER TABLE portfolio ADD COLUMN buy_message TEXT")
+
+    def _migrate_v16(self) -> None:
+        """외국인/기관 수급 신호 도입 (2026-05-11 / supply-signal-integration Phase 1-A).
+
+        목적: 종가베팅 시스템(closing_bet_system)이 검증한 외국인 수급 데이터 소스를
+        메인 시스템에 이식. T-1 마감 데이터를 17:10에 1회 수집하여 다음날 아침
+        KIS 재호출 없이 DB 조회로 종목 선정에 사용.
+
+        신규 테이블:
+        - daily_supply_snapshot: 종목별 T-1 외국인/기관 5일 수급 (FHKST01010900 결과)
+        - foreign_top_ranking: 외국인/기관 순매수 상위 N (FHPTJ04400000 결과)
+        - supply_score_observation: Shadow Run 관측 모드 (계산하되 총점 미반영)
+
+        기존 테이블 보강:
+        - portfolio +7 컬럼: 매수 시점 supply 컨텍스트 박제 (자동 trade_reviews 복사용)
+        - trade_reviews +9 컬럼: 사후 적중률 측정 + Phase 2 direction_match
+        """
+        with self.get_cursor() as cursor:
+            # 1) daily_supply_snapshot 신규 테이블
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_supply_snapshot (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE NOT NULL,
+                    stock_code VARCHAR(10) NOT NULL,
+                    stock_name VARCHAR(50),
+                    foreign_net_5d REAL,
+                    institution_net_5d REAL,
+                    individual_net_5d REAL,
+                    foreign_ratio REAL,
+                    foreign_net_1d REAL,
+                    institution_net_1d REAL,
+                    close_price REAL,
+                    trade_value_5d_avg REAL,
+                    source VARCHAR(20) DEFAULT 'FHKST01010900',
+                    collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, stock_code)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_supply_snapshot_date "
+                "ON daily_supply_snapshot(trade_date)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_supply_snapshot_code "
+                "ON daily_supply_snapshot(stock_code)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_supply_snapshot_date_code "
+                "ON daily_supply_snapshot(trade_date, stock_code)"
+            )
+
+            # 2) foreign_top_ranking 신규 테이블
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS foreign_top_ranking (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE NOT NULL,
+                    kind VARCHAR(20) NOT NULL,
+                    rank INTEGER NOT NULL,
+                    stock_code VARCHAR(10) NOT NULL,
+                    stock_name VARCHAR(50),
+                    net_amount REAL,
+                    source VARCHAR(20) DEFAULT 'FHPTJ04400000',
+                    collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, kind, rank)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_top_ranking_date_kind "
+                "ON foreign_top_ranking(trade_date, kind)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_top_ranking_code "
+                "ON foreign_top_ranking(stock_code)"
+            )
+
+            # 3) supply_score_observation 신규 테이블 (Shadow Run 관측 모드)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS supply_score_observation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    obs_date DATE NOT NULL,
+                    theme_name VARCHAR(100) NOT NULL,
+                    supply_score_v2 REAL,
+                    momentum_score REAL,
+                    news_score REAL,
+                    ai_score REAL,
+                    theme_total_actual REAL,
+                    breakdown_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(obs_date, theme_name)
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_supply_obs_date "
+                "ON supply_score_observation(obs_date)"
+            )
+
+            # 4) portfolio 컬럼 추가 (매수 시점 supply 컨텍스트 박제)
+            portfolio_columns = [
+                ("foreign_net_at_buy", "REAL"),
+                ("institution_net_at_buy", "REAL"),
+                ("supply_strength_at_buy", "REAL"),
+                ("foreign_top_rank_at_buy", "INTEGER"),
+                ("institution_consec_days_at_buy", "INTEGER"),
+                ("theme_supply_score_at_buy", "REAL"),
+                ("ai_supply_signal_at_buy", "TEXT"),
+            ]
+            for col_name, col_type in portfolio_columns:
+                if not self._has_column("portfolio", col_name):
+                    cursor.execute(f"ALTER TABLE portfolio ADD COLUMN {col_name} {col_type}")
+
+            # 5) trade_reviews 컬럼 추가 (사후 분석용 + Phase 2 direction_match)
+            review_columns = [
+                ("foreign_net_5d_at_buy", "REAL"),
+                ("institution_net_5d_at_buy", "REAL"),
+                ("supply_strength_at_buy", "REAL"),
+                ("foreign_top_rank_at_buy", "INTEGER"),
+                ("institution_consec_days_at_buy", "INTEGER"),
+                ("theme_supply_score_at_buy", "REAL"),
+                ("ai_supply_signal_at_buy", "TEXT"),
+                ("foreign_direction_match", "INTEGER"),     # Phase 2 라벨링
+                ("institution_direction_match", "INTEGER"), # Phase 2 라벨링
+            ]
+            for col_name, col_type in review_columns:
+                if not self._has_column("trade_reviews", col_name):
+                    cursor.execute(f"ALTER TABLE trade_reviews ADD COLUMN {col_name} {col_type}")
 
     def init_tables(self) -> None:
         """
@@ -1453,6 +1579,204 @@ class Database:
                 log.get('rsi_at_screen'),
                 int(bool(log.get('theme_slot_protected', 0))),
             ))
+
+    # ===== 수급 신호 관련 메서드 (v16, supply-signal-integration Phase 1-A) =====
+
+    def save_supply_snapshot(self, trade_date: date, stock_code: str, supply: dict) -> None:
+        """종목별 일별 수급 스냅샷 저장 (FHKST01010900 결과).
+
+        supply 딕셔너리 구조:
+            foreign_net (int): 외국인 5일 순매수 (원)
+            institution_net (int): 기관 5일 순매수 (원)
+            individual_net (int): 개인 5일 순매수 (원)
+            foreign_ratio (float): 외국인 보유율 (%)
+            daily (list[dict]): 일별 상세 (date, foreign, institution, close_price)
+
+        멱등성: UNIQUE(trade_date, stock_code) + INSERT OR REPLACE
+        """
+        # T-1 당일치 + 5일 평균 거래대금 계산
+        daily = supply.get("daily", []) or []
+        foreign_1d = None
+        institution_1d = None
+        close_price = None
+        trade_value_5d_avg = None
+        if daily:
+            first = daily[0] or {}
+            foreign_1d_qty = first.get("foreign") or 0
+            institution_1d_qty = first.get("institution") or 0
+            close_price = first.get("close_price") or 0
+            # 일별 순매수금액 = 수량 * 종가
+            if close_price:
+                foreign_1d = foreign_1d_qty * close_price
+                institution_1d = institution_1d_qty * close_price
+            # 5일 거래대금 평균 (수량 * 종가 절대값으로 근사 — 정확한 거래대금 별도 TR 필요)
+            # 근사적으로 외국인+기관+개인 거래량 × 종가로 추정
+            try:
+                values = []
+                for d in daily:
+                    cp = d.get("close_price") or 0
+                    if cp <= 0:
+                        continue
+                    total_qty = abs((d.get("foreign") or 0)) + abs((d.get("institution") or 0)) + abs((d.get("individual") or 0))
+                    if total_qty > 0:
+                        values.append(total_qty * cp)
+                if values:
+                    trade_value_5d_avg = sum(values) / len(values)
+            except Exception:
+                trade_value_5d_avg = None
+
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                INSERT OR REPLACE INTO daily_supply_snapshot (
+                    trade_date, stock_code, stock_name,
+                    foreign_net_5d, institution_net_5d, individual_net_5d, foreign_ratio,
+                    foreign_net_1d, institution_net_1d, close_price, trade_value_5d_avg,
+                    source, collected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                trade_date.isoformat() if isinstance(trade_date, date) else trade_date,
+                stock_code,
+                supply.get("stock_name"),
+                supply.get("foreign_net"),
+                supply.get("institution_net"),
+                supply.get("individual_net"),
+                supply.get("foreign_ratio"),
+                foreign_1d,
+                institution_1d,
+                close_price if close_price else None,
+                trade_value_5d_avg,
+                supply.get("source", "FHKST01010900"),
+            ))
+
+    def save_supply_snapshot_null(self, trade_date: date, stock_code: str,
+                                   stock_name: Optional[str] = None) -> None:
+        """수집 실패 종목의 NULL 행 저장 (graceful fallback 표시용).
+
+        멱등성: INSERT OR REPLACE
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                INSERT OR REPLACE INTO daily_supply_snapshot (
+                    trade_date, stock_code, stock_name, source, collected_at
+                ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                trade_date.isoformat() if isinstance(trade_date, date) else trade_date,
+                stock_code,
+                stock_name,
+                "FHKST01010900_FAILED",
+            ))
+
+    def save_foreign_top_ranking(self, trade_date: date, kind: str,
+                                  items: list[dict]) -> None:
+        """외국인/기관 순매수 상위 N 종목 저장 (FHPTJ04400000 결과).
+
+        Args:
+            trade_date: 거래일
+            kind: 'foreign_buy' / 'foreign_sell' / 'institution_buy' / 'institution_sell'
+            items: [{stock_code, stock_name, net_amount}, ...] (rank 순)
+
+        멱등성: UNIQUE(trade_date, kind, rank) + INSERT OR REPLACE
+        """
+        if not items:
+            return
+        td = trade_date.isoformat() if isinstance(trade_date, date) else trade_date
+        with self.get_cursor() as cursor:
+            # 같은 trade_date+kind는 통째로 교체 (rank가 변할 수 있음)
+            cursor.execute(
+                "DELETE FROM foreign_top_ranking WHERE trade_date = ? AND kind = ?",
+                (td, kind)
+            )
+            for rank_idx, item in enumerate(items, start=1):
+                code = item.get("stock_code") or item.get("code")
+                if not code:
+                    continue
+                cursor.execute("""
+                    INSERT INTO foreign_top_ranking (
+                        trade_date, kind, rank, stock_code, stock_name,
+                        net_amount, source, collected_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    td,
+                    kind,
+                    rank_idx,
+                    code,
+                    item.get("stock_name"),
+                    item.get("net_amount"),
+                    item.get("source", "FHPTJ04400000"),
+                ))
+
+    def save_supply_score_observation(self, obs_date: date, theme_name: str,
+                                       supply_score_v2: float, momentum_score: float,
+                                       news_score: float, ai_score: float,
+                                       theme_total_actual: float,
+                                       breakdown_json: Optional[str] = None) -> None:
+        """Shadow Run 관측 모드 — supply_score를 계산하되 총점 미반영, DB에만 기록.
+
+        Phase 1-B½ (Day 6~19)에 운영하며, 14영업일 후 모멘텀×supply 상관계수 r<0.7
+        검증 후 Phase 1-C에서 활성화 결정.
+
+        멱등성: UNIQUE(obs_date, theme_name) + INSERT OR REPLACE
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                INSERT OR REPLACE INTO supply_score_observation (
+                    obs_date, theme_name, supply_score_v2, momentum_score,
+                    news_score, ai_score, theme_total_actual, breakdown_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                obs_date.isoformat() if isinstance(obs_date, date) else obs_date,
+                theme_name,
+                supply_score_v2,
+                momentum_score,
+                news_score,
+                ai_score,
+                theme_total_actual,
+                breakdown_json,
+            ))
+
+    def get_supply_snapshot(self, stock_code: str,
+                             trade_date: Optional[date] = None) -> Optional[dict]:
+        """종목 수급 스냅샷 조회. trade_date=None이면 가장 최근 영업일.
+
+        Returns:
+            dict 또는 None (데이터 없음)
+        """
+        with self.get_cursor() as cursor:
+            if trade_date is None:
+                cursor.execute("""
+                    SELECT * FROM daily_supply_snapshot
+                    WHERE stock_code = ?
+                    ORDER BY trade_date DESC LIMIT 1
+                """, (stock_code,))
+            else:
+                td = trade_date.isoformat() if isinstance(trade_date, date) else trade_date
+                cursor.execute("""
+                    SELECT * FROM daily_supply_snapshot
+                    WHERE stock_code = ? AND trade_date = ?
+                """, (stock_code, td))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_latest_supply_snapshot_date(self) -> Optional[str]:
+        """가장 최근 daily_supply_snapshot trade_date (ISO 문자열) 또는 None."""
+        with self.get_cursor() as cursor:
+            cursor.execute(
+                "SELECT MAX(trade_date) FROM daily_supply_snapshot"
+            )
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else None
+
+    def count_supply_snapshots_for_date(self, trade_date: date) -> int:
+        """특정 거래일의 daily_supply_snapshot 행 개수 (운영 모니터링용)."""
+        td = trade_date.isoformat() if isinstance(trade_date, date) else trade_date
+        with self.get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM daily_supply_snapshot WHERE trade_date = ?",
+                (td,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else 0
 
     # ===== 시스템 상태 관련 메서드 =====
 

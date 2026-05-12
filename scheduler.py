@@ -93,6 +93,7 @@ class TradingScheduler:
         self.on_monitoring_stop: Optional[Callable] = None      # 15:30 모니터링 종료
         self.on_post_trade_analysis: Optional[Callable] = None  # 17:00 매매 사후 분석
         self.on_daily_theme_collection: Optional[Callable] = None  # 17:05 일별 테마 수집
+        self.on_supply_collection: Optional[Callable] = None  # 17:10 외국인/기관 수급 수집 (v16)
         self.on_weekly_trade_review: Optional[Callable] = None  # 금 17:30 주간 복기
         self.on_daily_health_check: Optional[Callable] = None  # 16:10 일일 헬스체크
         self.on_midweek_sell_profit: Optional[Callable] = None  # 09:00 주중 교체 수익 매도
@@ -255,6 +256,41 @@ class TradingScheduler:
             name='일별 테마 수집',
             replace_existing=True
         )
+
+        # 12-1. 외국인/기관 수급 수집 (KST 17:10, v16 supply-signal-integration Phase 1-A)
+        # T-1 수급 데이터를 DB에 1회 수집 → 다음날 아침 KIS 재호출 없이 supply 신호 활용.
+        # SUPPLY_SIGNAL_ENABLED=False 시 잡 등록은 되지만 핸들러가 즉시 return (run_supply_collection 내부 가드).
+        # 시각은 config.SUPPLY_COLLECT_HOUR/MINUTE 로 조정 가능 (기본 17:10).
+        self.scheduler.add_job(
+            self._run_supply_collection,
+            CronTrigger(
+                hour=settings.SUPPLY_COLLECT_HOUR,
+                minute=settings.SUPPLY_COLLECT_MINUTE,
+                day_of_week='mon-fri',
+                timezone=_KST_TZ,
+            ),
+            id='supply_collection',
+            name='외국인/기관 수급 수집',
+            replace_existing=True
+        )
+
+        # 12-2. 외국인/기관 수급 수집 재시도 (KST 18:00, 17:10 잡 실패 대비)
+        # 17:10 잡이 KIS 인증 실패 등으로 전체 실패한 경우의 안전망.
+        # 단일 종목 retry는 _collect_one_stock 내부 3회 retry가 처리하므로 여기서는 잡 자체 재실행.
+        # SUPPLY_RETRY_JOB_HOUR=0이면 미등록.
+        if settings.SUPPLY_RETRY_JOB_HOUR > 0:
+            self.scheduler.add_job(
+                self._run_supply_collection,
+                CronTrigger(
+                    hour=settings.SUPPLY_RETRY_JOB_HOUR,
+                    minute=settings.SUPPLY_RETRY_JOB_MINUTE,
+                    day_of_week='mon-fri',
+                    timezone=_KST_TZ,
+                ),
+                id='supply_collection_retry',
+                name='외국인/기관 수급 수집 재시도 (18:00)',
+                replace_existing=True
+            )
 
         # 13. 주간 매매 복기 (KST 금요일 17:30)
         self.scheduler.add_job(
@@ -503,6 +539,26 @@ class TradingScheduler:
         except Exception as e:
             logger.error(f"일별 테마 수집 실패: {e}")
             self._send_error_notification("일별 테마 수집", str(e))
+
+    @_skip_on_holiday
+    async def _run_supply_collection(self) -> None:
+        """17:10 - 외국인/기관 수급 수집 (v16, supply-signal-integration Phase 1-A).
+
+        SUPPLY_SIGNAL_ENABLED=False 시 main.run_supply_collection 내부에서 즉시 return.
+        """
+        logger.info("=" * 60)
+        logger.info("📊 외국인/기관 수급 수집 시작 (17:10)")
+        logger.info("=" * 60)
+
+        try:
+            if self.on_supply_collection:
+                await self.on_supply_collection()
+            else:
+                logger.warning("수급 수집 콜백 미등록")
+
+        except Exception as e:
+            logger.error(f"수급 수집 실패: {e}")
+            self._send_error_notification("외국인/기관 수급 수집 (17:10)", str(e))
 
     @_skip_on_holiday
     async def _run_midweek_sell_profit(self) -> None:
