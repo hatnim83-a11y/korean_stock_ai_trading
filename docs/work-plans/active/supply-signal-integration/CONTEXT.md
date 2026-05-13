@@ -279,3 +279,130 @@ def save_trade_review(self, review: dict) -> None:
 - Phase 1-A는 구현·검증 완료. 운영 게이트(3영업일)는 사용자 시간 필요
 - **Phase 1-B 진입은 3영업일 후 새 대화로 이어가도 무방** — CONTEXT.md + CHECKLIST.md + change_log.md만 읽으면 충분히 복원 가능
 - 별도 PR 또는 같은 브랜치 연속 작업 모두 OK
+
+---
+
+## 10. 작업 중 발견 사항 (2026-05-13 세션, Phase 1-A 사후 검증 + Phase 1-B 구현)
+
+### 10.1 세션 흐름 (Phase 1-A 사후 검증 → Phase 1-B 구현 → 배포)
+
+**① Phase 1-A 사후 검증 (5/12 17:10 잡 발화 미확인)**
+- 사용자 질문 "잡 등록된 건 어찌 확인하는거야" → 3가지 방법 안내
+- 5/12 KST 22:44 시점 supply 로그 grep → **로그 없음** (17:10 발화 X)
+- 원인: 봇 PID 2196773이 5/11 11:13에 시작, Phase 1-A 코드 변경(5/12 01:30) 후 systemctl restart 미진행
+- 옵션 B 선택 (수동 수집 + restart 병행):
+  - `python -m modules.supply_collector.collector --date 2026-05-12` 실행
+  - **결과: universe 82종목 / success 82 / fail 0 / 13.4초**
+  - 000990 KIS 500 에러 1건은 retry 자동 복구
+- systemctl restart (PID 2196773 → 2949086)
+- 등록 잡 확인: `외국인/기관 수급 수집: cron[hour='17', minute='10']` + `재시도 (18:00)` 모두 정상
+- DB 검증: daily_supply_snapshot 82건, foreign_top_ranking 30건, 의미있는 신호 캡처 (454910 +3168억 / 277810 +2288억 / 006400 +1574억 등)
+
+**② Phase 1-B 구현 시작 (사용자 옵션 1 = 즉시 코드 작업 선택)**
+- 사전 검증: `grep -rn "get_stock_full_info"` → 외부 호출자 2곳 (screener.py:300 + __init__.py:20) 영향 없음 확인
+- kis_api.py:1081 `get_stock_full_info(skip_supply=False)` 옵션 추가 (기본 False 회귀 안전)
+- database.py 헬퍼 5개 신규:
+  - `get_supply_snapshots_bulk`: IN 절 + 최근 trade_date 자동
+  - `get_theme_supply_aggregate`: 평균 + 양수 비율
+  - `is_in_foreign_top`: kind 분리
+  - `update_portfolio_supply_context`: 화이트리스트 SQL injection 방어
+  - `get_supply_attribution_data`: KST 기반 days 필터
+- screener.py:280-380 DB 조회 통합:
+  - 진입부 bulk 조회 (supply_map + foreign_top_map)
+  - 루프 안 stock_info에 DB 데이터 주입 (skip_supply 분기)
+  - 외인 TOP 진입 시 `stock_info["foreign_top_rank"]` 채움 (Phase 1-C 점수 가산 대비)
+- 단위 테스트 14건 작성 → 실 DB 검증 통과 (5/12 82건 데이터로)
+
+**③ code-tester 검증 → 심각 3건 즉시 수정**
+- **심각 1**: `get_supply_attribution_data`의 SQLite `DATE('now')`는 UTC 기준 → KST 15:00~24:00 호출 시 오늘 데이터 누락. `now_kst() + timedelta` 컷오프로 수정
+- **심각 2**: screener.py foreign_top_ranking bulk 조회에 날짜 필터 없어 과거 누적 rank가 현재 신호로 오용. `MAX(trade_date)` 서브쿼리로 가장 최근 날짜만 필터
+- **심각 3**: portfolio.`foreign_net_at_buy` vs trade_reviews.`foreign_net_5d_at_buy` 컬럼명 불일치 → Phase 1-D에서 ctx 키 매핑 시 누락 위험. docstring 매핑 가이드 명시 (스키마 무변경)
+- 주의 2건 반영: screener.py 가독성 + 테스트 보강 2건 추가 (UTC 회귀 차단 + skip_supply mock 동작 검증)
+
+**④ 회귀 검증 + 배포**
+- 단위 테스트 16건 PASS (test_supply_db_helpers.py)
+- 회귀 누적 10개 파일 113건+ PASS
+- systemctl restart (PID 2949086 → 3305153)
+- 커밋 + 푸쉬: `599493a..e014141`, 6 files / 717 insertions / 29 deletions
+
+### 10.2 추가로 발견된 사실들
+
+| 발견 | 사실 |
+|---|---|
+| KIS FHPTJ04400000 응답 크기 | **30건만 반환** (TOP200 요청해도). settings.SUPPLY_RANKING_TOP_N=200 의미 없음. Phase 1-C `foreign_top_rank ≤ 200` 조건은 사실상 `≤ 30` 으로 작동 |
+| portfolio 컬럼 take_profit | `take_profit`/`stop_loss` (테스트 작성 시 잘못 사용한 `target_return`/`max_holding_days` 오류 발견) |
+| KIS get_stock_full_info 내부 | 현재가 + `get_investor_trading` + 기술지표 + 재무 4종 호출. `skip_supply=True`만으로 4종 → 3종 줄어듦. 추가 최적화 여지: 기술지표도 DB 캐시 가능 (별도 작업) |
+| screener.py 매 테마마다 DB connect/close | code-tester 주의 4번. Phase 2 리팩토링으로 미룸 (현재 성능 임계치 미달) |
+| 5/13 날짜 변경 | 작업 중 자정 통과. 5/12 → 5/13. CONTEXT 섹션 9는 5/12, 섹션 10은 5/13 세션 |
+
+### 10.3 의도된 잠재 위험 (Phase 1-D 진입 전 재확인 필요)
+
+1. **컬럼명 매핑 불일치** (심각 3): Phase 1-D `save_trade_review` 자동 보강 시 portfolio.`foreign_net_at_buy` → trade_reviews.`foreign_net_5d_at_buy`로 명시적 매핑 필요. docstring에 가이드 추가했으나 실제 코드 작성 시 매핑 표 재확인
+2. **KIS FHPTJ04400000 30건 한계**: Phase 1-C 점수 가산 시 `foreign_top_rank ≤ 200` 조건은 사실상 `≤ 30`. 이대로 둘지 vs 별도 TR로 확장할지 결정 필요 (Phase 1-C 활성화 직전)
+
+### 10.4 다음 단계 (5/13 자연 발화 검증)
+
+**5/13(화) 09:05 — Phase 1-B 검증**
+```bash
+sudo journalctl -u trading_system --since "09:00" | grep -E "DB 수급 조회|스크리닝 시작|스크리닝 완료"
+```
+기대 출력:
+```
+🔍 [반도체] 테마 스크리닝 시작 (10개 종목, RSI≤70)
+   📥 [반도체] DB 수급 조회: snapshot=8/10, foreign_top=2
+✅ [반도체] 스크리닝 완료: ...
+```
+
+**5/13(화) 17:10 — Phase 1-A 게이트 1일차**
+- 텔레그램 알림 수신: `📊 수급 수집 완료 (2026-05-13)`
+- DB: `daily_supply_snapshot WHERE trade_date='2026-05-13'` 행 수 ≥ 100
+
+**모두 정상이면**: Phase 1-B½ Shadow Run 2주 진입 (Task #4)
+
+### 10.5 새 대화에서 이어 받는 방법
+
+다음 세션 시작 시 권장 프롬프트:
+
+> "/resume supply-signal-integration. 5/13 09:05 + 17:10 결과 확인."
+
+또는 게이트 통과 시:
+
+> "/resume supply-signal-integration. Phase 1-B 게이트 통과 확인. Phase 1-B½ Shadow Run 진입해줘."
+
+문서 우선순위:
+1. CHECKLIST.md (현재 진행 상태)
+2. CONTEXT.md 섹션 10 (이번 세션 + 다음 단계)
+3. PLAN.md (전체 그림 + Phase 1-B½ Shadow Run 상세)
+4. change_log.md 마지막 2줄 (Phase 1-A + Phase 1-B 배포 이력)
+
+### 10.6 컨텍스트 사용량
+
+- 현재 누적 사용량: 약 540K tokens (1M 한도 내, 다음 세션 위해 새로 시작 권장)
+- **다음 세션 권장**: 새 대화에서 `/resume`으로 시작 (CONTEXT.md 자동 로드)
+- 본 세션은 Phase 1-A 사후 검증 + Phase 1-B 완료에서 자연 종료점 도달
+
+### 10.7 Task 상태
+
+```
+#1 [completed] 3문서 생성
+#2 [completed] Phase 1-A 데이터 파이프라인
+#3 [completed] Phase 1-B DB 조회 통합  ← 본 세션 완료
+#4 [pending]   Phase 1-B½ Shadow Run 2주  ← 다음 단계
+#5 [pending]   Phase 1-C 점수 활성화 점진 배포
+#6 [pending]   Phase 1-D AI Verifier + 매수 박제 hook
+```
+
+### 10.8 운영 환경 상태
+
+- 봇 PID: 3305153 (5/13 02:49:25 시작, Phase 1-A + 1-B 코드 모두 로드)
+- DB 스키마: v16
+- 잡 등록 상태:
+  - 17:10 supply_collection: 등록 OK
+  - 18:00 supply_collection_retry: 등록 OK (50건 이상 시 중복 호출 방어)
+  - 09:05 stock_screening: Phase 1-B 적용 (DB 우선 + KIS 폴백)
+- 토글 상태 (모두 기본값):
+  - SUPPLY_SIGNAL_ENABLED=True
+  - SUPPLY_SCORE_OBSERVE_ONLY=True (Shadow Run 대기 모드)
+  - SUPPLY_SCORE_MAX=0.0 (총점 미반영)
+  - SUPPLY_STRENGTH_ENABLED=False
+  - AI_PROMPT_SUPPLY_ENHANCED=True (Phase 1-D에서 활용)
