@@ -53,21 +53,35 @@
 
 ## Phase 1-B 구현 (Day 4~5) — DB 조회 통합
 
-### 사전 검증
-- [ ] `grep -rn "get_stock_full_info" --include="*.py"` 외부 호출자 grep + 영향 분석
+### 사전 검증 (완료)
+- [x] `grep -rn "get_stock_full_info" --include="*.py"` 외부 호출자 grep + 영향 분석
+  - 결과: screener.py:300 + __init__.py:20 (테스트) 2곳, skip_supply 기본값 False로 회귀 안전
 
-### 구현
-- [ ] `database.py` 헬퍼 6개: `get_supply_snapshot`, `get_supply_snapshots_bulk`, `get_theme_supply_aggregate`, `is_in_foreign_top`, `update_portfolio_supply_context`, `get_supply_attribution_data`
-- [ ] `modules/stock_screener/kis_api.py:1081` `get_stock_full_info(skip_supply=False)` 옵션 추가
-- [ ] `modules/stock_screener/screener.py:280-380` `get_supply_snapshots_bulk` 일괄 조회로 KIS 호출 제거
+### 구현 (완료)
+- [x] `database.py` 헬퍼 6개 (1개는 Phase 1-A에 이미 추가됨):
+  - `get_supply_snapshot` (Phase 1-A 완료)
+  - `get_supply_snapshots_bulk` (신규, IN 절 + 최근 날짜 자동)
+  - `get_theme_supply_aggregate` (신규, 평균 + 양수 비율)
+  - `is_in_foreign_top` (신규, kind 분리)
+  - `update_portfolio_supply_context` (신규, 화이트리스트 SQL injection 방어)
+  - `get_supply_attribution_data` (신규, KST 기반 days 필터)
+- [x] `modules/stock_screener/kis_api.py:1081` `get_stock_full_info(skip_supply=False)` 옵션 추가
+- [x] `modules/stock_screener/screener.py:280-380` DB 조회 진입부 + 루프 내 stock_info 주입
 
-### 검증
-- [ ] 회귀 테스트: `SUPPLY_SIGNAL_ENABLED=False` 시 기존 동작 일치
-- [ ] KIS `get_investor_trading` 호출 횟수 감소 확인 (로그 측정)
-- [ ] 스크리닝 결과가 Phase 1-A 이전과 동일 (점수 0이므로 동등성 유지)
-- [ ] code-tester 에이전트 통과
+### 검증 (완료)
+- [x] `pytest tests/test_supply_db_helpers.py` 16/16 PASS
+- [x] 회귀 9개 파일 전체 PASS (이전 113건+ 영향 없음)
+- [x] 회귀 안전성: `SUPPLY_SIGNAL_ENABLED=False` 시 `supply_map={}` → 모든 종목 KIS 폴백 (기존 동작 100% 보존)
+- [x] code-tester 에이전트 통과 (심각 3건/주의 4건/참고 3건 발견 → 심각 3건 즉시 수정, 주의 4건 부분 반영)
+  - 심각 1: `DATE('now')` UTC 버그 → `now_kst() + timedelta` 컷오프로 수정
+  - 심각 2: `foreign_top_ranking` 날짜 필터 누락 → `MAX(trade_date)` 서브쿼리 추가
+  - 심각 3: portfolio vs trade_reviews 컬럼명 매핑 → docstring 명시 (스키마 무변경)
+- [x] 실 DB 검증: bulk 조회 3/4건, theme 집계 양수 비율 100%/33.3%, foreign_top rank 1·2·3 정확, update rowcount=1
 
-### 운영 게이트 (2영업일)
+### 운영 게이트 (2영업일, 사용자 진행)
+- [ ] systemctl restart trading_system (Phase 1-B 코드 적용)
+- [ ] 5/13(화) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 (로그 `📥 DB 수급 조회: snapshot=N/M`)
+- [ ] KIS get_investor_trading 호출 횟수 감소 확인
 - [ ] **사용자 확인 → Shadow Run 진입**
 
 ---

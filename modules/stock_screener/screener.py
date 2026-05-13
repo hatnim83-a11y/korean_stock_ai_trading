@@ -275,7 +275,50 @@ def screen_stocks_in_theme(
         should_close = True
     else:
         should_close = False
-    
+
+    # v16 supply-signal-integration Phase 1-B:
+    # 17:10에 미리 수집된 daily_supply_snapshot DB에서 종목별 수급을 일괄 조회.
+    # SUPPLY_SIGNAL_ENABLED=True 시 09:05 시점 KIS get_investor_trading 호출 제거 → 22초 절약.
+    # 데이터 없는 종목은 KIS 호출로 graceful fallback (skip_supply=False).
+    supply_map: dict[str, dict] = {}
+    foreign_top_map: dict[str, int] = {}
+    if _settings.SUPPLY_SIGNAL_ENABLED and stock_codes:
+        try:
+            from database import Database
+            _db = Database()
+            _db.connect()
+            try:
+                supply_map = _db.get_supply_snapshots_bulk(stock_codes)
+                # 외국인 TOP 진입 종목 일괄 조회 (개별 is_in_foreign_top × N 호출 회피).
+                # **반드시 가장 최근 trade_date로 필터** — 과거 누적 rank가 현재 신호로 오용되는
+                # 회귀 차단 (code-tester 심각 #2 반영).
+                with _db.get_cursor() as _cursor:
+                    placeholders = ",".join("?" * len(stock_codes))
+                    _cursor.execute(
+                        f"""SELECT stock_code, MIN(rank) AS min_rank
+                            FROM foreign_top_ranking
+                            WHERE stock_code IN ({placeholders})
+                              AND kind = 'foreign_buy'
+                              AND trade_date = (
+                                  SELECT MAX(trade_date) FROM foreign_top_ranking
+                                  WHERE kind = 'foreign_buy'
+                              )
+                            GROUP BY stock_code""",
+                        list(stock_codes)
+                    )
+                    for r in _cursor.fetchall():
+                        foreign_top_map[r["stock_code"]] = r["min_rank"]
+                logger.info(
+                    f"   📥 [{theme_name}] DB 수급 조회: snapshot={len(supply_map)}/{len(stock_codes)}, "
+                    f"foreign_top={len(foreign_top_map)}"
+                )
+            finally:
+                _db.close()
+        except Exception as e:
+            logger.warning(f"   ⚠️ [{theme_name}] DB 수급 조회 실패 (KIS 폴백): {e}")
+            supply_map = {}
+            foreign_top_map = {}
+
     candidates = []
     screening_logs = []
 
@@ -295,9 +338,14 @@ def screen_stocks_in_theme(
             filter_stats["total"] += 1
             try:
                 # 종목 종합 정보 조회 (최대 3회 retry, 지수 백오프)
+                # v16 Phase 1-B: DB에 supply 데이터 있으면 KIS 수급 호출 스킵
+                # (skip_supply=True). 없으면 기존 동작 (skip_supply=False).
+                # supply_map이 빈 dict면 get() → None, NULL 행이면 foreign_net_5d=None → False
+                snap = supply_map.get(code)
+                use_db_supply = snap is not None and snap.get("foreign_net_5d") is not None
                 stock_info = None
                 for attempt in range(3):
-                    stock_info = kis_api.get_stock_full_info(code)
+                    stock_info = kis_api.get_stock_full_info(code, skip_supply=use_db_supply)
                     if stock_info:
                         break
                     if attempt < 2:
@@ -309,6 +357,20 @@ def screen_stocks_in_theme(
                     logger.warning(f"[{code}] 종목 정보 조회 실패 (3회 재시도 후)")
                     filter_stats["info_fail"] += 1
                     continue
+
+                # v16 Phase 1-B: DB 수급 데이터 주입 (skip_supply=True인 경우)
+                if use_db_supply:
+                    stock_info["foreign_net"] = snap.get("foreign_net_5d", 0) or 0
+                    stock_info["institution_net"] = snap.get("institution_net_5d", 0) or 0
+                    stock_info["foreign_ratio"] = snap.get("foreign_ratio", 0) or 0
+                    # Phase 1-D AI 프롬프트용 추가 컨텍스트
+                    stock_info["foreign_net_1d"] = snap.get("foreign_net_1d")
+                    stock_info["institution_net_1d"] = snap.get("institution_net_1d")
+                    stock_info["trade_value_5d_avg"] = snap.get("trade_value_5d_avg")
+                    stock_info["supply_snapshot_date"] = snap.get("trade_date")
+                # 외국인 TOP 진입 종목 표시 (Phase 1-C 점수 가산용)
+                if code in foreign_top_map:
+                    stock_info["foreign_top_rank"] = foreign_top_map[code]
 
                 # 테마 정보 추가
                 stock_info["theme"] = theme_name

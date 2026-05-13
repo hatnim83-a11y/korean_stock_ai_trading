@@ -1078,20 +1078,25 @@ class KISApi:
     
     # ===== 종목 종합 정보 =====
     
-    def get_stock_full_info(self, stock_code: str) -> Optional[dict]:
+    def get_stock_full_info(self, stock_code: str, skip_supply: bool = False) -> Optional[dict]:
         """
         종목 종합 정보 조회 (현재가 + 수급 + 기술적 지표 + 재무)
-        
+
         여러 API를 호출하여 종합 정보를 반환합니다.
-        
+
         Args:
             stock_code: 종목코드
-        
+            skip_supply: True면 수급(get_investor_trading) 호출 스킵.
+                Phase 1-B (v16, supply-signal-integration)에서 09:05 스크리닝이 17:10에
+                미리 수집된 daily_supply_snapshot DB 데이터를 사용하도록 보강하는 용도.
+                기본 False (기존 동작 유지, 회귀 안전).
+
         Returns:
-            종합 정보 딕셔너리
+            종합 정보 딕셔너리. skip_supply=True면 foreign_net/institution_net/foreign_ratio 키는
+            호출 측이 DB에서 채워넣어야 함.
         """
         result = {"code": stock_code}
-        
+
         # 현재가 조회
         price_info = self.get_current_price(stock_code)
         if price_info:
@@ -1100,12 +1105,13 @@ class KISApi:
             logger.warning(f"[{stock_code}] 현재가 조회 실패")
             return None
 
-        # 수급 조회
-        investor_info = self.get_investor_trading(stock_code)
-        if investor_info:
-            result["foreign_net"] = investor_info["foreign_net"]
-            result["institution_net"] = investor_info["institution_net"]
-            result["foreign_ratio"] = investor_info.get("foreign_ratio", 0)
+        # 수급 조회 (skip_supply=True면 KIS 호출 생략 — DB 조회로 대체됨)
+        if not skip_supply:
+            investor_info = self.get_investor_trading(stock_code)
+            if investor_info:
+                result["foreign_net"] = investor_info["foreign_net"]
+                result["institution_net"] = investor_info["institution_net"]
+                result["foreign_ratio"] = investor_info.get("foreign_ratio", 0)
 
         # 기술적 지표
         tech_info = self.get_technical_indicators(stock_code)

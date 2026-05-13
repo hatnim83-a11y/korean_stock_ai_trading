@@ -20,7 +20,7 @@ database.py - SQLite 데이터베이스 관리 모듈
 import json
 import shutil
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
@@ -1777,6 +1777,193 @@ class Database:
             )
             row = cursor.fetchone()
             return row[0] if row else 0
+
+    def get_supply_snapshots_bulk(self, stock_codes: list[str],
+                                    trade_date: Optional[date] = None) -> dict[str, dict]:
+        """다수 종목 수급 스냅샷 일괄 조회 (Phase 1-B, 09:05 스크리닝용).
+
+        Args:
+            stock_codes: 종목코드 리스트 (6자리)
+            trade_date: 거래일. None이면 각 종목별 가장 최근 영업일 자동 선택.
+
+        Returns:
+            {stock_code: snapshot_dict} 딕셔너리. 데이터 없는 종목은 키 누락.
+        """
+        if not stock_codes:
+            return {}
+        placeholders = ",".join("?" * len(stock_codes))
+        result: dict[str, dict] = {}
+        with self.get_cursor() as cursor:
+            if trade_date is None:
+                # 각 종목별 가장 최근 영업일 (서브쿼리로 MAX)
+                cursor.execute(
+                    f"""SELECT s.* FROM daily_supply_snapshot s
+                        INNER JOIN (
+                            SELECT stock_code, MAX(trade_date) AS max_date
+                            FROM daily_supply_snapshot
+                            WHERE stock_code IN ({placeholders})
+                            GROUP BY stock_code
+                        ) latest
+                        ON s.stock_code = latest.stock_code AND s.trade_date = latest.max_date""",
+                    list(stock_codes)
+                )
+            else:
+                td = trade_date.isoformat() if isinstance(trade_date, date) else trade_date
+                cursor.execute(
+                    f"""SELECT * FROM daily_supply_snapshot
+                        WHERE stock_code IN ({placeholders}) AND trade_date = ?""",
+                    [*stock_codes, td]
+                )
+            for row in cursor.fetchall():
+                d = dict(row)
+                result[d["stock_code"]] = d
+        return result
+
+    def get_theme_supply_aggregate(self, stock_codes: list[str],
+                                    trade_date: Optional[date] = None) -> dict:
+        """테마 종목 리스트의 외국인/기관 평균 + 양수 비율 집계 (Phase 1-B, 08:30 테마 분석용).
+
+        Args:
+            stock_codes: 테마에 속한 종목코드 리스트 (보통 상위 5~8개)
+            trade_date: 거래일. None이면 각 종목별 가장 최근 영업일.
+
+        Returns:
+            {'foreign_avg': float (원), 'institution_avg': float (원),
+             'foreign_pos_ratio': float (%, 0~100), 'institution_pos_ratio': float,
+             'n': int (실제 스냅샷 있는 종목 수)}
+        """
+        snapshots = self.get_supply_snapshots_bulk(stock_codes, trade_date)
+        if not snapshots:
+            return {
+                "foreign_avg": 0.0, "institution_avg": 0.0,
+                "foreign_pos_ratio": 0.0, "institution_pos_ratio": 0.0,
+                "n": 0,
+            }
+        foreign_vals = [s.get("foreign_net_5d") for s in snapshots.values()
+                        if s.get("foreign_net_5d") is not None]
+        inst_vals = [s.get("institution_net_5d") for s in snapshots.values()
+                     if s.get("institution_net_5d") is not None]
+
+        def _safe_avg(vals: list[float]) -> float:
+            return sum(vals) / len(vals) if vals else 0.0
+
+        def _pos_ratio(vals: list[float]) -> float:
+            return (100.0 * sum(1 for v in vals if v > 0) / len(vals)) if vals else 0.0
+
+        return {
+            "foreign_avg": _safe_avg(foreign_vals),
+            "institution_avg": _safe_avg(inst_vals),
+            "foreign_pos_ratio": _pos_ratio(foreign_vals),
+            "institution_pos_ratio": _pos_ratio(inst_vals),
+            "n": len(snapshots),
+        }
+
+    def is_in_foreign_top(self, stock_code: str, kind: str = "foreign_buy",
+                           trade_date: Optional[date] = None) -> Optional[int]:
+        """foreign_top_ranking에서 종목의 순위 반환. 미진입이면 None.
+
+        Args:
+            stock_code: 6자리 종목코드
+            kind: 'foreign_buy' / 'foreign_sell' / 'institution_buy' / 'institution_sell'
+            trade_date: 거래일. None이면 가장 최근 영업일.
+
+        Returns:
+            rank (1~) 또는 None
+        """
+        with self.get_cursor() as cursor:
+            if trade_date is None:
+                cursor.execute(
+                    "SELECT rank FROM foreign_top_ranking "
+                    "WHERE stock_code = ? AND kind = ? "
+                    "ORDER BY trade_date DESC LIMIT 1",
+                    (stock_code, kind)
+                )
+            else:
+                td = trade_date.isoformat() if isinstance(trade_date, date) else trade_date
+                cursor.execute(
+                    "SELECT rank FROM foreign_top_ranking "
+                    "WHERE stock_code = ? AND kind = ? AND trade_date = ?",
+                    (stock_code, kind, td)
+                )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def update_portfolio_supply_context(self, stock_code: str, ctx: dict) -> int:
+        """매수 직후 portfolio 행에 supply 컨텍스트 박제 (Phase 1-D 매수 hook용).
+
+        Phase 1-B에서는 헬퍼만 추가하고 호출은 Phase 1-D에서. 미리 작성하여
+        스키마/시그니처 안정성 확보.
+
+        Args:
+            stock_code: 종목코드
+            ctx: 다음 화이트리스트 키만 인식 (외 키는 silent ignore — SQL injection 방어):
+                - foreign_net_at_buy (REAL): 외국인 5일 순매수 (원). **portfolio 컬럼명**
+                - institution_net_at_buy (REAL): 기관 5일 순매수 (원). **portfolio 컬럼명**
+                - supply_strength_at_buy (REAL): 0~2 정규화 강도
+                - foreign_top_rank_at_buy (INTEGER): 외인 TOP 진입 순위 (미진입 None)
+                - institution_consec_days_at_buy (INTEGER): 기관 연속 매수일수
+                - theme_supply_score_at_buy (REAL): 테마 supply 점수 (Phase 1-C)
+                - ai_supply_signal_at_buy (TEXT): AI 응답의 supply_signal_strength
+
+        Returns:
+            UPDATE된 행 수 (보통 1, 종목 미보유 시 0)
+
+        Note:
+            **컬럼명 매핑 주의**: trade_reviews는 동일 의미를 `_5d_at_buy` 접미사로 보존
+            (예: `foreign_net_5d_at_buy`). Phase 1-D `save_trade_review` 자동 보강 시
+            portfolio.foreign_net_at_buy → trade_reviews.foreign_net_5d_at_buy로 매핑 필요.
+            (이름 불일치는 v16 마이그레이션 시점 결정 — portfolio는 매수 시점 박제용,
+            trade_reviews는 사후 분석 명세상 `5d` 명시).
+        """
+        if not ctx:
+            return 0
+        # 화이트리스트로 SQL injection 방어
+        allowed = {
+            "foreign_net_at_buy", "institution_net_at_buy", "supply_strength_at_buy",
+            "foreign_top_rank_at_buy", "institution_consec_days_at_buy",
+            "theme_supply_score_at_buy", "ai_supply_signal_at_buy",
+        }
+        filtered = {k: v for k, v in ctx.items() if k in allowed}
+        if not filtered:
+            return 0
+        sets = ", ".join(f"{k} = ?" for k in filtered.keys())
+        sql = f"UPDATE portfolio SET {sets} WHERE stock_code = ? AND status = 'holding'"
+        values = list(filtered.values()) + [stock_code]
+        with self.get_cursor() as cursor:
+            cursor.execute(sql, values)
+            return cursor.rowcount
+
+    def get_supply_attribution_data(self, days: int = 14) -> list[dict]:
+        """trade_reviews에서 supply 신호 적중률 분석용 데이터 슬라이스 (Phase 2 일일 리포트용).
+
+        Phase 1-B에서는 헬퍼만 추가하고 사용은 Phase 2에서.
+
+        Args:
+            days: 최근 N일 매도 (sell_date 기준, KST 영업일)
+
+        Returns:
+            list of dict: stock_code, stock_name, theme, profit_rate, hold_days,
+                supply_strength_at_buy, foreign_net_5d_at_buy 등
+
+        Note:
+            SQLite `DATE('now')`는 서버 UTC 기준이라 KST 15:00~24:00 사이 호출 시
+            오늘 매도 데이터가 누락될 수 있음. 따라서 `now_kst()` 기준으로 컷오프 계산.
+        """
+        cutoff = (now_kst().date() - timedelta(days=days)).isoformat()
+        with self.get_cursor() as cursor:
+            cursor.execute(
+                """SELECT stock_code, stock_name, theme, profit_rate, hold_days,
+                          foreign_net_5d_at_buy, institution_net_5d_at_buy,
+                          supply_strength_at_buy, foreign_top_rank_at_buy,
+                          institution_consec_days_at_buy, theme_supply_score_at_buy,
+                          ai_supply_signal_at_buy,
+                          foreign_direction_match, institution_direction_match
+                   FROM trade_reviews
+                   WHERE sell_date >= ?
+                   ORDER BY sell_date DESC""",
+                (cutoff,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     # ===== 시스템 상태 관련 메서드 =====
 
