@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import settings, now_kst
+from modules.trading_engine.portfolio_monitor_v2 import MONITOR_STATE_FILENAME
 
 
 def _service_is_active(service_name: str = "trading_system") -> bool:
@@ -67,7 +68,7 @@ def main() -> int:
         )
         return 1
 
-    json_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+    json_path = Path(settings.DATABASE_PATH).parent / MONITOR_STATE_FILENAME
     db_path = Path(settings.DATABASE_PATH)
 
     if not json_path.exists():

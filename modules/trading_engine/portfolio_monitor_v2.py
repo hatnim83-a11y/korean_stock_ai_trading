@@ -17,6 +17,7 @@ portfolio_monitor_v2.py - 개선된 포트폴리오 실시간 모니터링 모�
 """
 
 import asyncio
+import json
 from datetime import datetime, time as dt_time
 from typing import Optional, Callable
 from dataclasses import dataclass, field
@@ -36,6 +37,8 @@ from modules.trading_engine.trading_engine import TradingEngine
 
 # ===== 상수 정의 =====
 CHECK_INTERVAL = 1  # 체크 간격 (초)
+MONITOR_STATE_FILENAME = "monitor_state.json"  # 트레일링 상태 JSON 파일명 (DATABASE_PATH 와 같은 디렉토리)
+_RESIDUE_SANITY_RATIO = 1.02  # JSON 폴백 잔재 판정 임계 (highest_price > buy_price × 1.02 → 직전 사이클 잔재)
 
 
 class SellReason(Enum):
@@ -310,8 +313,7 @@ class PortfolioMonitorV2:
                 if db:
                     db.close()
             # monitor_state.json 잔재 키 동기 삭제 (BE 손절 오발동 차단)
-            import json
-            state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+            state_path = Path(settings.DATABASE_PATH).parent / MONITOR_STATE_FILENAME
             try:
                 if state_path.exists():
                     with open(state_path) as f:
@@ -373,8 +375,6 @@ class PortfolioMonitorV2:
 
     def _restore_trailing_state(self) -> None:
         """DB에서 트레일링 상태 복원 (재시작 시). DB 우선, JSON 폴백."""
-        import json
-
         # 1) DB에서 position_state 로드 시도
         state = {}
         db_source = False
@@ -394,7 +394,7 @@ class PortfolioMonitorV2:
 
         # 2) DB 비어있으면 JSON 폴백
         if not state:
-            state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+            state_path = Path(settings.DATABASE_PATH).parent / MONITOR_STATE_FILENAME
             try:
                 if state_path.exists():
                     with open(state_path) as f:
@@ -419,7 +419,7 @@ class PortfolioMonitorV2:
             # DB 경로는 _dump_monitor_state로 매 30초 갱신되므로 잔재 가능성 없음.
             if not db_source:
                 saved_highest_check = s.get("highest_price", 0) or 0
-                threshold = pos.buy_price * 1.02
+                threshold = pos.buy_price * _RESIDUE_SANITY_RATIO
                 if saved_highest_check > threshold:
                     logger.warning(
                         f"🚮 JSON 잔재 무시: {pos.stock_name} ({code}) "
@@ -638,7 +638,6 @@ class PortfolioMonitorV2:
 
     def _dump_monitor_state(self) -> None:
         """트레일링 상태를 DB + JSON에 동시 저장 (30초 간격)"""
-        import json
         state = {}
         for code, pos in self.positions.items():
             state[code] = {
@@ -655,7 +654,7 @@ class PortfolioMonitorV2:
             }
 
         # 1) JSON 파일 (대시보드 캐시용)
-        state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+        state_path = Path(settings.DATABASE_PATH).parent / MONITOR_STATE_FILENAME
         try:
             with open(state_path, "w") as f:
                 json.dump(state, f, ensure_ascii=False)

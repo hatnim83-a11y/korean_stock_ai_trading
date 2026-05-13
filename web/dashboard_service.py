@@ -19,6 +19,7 @@ from logger import logger
 from config import settings, now_kst, validate_stock_code, KST, count_trading_days
 from database import Database
 from modules.reporter.performance_calculator import PerformanceCalculator
+from modules.trading_engine.portfolio_monitor_v2 import MONITOR_STATE_FILENAME
 
 # ===== 가격 캐시 (5초) =====
 _price_cache: dict[str, tuple[float, dict]] = {}  # code -> (timestamp, data)
@@ -203,7 +204,7 @@ def _load_monitor_state() -> dict:
         pass
 
     # JSON 폴백
-    state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+    state_path = Path(settings.DATABASE_PATH).parent / MONITOR_STATE_FILENAME
     try:
         if not state_path.exists():
             return {}
