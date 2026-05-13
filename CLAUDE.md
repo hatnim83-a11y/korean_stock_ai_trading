@@ -31,6 +31,15 @@
 - **release 정책**: 매도 함수 종료 시 release하지 **않음** → 15:30 `stop_monitoring()`에서 `clear_all()` 일괄 해제 (race window 봉쇄). 같은 거래일 내 한 종목에 두 매도 잡이 발화하지 않으므로 누수 위험 없음
 - **무력화**: `PARTIAL_PROFIT_EARLY_MONITORING_ENABLED=False` + systemctl restart → acquire 호출 자체가 분기되어 NO-OP, 09:26 legacy 시작
 
+## 모니터 상태 정합성 (monitor_state.json — 2026-05-13 도입)
+- **3중 동기화**: 매도 시 메모리/DB/JSON 동시 정리 (`portfolio_monitor_v2.remove_position()` 내부)
+  - JSON 잔재로 BE 손절가 즉시 활성화되던 회귀 버그 차단 (2026-05-12 한화오션 사건)
+- **`_execute_partial_sell()` 전량 익절(`remaining_shares <= 0`) 분기**: `_close_position_in_db` 직후 `self.remove_position()` 호출 의무 — 신규 매도 경로 추가 시 반드시 같은 패턴 적용
+- **재시작 sanity check**: `_restore_trailing_state()` JSON 폴백 경로에서 `state[code].highest_price > pos.buy_price × 1.02` 면 잔재로 판단해 스킵 (당일 갭상승 +2% 까진 정상 허용). 임계값 변경 시 `tests/test_monitor_state_residue.py` 의 두 경계 케이스 재조정 필수
+- **`stop_monitoring()`**: 정지 직전 `_dump_monitor_state()` 호출 보장 — SellLock `clear_all()` 보다 먼저 실행되어야 race 봉쇄
+- **정화 도구**: `scripts/cleanup_monitor_state_json.py` (systemctl is-active 가드 + KST 백업 + `portfolio.status='holding'` 외 키 제거). 운영 점검에서 잔재 발견 시 stop → cleanup → start
+- **상세**: `memory/project_monitor_state_residue_fix.md`
+
 ## MCP 서버
 프로젝트에 3개 MCP 서버(`SQLite`, `Fetch`, `Sequential Thinking`)가 `.mcp.json`에 등록되어 있다.
 **상세 사용법**: [`docs/mcp-usage.md`](docs/mcp-usage.md) 참조.
