@@ -87,8 +87,16 @@ _DEFAULT_BUY_PRICE = 10000.0
 _DEFAULT_SHARES = 1
 
 # 시나리오 정책 (단위 2-7c 옵션 B/C 추가, 2026-05-08)
+# PRD 10-1 분할매도 정책 2종 추가 (2026-05-13)
 _DEFAULT_SCENARIO_POLICY = "conservative"
-_VALID_SCENARIO_POLICIES = ("conservative", "aggressive", "split")
+_VALID_SCENARIO_POLICIES = (
+    "conservative",
+    "aggressive",
+    "split",
+    "prd_split_optimistic",   # PRD 10-1: 갭업 시 잔여 50% × morning_high (낙관)
+    "prd_split_realistic",    # PRD 10-1: 갭업 시 잔여 50% × (open+morning_high)/2 (현실)
+)
+_PRD_SPLIT_POLICIES = ("prd_split_optimistic", "prd_split_realistic")
 
 # 시나리오 식별자
 SCENARIO_STOP_RISK = "stop_risk"
@@ -96,6 +104,16 @@ SCENARIO_MORNING_EXIT = "morning_exit"
 SCENARIO_MARKET_OPEN = "market_open"
 SCENARIO_SPLIT = "split"          # 옵션 C: 양립 라벨 평균 (단위 2-7c)
 SCENARIO_EXCLUDED = "excluded"
+
+# PRD 10-1 시가 액션 매트릭스 신규 시나리오 (2026-05-13)
+SCENARIO_PRD_SPLIT_GAPUP = "prd_split_gapup"      # open ≥ +0.5% → 50/50 분할매도
+SCENARIO_PRD_SPLIT_FLAT = "prd_split_flat"        # -1% < open < +0.5% → 100% 시초가
+SCENARIO_PRD_SPLIT_GAPDOWN = "prd_split_gapdown"  # open ≤ -1% → 100% 즉시 손절
+
+# PRD 10-1 임계값 + 분할 비율
+_PRD_GAPUP_THRESHOLD = 0.005       # +0.5% (분할매도 진입 경계)
+_PRD_GAPDOWN_THRESHOLD = -0.010    # -1.0% (즉시 손절 경계)
+_PRD_FIRST_SELL_RATIO = 0.5        # 1차 매도 비율 (PRD 50/50)
 
 # 결과 컬럼명 (simulate_dataset 가 추가)
 _RESULT_COLUMNS = (
@@ -156,6 +174,18 @@ class EVReport:
     p_split: float = 0.0
     mean_split_pct: float = 0.0
 
+    # PRD 10-1 분할매도 정책 전용 (2026-05-13). 옵션 A/B/C에서는 0.
+    # default 처리로 기존 호출부 회귀 영향 차단.
+    n_prd_gapup: int = 0
+    n_prd_flat: int = 0
+    n_prd_gapdown: int = 0
+    p_prd_gapup: float = 0.0
+    p_prd_flat: float = 0.0
+    p_prd_gapdown: float = 0.0
+    mean_prd_gapup_pct: float = 0.0
+    mean_prd_flat_pct: float = 0.0
+    mean_prd_gapdown_pct: float = 0.0
+
 
 # ===== Public API =====
 
@@ -210,6 +240,26 @@ def simulate_candidate(
             scenario=scenario,
             simulated_exit_pct=float(avg_exit_pct),
             simulated_net_pnl_pct=float(avg_pnl),
+            excluded_reason=None,
+        )
+
+    # PRD 10-1 GAPUP 분할매도: 1차 50% × open + 2차 50% × (변형별 청산가)
+    if scenario == SCENARIO_PRD_SPLIT_GAPUP:
+        open_pct = _safe_float(row.get("next_open_pct"))
+        morning_high = _safe_float(row.get("next_morning_high_pct"))
+        exit_pct = _compute_prd_split_exit(open_pct, morning_high, policy)
+        sell_price = _DEFAULT_BUY_PRICE * (1.0 + exit_pct)
+        breakdown = engine.compute_pnl(
+            buy_price=_DEFAULT_BUY_PRICE,
+            sell_price=sell_price,
+            shares=_DEFAULT_SHARES,
+        )
+        return SimulationResult(
+            candidate_id=cid,
+            ticker=ticker,
+            scenario=scenario,
+            simulated_exit_pct=float(exit_pct),
+            simulated_net_pnl_pct=float(breakdown.net_pnl_pct),
             excluded_reason=None,
         )
 
@@ -322,27 +372,42 @@ def compute_ev(
     stop_mask = valid["scenario"] == SCENARIO_STOP_RISK
     open_mask = valid["scenario"] == SCENARIO_MARKET_OPEN
     split_mask = valid["scenario"] == SCENARIO_SPLIT
+    prd_gapup_mask = valid["scenario"] == SCENARIO_PRD_SPLIT_GAPUP
+    prd_flat_mask = valid["scenario"] == SCENARIO_PRD_SPLIT_FLAT
+    prd_gapdown_mask = valid["scenario"] == SCENARIO_PRD_SPLIT_GAPDOWN
 
     n_morning = int(morning_mask.sum())
     n_stop = int(stop_mask.sum())
     n_open = int(open_mask.sum())
     n_split = int(split_mask.sum())
+    n_prd_gapup = int(prd_gapup_mask.sum())
+    n_prd_flat = int(prd_flat_mask.sum())
+    n_prd_gapdown = int(prd_gapdown_mask.sum())
 
     p_morning = n_morning / n_simulated
     p_stop = n_stop / n_simulated
     p_open = n_open / n_simulated
     p_split = n_split / n_simulated
+    p_prd_gapup = n_prd_gapup / n_simulated
+    p_prd_flat = n_prd_flat / n_simulated
+    p_prd_gapdown = n_prd_gapdown / n_simulated
 
     mean_profit = _safe_mean(valid.loc[morning_mask, "simulated_net_pnl_pct"])
     mean_loss = _safe_mean(valid.loc[stop_mask, "simulated_net_pnl_pct"])
     mean_market_open = _safe_mean(valid.loc[open_mask, "simulated_net_pnl_pct"])
     mean_split = _safe_mean(valid.loc[split_mask, "simulated_net_pnl_pct"])
+    mean_prd_gapup = _safe_mean(valid.loc[prd_gapup_mask, "simulated_net_pnl_pct"])
+    mean_prd_flat = _safe_mean(valid.loc[prd_flat_mask, "simulated_net_pnl_pct"])
+    mean_prd_gapdown = _safe_mean(valid.loc[prd_gapdown_mask, "simulated_net_pnl_pct"])
 
     raw_ev = (
         p_morning * mean_profit
         + p_stop * mean_loss
         + p_open * mean_market_open
         + p_split * mean_split
+        + p_prd_gapup * mean_prd_gapup
+        + p_prd_flat * mean_prd_flat
+        + p_prd_gapdown * mean_prd_gapdown
     )
     # 이중 차감 방지: simulated_net_pnl_pct 가 이미 비용/슬리피지 차감 후 순수익률.
     # cost_basis 는 참고 메타일 뿐, raw_ev 에서 추가로 빼면 안 됨.
@@ -366,6 +431,15 @@ def compute_ev(
         n_split=n_split,
         p_split=p_split,
         mean_split_pct=mean_split,
+        n_prd_gapup=n_prd_gapup,
+        n_prd_flat=n_prd_flat,
+        n_prd_gapdown=n_prd_gapdown,
+        p_prd_gapup=p_prd_gapup,
+        p_prd_flat=p_prd_flat,
+        p_prd_gapdown=p_prd_gapdown,
+        mean_prd_gapup_pct=mean_prd_gapup,
+        mean_prd_flat_pct=mean_prd_flat,
+        mean_prd_gapdown_pct=mean_prd_gapdown,
     )
 
 
@@ -382,10 +456,25 @@ def _map_scenario(
     - "conservative" (옵션 A): stop_risk → morning_exit → market_open → excluded
     - "aggressive"   (옵션 B): morning_exit → stop_risk → market_open → excluded
     - "split"        (옵션 C): 양립 시 SCENARIO_SPLIT, 단일 라벨은 conservative 동일
+    - "prd_split_*"  (PRD 10-1): next_open_pct 구간별 분할매도 — 별도 분기 처리
     """
+    open_pct_raw = row.get("next_open_pct")
+
+    # PRD 10-1 정책: 시가 % 구간별 매핑 (라벨 stop/morning과 무관, 시가만 사용)
+    # GAPUP의 exit_pct는 simulate_candidate에서 morning_high와 합성하므로 None 반환.
+    if policy in _PRD_SPLIT_POLICIES:
+        open_pct = _safe_float(open_pct_raw)
+        if open_pct is None:
+            return SCENARIO_EXCLUDED, None, "missing_open_pct"
+        if open_pct >= _PRD_GAPUP_THRESHOLD:
+            # 분할매도 케이스 — exit_pct는 별도 합성 (None placeholder)
+            return SCENARIO_PRD_SPLIT_GAPUP, None, None
+        if open_pct <= _PRD_GAPDOWN_THRESHOLD:
+            return SCENARIO_PRD_SPLIT_GAPDOWN, float(open_pct), None
+        return SCENARIO_PRD_SPLIT_FLAT, float(open_pct), None
+
     stop = _safe_bool(row.get("label_stop_risk"))
     morning = _safe_bool(row.get("label_morning_exit"))
-    open_pct_raw = row.get("next_open_pct")
 
     # 라벨 둘 다 None (NULL) → excluded
     if stop is None and morning is None:
@@ -425,6 +514,35 @@ def _compute_pnl_pct(engine: CostSlippageEngine, exit_pct: float) -> float:
         shares=_DEFAULT_SHARES,
     )
     return float(breakdown.net_pnl_pct)
+
+
+def _compute_prd_split_exit(
+    open_pct: Optional[float],
+    morning_high: Optional[float],
+    policy: str,
+) -> float:
+    """PRD 10-1 GAPUP 분할매도 합성 exit_pct 계산.
+
+    - optimistic: 1차 50%×open + 2차 50%×morning_high (잔여를 09:30 고가에 정확히 청산)
+    - realistic: 1차 50%×open + 2차 50%×(open+morning_high)/2
+        = 0.75×open + 0.25×morning_high (시초가~고가 중간값에서 청산)
+
+    morning_high가 NULL인 경우 graceful 폴백: 1차 매도 비율만큼 시초가 매도 + 잔여도
+    동일 시초가 매도로 가정 → exit_pct = open_pct.
+    """
+    if open_pct is None:
+        # 안전망 — _map_scenario에서 already 가드되어 도달하지 않을 것이나 방어적.
+        return 0.0
+    if morning_high is None:
+        # morning_high NULL → 잔여 50%도 시초가에 매도한다고 가정 (보수적 폴백)
+        return float(open_pct)
+    if policy == "prd_split_optimistic":
+        return float(_PRD_FIRST_SELL_RATIO * open_pct
+                     + (1.0 - _PRD_FIRST_SELL_RATIO) * morning_high)
+    # prd_split_realistic: 잔여 50%를 시초가~고가 중간값에서 청산 가정
+    mid = (open_pct + morning_high) / 2.0
+    return float(_PRD_FIRST_SELL_RATIO * open_pct
+                 + (1.0 - _PRD_FIRST_SELL_RATIO) * mid)
 
 
 def _safe_bool(value) -> Optional[bool]:
