@@ -188,7 +188,11 @@ def _calc_hold_trading_days(date_str) -> int:
 
 
 def _load_monitor_state() -> dict:
-    """트레일링 상태 로드 (DB 우선, JSON 폴백)"""
+    """트레일링 상태 로드 (DB 우선, JSON 폴백 시 holding 필터링).
+
+    JSON 폴백 경로에서 portfolio.status='holding' 외 키는 잔재로 간주하여 제외
+    (2026-05-12 한화오션 BE 손절 오발동 사건 대응 — 대시보드에 잔재 노출 방지).
+    """
     # DB에서 position_state 읽기
     try:
         db = _get_db()
@@ -201,9 +205,22 @@ def _load_monitor_state() -> dict:
     # JSON 폴백
     state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
     try:
-        if state_path.exists():
-            with open(state_path) as f:
-                return json.load(f)
+        if not state_path.exists():
+            return {}
+        with open(state_path) as f:
+            state = json.load(f)
+        if not state:
+            return {}
+        # 잔재 키 필터링: 현재 holding 종목만 통과
+        try:
+            db = _get_db()
+            with db.get_cursor() as cursor:
+                cursor.execute("SELECT stock_code FROM portfolio WHERE status='holding'")
+                holding_codes = {row["stock_code"] for row in cursor.fetchall()}
+            return {code: data for code, data in state.items() if code in holding_codes}
+        except Exception:
+            # 보유 종목 조회 실패 시 안전측 폴아웃: 빈 dict (잔재 노출보다 무표시 우선)
+            return {}
     except Exception:
         pass
     return {}

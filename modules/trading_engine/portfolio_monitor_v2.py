@@ -289,7 +289,11 @@ class PortfolioMonitorV2:
         logger.info(f"포지션 추가: {stock_name} ({stock_code}) {shares}주 @ {buy_price:,}원")
     
     def remove_position(self, stock_code: str) -> None:
-        """포지션 제거 + position_state DB 삭제"""
+        """포지션 제거 + position_state DB/JSON 동기 삭제
+
+        매도 시 메모리/DB/JSON 3중 동기화로 monitor_state.json 잔재 데이터로 인한
+        BE 손절 오발동(2026-05-12 한화오션 사건)을 차단한다.
+        """
         if stock_code in self.positions:
             pos = self.positions[stock_code]
             logger.info(f"포지션 제거: {pos.stock_name} (보유 {pos.hold_days}일)")
@@ -305,6 +309,19 @@ class PortfolioMonitorV2:
             finally:
                 if db:
                     db.close()
+            # monitor_state.json 잔재 키 동기 삭제 (BE 손절 오발동 차단)
+            import json
+            state_path = Path(settings.DATABASE_PATH).parent / "monitor_state.json"
+            try:
+                if state_path.exists():
+                    with open(state_path) as f:
+                        state = json.load(f)
+                    if stock_code in state:
+                        del state[stock_code]
+                        with open(state_path, "w") as f:
+                            json.dump(state, f, ensure_ascii=False)
+            except Exception as e:
+                logger.debug(f"monitor_state.json 잔재 정리 실패: {e}")
     
     def load_positions_from_db(self) -> int:
         """
@@ -389,10 +406,28 @@ class PortfolioMonitorV2:
             return
 
         restored = 0
+        skipped_residue = 0
         for code, pos in self.positions.items():
             if code not in state:
                 continue
             s = state[code]
+
+            # 잔재 데이터 sanity check (JSON 폴백 전용)
+            # 동일 stock_code가 self.positions와 state 양쪽에 있어도,
+            # state의 highest_price가 현재 buy_price 대비 비현실적으로 크면
+            # 직전 매수 사이클의 잔재로 판단하고 스킵 (2026-05-12 한화오션 사건 차단).
+            # DB 경로는 _dump_monitor_state로 매 30초 갱신되므로 잔재 가능성 없음.
+            if not db_source:
+                saved_highest_check = s.get("highest_price", 0) or 0
+                threshold = pos.buy_price * 1.02
+                if saved_highest_check > threshold:
+                    logger.warning(
+                        f"🚮 JSON 잔재 무시: {pos.stock_name} ({code}) "
+                        f"highest={saved_highest_check:,}원 > "
+                        f"buy_price×1.02={threshold:,.0f}원 → 직전 매수 사이클 잔재"
+                    )
+                    skipped_residue += 1
+                    continue
 
             # current_price 복원 (WebSocket 수신 전 buy_price로 오발동 방지)
             saved_price = s.get("current_price", 0)
@@ -458,6 +493,8 @@ class PortfolioMonitorV2:
         source_str = "DB" if db_source else "JSON"
         if restored:
             logger.info(f"트레일링 상태 복원: {restored}개 종목 (소스: {source_str})")
+        if skipped_residue:
+            logger.warning(f"잔재 데이터 스킵: {skipped_residue}개 종목 (JSON 폴백 sanity check)")
     
     # ===== 모니터링 =====
     
@@ -500,9 +537,15 @@ class PortfolioMonitorV2:
         )
     
     async def stop_monitoring(self) -> None:
-        """모니터링 중지"""
+        """모니터링 중지 (정지 직전 최종 dump로 JSON 잔재 키 봉쇄)"""
         self._running = False
         await self.websocket.stop()
+        # 정지 직전 최종 _dump_monitor_state: self.positions에서 제거된 종목 키가
+        # JSON 파일에 잔존하지 않도록 마지막 동기화 보장 (2026-05-12 한화오션 사건 차단)
+        try:
+            self._dump_monitor_state()
+        except Exception as e:
+            logger.debug(f"stop_monitoring 최종 dump 실패: {e}")
         logger.info("모니터링 중지")
     
     async def _monitor_loop(self) -> None:
@@ -1061,13 +1104,16 @@ class PortfolioMonitorV2:
             pos.remaining_shares -= sell_shares
             logger.info(f"   남은 수량: {pos.remaining_shares}주")
 
-            # 전량 매도 시 DB 포지션 청산
+            # 전량 매도 시 DB 포지션 청산 + 메모리/DB/JSON 동기 정리
             if pos.remaining_shares <= 0:
                 reason = f"{stage}차 익절"
                 self._close_position_in_db(
                     pos, reason, actual_sell_price, sell_shares,
                     slippage=result.get("slippage"),
                 )
+                # remove_position 호출로 monitor_state.json 잔재 봉쇄
+                # (전량 익절 경로가 콜백 호출 외에 메모리/JSON 정리를 자체 수행하지 않아 누락되던 문제)
+                self.remove_position(pos.stock_code)
             else:
                 # 부분 매도: DB에 매도 기록 저장 + 보유 수량 업데이트
                 self._save_partial_sell_to_db(
