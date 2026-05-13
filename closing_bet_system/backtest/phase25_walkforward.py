@@ -44,6 +44,9 @@ from closing_bet_system.backtest.phase25_simulator import (
     SCENARIO_EXCLUDED,
     SCENARIO_MARKET_OPEN,
     SCENARIO_MORNING_EXIT,
+    SCENARIO_PRD_SPLIT_FLAT,
+    SCENARIO_PRD_SPLIT_GAPDOWN,
+    SCENARIO_PRD_SPLIT_GAPUP,
     SCENARIO_SPLIT,
     SCENARIO_STOP_RISK,
     EVReport,
@@ -73,7 +76,18 @@ _GATE_MIN_SAMPLES = 100
 _SCORE_BUCKETS = (0, 1, 2, 3)
 
 # 정책 옵션 (단위 2-7b 확장)
-_POLICIES = ("conservative", "aggressive", "split")
+# 2026-05-13: PRD 10-1 분할매도 2종 추가 — 운영 정합 평가용 default
+_POLICIES = (
+    "conservative",
+    "aggressive",
+    "split",
+    "prd_split_optimistic",
+    "prd_split_realistic",
+)
+_DEFAULT_POLICY = "prd_split_realistic"   # 운영 정책 정합 default (2026-05-13)
+
+# score 임계 필터 (None=전체 / 2=score≥2 / 3=score≥3, 단위 2-4 진입 결정 근거)
+_SCORE_FILTERS: tuple[Optional[int], ...] = (None, 2, 3)
 
 # md 리포트 기본 출력 디렉토리
 _DEFAULT_REPORT_DIR = "docs/improvements"
@@ -273,31 +287,36 @@ def generate_report(
     output_path: Optional[str] = None,
     db_path: Optional[str] = None,
     only_labeled: bool = True,
+    policy: str = _DEFAULT_POLICY,
 ) -> str:
-    """5종 분석 통합 → markdown 리포트 출력.
+    """5종 분석 + score 임계 매트릭스 통합 → markdown 리포트 출력.
 
     Args:
         start_date / end_date: ISO 8601 문자열.
         output_path: 출력 경로. None 시 ``{_DEFAULT_REPORT_DIR}/phase25_ev_report_{YYYYMMDD}.md``.
         db_path: closing_bet DB 경로 (None=기본).
         only_labeled: True 시 라벨링된 후보만.
+        policy: 게이트 판정용 시나리오 정책. default ``prd_split_realistic`` (운영 정합).
 
     Returns:
         실제 작성된 파일 경로 (절대 경로).
     """
     df = load_phase25_dataset(start_date, end_date, db_path=db_path, only_labeled=only_labeled)
-    # 게이트 판정 기준은 conservative 고정 (단위 2-8). 정책 비교는 섹션 4 참고.
-    sim_df = simulate_dataset(df, policy="conservative")
+    # 게이트 판정 기준 정책 (default prd_split_realistic, 2026-05-13~ 운영 정합)
+    sim_df = simulate_dataset(df, policy=policy)
 
     # 5종 분석
-    wf = _walkforward_from_df(df)
+    wf = _walkforward_from_df(df, policy=policy)
     bucket_evs = score_bucket_analysis(sim_df) if not sim_df.empty else {}
     sharpe = compute_sharpe(sim_df)
     policy_evs = compare_scenario_policies(df) if not df.empty else {}
     overall_ev = compute_ev(sim_df)
 
-    # 단위 2-8 게이트 자동 판정
+    # 단위 2-8 게이트 자동 판정 (default 정책 기준)
     gate_verdict = _evaluate_gate(overall_ev, sharpe)
+
+    # 신규: score 임계 필터별 게이트 판정 매트릭스 (5 policy × 3 score = 15셀)
+    score_gate_matrix = _build_score_gate_matrix(df)
 
     # 출력 경로 (KST 기준 — 서버 UTC 23:59 실행 시 파일명 KST 다음 날 방지)
     if output_path is None:
@@ -321,11 +340,51 @@ def generate_report(
         sharpe=sharpe,
         policy_evs=policy_evs,
         gate_verdict=gate_verdict,
+        policy=policy,
+        score_gate_matrix=score_gate_matrix,
     )
 
     out_path.write_text(md, encoding="utf-8")
-    logger.info(f"[phase25_walkforward] md 리포트 생성: {out_path}")
+    logger.info(f"[phase25_walkforward] md 리포트 생성: {out_path} (policy={policy})")
     return str(out_path)
+
+
+def _build_score_gate_matrix(df: pd.DataFrame) -> dict:
+    """score 임계(None/2/3) × 정책 5종 = 15셀 매트릭스.
+
+    각 셀에 (n_simulated, net_ev, win_loss_ratio, sharpe, passed) 정보.
+    score_min=None은 전체, 2/3은 total_score >= n 필터링 후 시뮬.
+
+    Returns:
+        {"score_filters": [None, 2, 3], "policies": [...], "cells": {(score, policy): dict}}.
+    """
+    if df.empty or "total_score" not in df.columns:
+        return {"score_filters": list(_SCORE_FILTERS), "policies": list(_POLICIES), "cells": {}}
+
+    cells: dict = {}
+    for score_min in _SCORE_FILTERS:
+        if score_min is None:
+            sub = df
+        else:
+            sub = df[df["total_score"] >= score_min]
+        if sub.empty:
+            for p in _POLICIES:
+                cells[(score_min, p)] = None
+            continue
+        for p in _POLICIES:
+            sim = simulate_dataset(sub, policy=p)
+            ev = compute_ev(sim)
+            sh = compute_sharpe(sim)
+            verdict = _evaluate_gate(ev, sh)
+            cells[(score_min, p)] = {
+                "n_simulated": ev.n_simulated,
+                "net_ev": ev.net_ev,
+                "win_loss_ratio": _win_loss_ratio(ev),
+                "sharpe": sh.sharpe,
+                "passed": verdict["passed"],
+                "reasons": verdict["reasons"],
+            }
+    return {"score_filters": list(_SCORE_FILTERS), "policies": list(_POLICIES), "cells": cells}
 
 
 # ===== 내부 헬퍼 =====
@@ -474,19 +533,22 @@ def _build_markdown(
     sharpe: SharpeMetrics,
     policy_evs: dict[str, EVReport],
     gate_verdict: dict,
+    policy: str = _DEFAULT_POLICY,
+    score_gate_matrix: Optional[dict] = None,
 ) -> str:
-    """md 리포트 본문 생성. 5섹션 + 게이트 판정."""
+    """md 리포트 본문 생성. 5섹션 + 게이트 판정 + (6) score 임계 매트릭스 + (7) limitation."""
     lines: list[str] = []
     lines.append(f"# Phase 2.5 EV 리포트 — {start_date} ~ {end_date}")
     lines.append("")
     lines.append(f"_생성: {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST_")
+    lines.append(f"_평가 정책: **{policy}**_")
     lines.append("")
 
     # 단위 2-8 게이트 판정
     if gate_verdict["passed"]:
-        lines.append("## 🟢 단위 2-8 게이트: PASS")
+        lines.append(f"## 🟢 단위 2-8 게이트: PASS (정책={policy})")
     else:
-        lines.append("## 🔴 단위 2-8 게이트: FAIL")
+        lines.append(f"## 🔴 단위 2-8 게이트: FAIL (정책={policy})")
         lines.append("")
         lines.append("**미달 사유**:")
         for r in gate_verdict["reasons"]:
@@ -547,23 +609,24 @@ def _build_markdown(
     lines.append(f"- **Max Drawdown**: {sharpe.max_drawdown:+.4%}")
     lines.append("")
 
-    # 4. 정책 옵션 비교
-    lines.append("## 4. 시나리오 정책 옵션 비교")
+    # 4. 정책 옵션 비교 (5종 — conservative/aggressive/split + PRD optimistic/realistic)
+    lines.append("## 4. 시나리오 정책 옵션 비교 (5종)")
     lines.append("")
     if not policy_evs:
         lines.append("- ⚠️ 데이터 없음")
     else:
-        lines.append("| 옵션 | net_ev | n_simulated | morning | stop | open | split |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("| 정책 | net_ev | n_sim | morning | stop | open | split | prd_gapup | prd_flat | prd_gapdown |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
         for p in _POLICIES:
             ev = policy_evs.get(p)
             if ev is None:
                 continue
             lines.append(
                 f"| **{p}** | {ev.net_ev:+.4%} | {ev.n_simulated} | "
-                f"{ev.n_morning_exit} | {ev.n_stop_risk} | {ev.n_market_open} | {ev.n_split} |"
+                f"{ev.n_morning_exit} | {ev.n_stop_risk} | {ev.n_market_open} | {ev.n_split} | "
+                f"{ev.n_prd_gapup} | {ev.n_prd_flat} | {ev.n_prd_gapdown} |"
             )
-        # 인사이트: A vs B delta
+        # 인사이트 1: A vs B delta
         ev_a = policy_evs.get("conservative")
         ev_b = policy_evs.get("aggressive")
         if ev_a and ev_b:
@@ -571,6 +634,15 @@ def _build_markdown(
             lines.append("")
             lines.append(f"- 옵션 B - 옵션 A delta: **{delta:+.4%}** "
                          f"({'낙관 우세' if delta > 0 else '보수 우세'})")
+        # 인사이트 2: PRD optimistic vs realistic delta (운영 기대치 구간)
+        ev_opt = policy_evs.get("prd_split_optimistic")
+        ev_real = policy_evs.get("prd_split_realistic")
+        if ev_opt and ev_real:
+            delta_prd = ev_opt.net_ev - ev_real.net_ev
+            lines.append(f"- PRD optimistic - realistic delta: **{delta_prd:+.4%}** "
+                         f"(잔여 50% 청산가 가정 영향)")
+            lines.append(f"- **운영 EV 기대치 구간: {ev_real.net_ev:+.4%} ~ {ev_opt.net_ev:+.4%}** "
+                         f"(realistic ~ optimistic)")
     lines.append("")
 
     # 5. 라벨 분포 + 시뮬 시나리오 분포
@@ -583,8 +655,56 @@ def _build_markdown(
         lines.append("| 시나리오 | 건수 |")
         lines.append("|---|---|")
         for sc in (SCENARIO_MORNING_EXIT, SCENARIO_STOP_RISK, SCENARIO_MARKET_OPEN,
-                   SCENARIO_SPLIT, SCENARIO_EXCLUDED):
+                   SCENARIO_SPLIT, SCENARIO_PRD_SPLIT_GAPUP, SCENARIO_PRD_SPLIT_FLAT,
+                   SCENARIO_PRD_SPLIT_GAPDOWN, SCENARIO_EXCLUDED):
             lines.append(f"| {sc} | {sc_dist.get(sc, 0)} |")
+    lines.append("")
+
+    # 6. score 임계 필터 × 정책 매트릭스 (단위 2-4 entry_executor 진입 결정 근거)
+    lines.append("## 6. score 임계 × 정책 게이트 매트릭스 (단위 2-4 진입 결정 근거)")
+    lines.append("")
+    if not score_gate_matrix or not score_gate_matrix.get("cells"):
+        lines.append("- ⚠️ 데이터 없음")
+    else:
+        lines.append("score 임계별 필터링 후 5개 정책 각각의 게이트 PASS/FAIL 매트릭스 (총 15셀).")
+        lines.append("")
+        lines.append("| score 필터 | 정책 | n_sim | net_ev | W/L | Sharpe | 결과 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for score_min in score_gate_matrix["score_filters"]:
+            score_label = "전체" if score_min is None else f"≥{score_min}"
+            for p in score_gate_matrix["policies"]:
+                cell = score_gate_matrix["cells"].get((score_min, p))
+                if cell is None:
+                    lines.append(f"| {score_label} | {p} | 0 | — | — | — | ⚠️ 데이터 없음 |")
+                    continue
+                wl = cell["win_loss_ratio"]
+                wl_str = "∞" if math.isinf(wl) else f"{wl:.2f}"
+                verdict = "🟢 PASS" if cell["passed"] else "🔴 FAIL"
+                lines.append(
+                    f"| {score_label} | {p} | {cell['n_simulated']} | "
+                    f"{cell['net_ev']:+.4%} | {wl_str} | {cell['sharpe']:+.2f} | {verdict} |"
+                )
+        lines.append("")
+        lines.append("**해석 가이드**:")
+        lines.append("- 표본<100건은 자동 FAIL되지만 EV/W-L/Sharpe 개선 추세로 정성 판단 가능")
+        lines.append("- score≥2 / score≥3 임계 진입 시 EV 양수 + Sharpe 개선이면 축소 포지션 진입 근거")
+    lines.append("")
+
+    # 7. Limitation (PRD 분할매도 시뮬 한계)
+    lines.append("## 7. Limitation — PRD 분할매도 시뮬 가정")
+    lines.append("")
+    lines.append("PRD 10-1 시가 액션 매트릭스는 다음날 09:00~09:30 사이 분 단위 가격 추이에")
+    lines.append("따라 분할매도가 발화한다. 현 라벨 데이터는 시점 3개(시초가/09:30 고가/09:30 저가)만")
+    lines.append("저장되어 있어 다음 가정으로 시뮬:")
+    lines.append("")
+    lines.append("- **prd_split_optimistic**: 갭업(open ≥ +0.5%) 시 잔여 50% × `morning_high_pct` 청산")
+    lines.append("  - 09:00~09:30 고점을 정확히 잡는다는 낙관적 가정 → EV **상한** 추정치")
+    lines.append("- **prd_split_realistic**: 갭업 시 잔여 50% × `(open + morning_high) / 2` 청산")
+    lines.append("  - 시초가와 고가의 중간값에서 청산되는 현실적 가정 → EV **하한** 추정치")
+    lines.append("- 보합/약갭다운/갭다운(open < +0.5%)은 100% 시초가 매도 (현 라벨 데이터로 충분 정합)")
+    lines.append("")
+    lines.append("**운영 시 실제 EV는 realistic ~ optimistic 구간 사이에 위치**할 것으로 예상.")
+    lines.append("분 단위 데이터 수집 인프라(단위 2-1 orderbook_snapshots 누적) 진척 시 정밀화 가능.")
     lines.append("")
 
     # 메타
@@ -601,7 +721,12 @@ def _build_markdown(
 
 
 def _main_cli() -> None:
-    """단발 검증용 CLI: md 리포트 생성."""
+    """단발 검증용 CLI: md 리포트 생성.
+
+    --policy: 게이트 판정용 정책 (default prd_split_realistic, 운영 정합)
+              {conservative, aggressive, split, prd_split_optimistic, prd_split_realistic}
+    --score-min: score 필터 (없으면 매트릭스에서 전체/≥2/≥3 모두 자동 표시)
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="Phase 2.5 walk-forward 분석 리포트")
@@ -609,6 +734,12 @@ def _main_cli() -> None:
     parser.add_argument("--end", default="2026-05-07")
     parser.add_argument("--output", default=None)
     parser.add_argument("--db-path", default=None)
+    parser.add_argument(
+        "--policy",
+        default=_DEFAULT_POLICY,
+        choices=list(_POLICIES),
+        help=f"게이트 판정 정책 (default {_DEFAULT_POLICY})",
+    )
     args = parser.parse_args()
 
     path = generate_report(
@@ -616,6 +747,7 @@ def _main_cli() -> None:
         end_date=args.end,
         output_path=args.output,
         db_path=args.db_path,
+        policy=args.policy,
     )
     print(f"리포트 경로: {path}")
 
