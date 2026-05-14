@@ -63,12 +63,14 @@
 - scorer.py observation 로직 (총점 미반영)
 - `SUPPLY_SCORE_OBSERVE_ONLY=True`로 관측만
 - 게이트: 14영업일 데이터 ≥ 200건 + 모멘텀 상관계수 r<0.7 + 분포 차별성
+- **[2026-05-13 추가] universe 내부 외인 TOP 동적 SQL 시범 측정**: KIS TOP30 한도(2026-05-13 발견, 5/13 universe 93 ∩ TOP30 = 9건)를 우회하기 위해 snapshot 기반으로 universe 내부 외인 net 상위 N개를 동적 SELECT하는 보조 신호를 Shadow Run 기간 중 측정. Pearson r 비교 및 분포 차별성을 KIS TOP30 신호와 병기
 
 ### Phase 1-C: 점수 활성화 점진 배포 (Day 20~22)
 - scorer.py `calculate_theme_supply_score_v2` + 라인 662 박제 해제
 - filters.py `supply_strength` 별도 키 + `calculate_final_score` 가중치 토글
 - 점진: Day 20 MAX=2.5 → Day 21 MAX=5.0 → Day 22 STRENGTH=True
 - 게이트: 3영업일 매수 종목 ±20%, 인플레이션 ±5%p
+- **[2026-05-13 추가] foreign_top 가산 신호 선택 결정**: Phase 1-C 활성화 직전 시점에 ① KIS TOP30 (시장 외인 핫스팟, 우리 universe 매칭 ~9건/일) vs ② universe 내부 동적 TOP (snapshot 기반, 우리 종목 풀 한정) 중 어느 쪽을 점수 가산 신호로 채택할지 확정. Phase 1-B½ Shadow Run 측정값 비교 결과 활용
 
 ### Phase 1-D: AI Verifier 강화 + 매수 박제 hook (Day 23~25)
 - claude_analyzer.py:47-103 프롬프트 강화 + `_format_supply_for_prompt`
@@ -76,6 +78,7 @@
 - main.py 매수 후 portfolio supply 컨텍스트 hook
 - database.py `save_trade_review` 25컬럼 INSERT (옵션 A)
 - 게이트: 2영업일 AI 토큰 + hook 3경로 검증
+- **[2026-05-13 추가] AI 프롬프트 외인 TOP 표현 분기**: foreign_top_ranking 메타데이터(stock_name, net_amount) NULL 상태 — 분기 ① 후속 단위 `supply-signal-followup-meta` 선행 처리 후 "외인 TOP10 진입, +120억" 완전 표현 / ② 메타 없이 universe 내부 동적 TOP 기반으로 "테마 내 외인 매수 1위" 등 우회 표현. Phase 1-C 결정과 같은 방향으로 정렬
 
 ### Phase 2: 신뢰도 추적 (Week 4~6, 표본 60건 후)
 - supply_labeler.py (closing_bet.db JOIN + 백필)

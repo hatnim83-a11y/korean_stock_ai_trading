@@ -40,10 +40,17 @@
 
 ### 운영 게이트 (3영업일, 사용자 진행)
 - [ ] 3영업일 연속 17:10 잡 성공률 ≥ 95%
-- [ ] `daily_supply_snapshot` 행 카운트 ≥ 180/일 (universe ~147이라 실측치 기준 ≥ 100 권장)
-- [ ] 외인 TOP200에 삼성전자/SK하이닉스 등 대형주 포함
-- [ ] stale 시뮬레이션: 수동으로 어제 데이터 삭제 후 fallback 동작 확인
-- [ ] 텔레그램 알림 정상 수신 (수급 수집 완료 메시지)
+  - 1일차 (5/13 화): ✅ 93/93 (universe 전수 성공, 16.1초)
+  - 2일차 (5/14 목): ✅ 105/105 (universe +12, 23.8초, KIS 500 9건 재시도 성공)
+  - 3일차 (5/15 금): 대기
+- [ ] `daily_supply_snapshot` universe 전수 성공 (universe는 테마/보유/시총에 따라 90~150 변동)
+- [ ] 외인 TOP**30** (KIS `FHPTJ04400000` 1콜당 30건 한도, 페이지네이션 미지원)에 대형주 포함 — 종가베팅도 동일 패턴 운영 중
+  - 1일차 (5/13): TOP30 중 삼성전자/SK하이닉스 미포함 (현대차 rank 4, 기아 rank 10) — 시장 흐름 영향 추정, 2-3일차 누적 후 재평가
+- [ ] stale 시뮬레이션 — **2026-05-14 결정: 옵션 A (주말 수동 검증)**
+  - 시점: 5/16(토) 또는 5/17(일) — KRX 휴장, 잡 미발화로 운영 영향 0
+  - 절차: ① 5/14 데이터 백업 (`CREATE TEMP TABLE _stale_backup ...`) → ② DELETE FROM daily_supply_snapshot WHERE trade_date='2026-05-14' → ③ `get_supply_snapshots_bulk()` 단독 호출로 trade_date='2026-05-13' fallback 확인 → ④ INSERT INTO ... SELECT * FROM _stale_backup 복원 → ⑤ COUNT 105 복원 확인
+  - 기대 결과: 5/14 삭제 후에도 bulk 조회가 5/13 데이터로 정상 반환 (각 종목별 MAX(trade_date) 자동 선택 동작)
+- [x] 텔레그램 알림 정상 수신 (수급 수집 완료 메시지) — 5/13 17:10 1회차 OK
 - [ ] **사용자 확인 → Phase 1-B 진행**
 
 ### 문서 업데이트 (Phase 1-A 완료 시)
@@ -79,9 +86,11 @@
 - [x] 실 DB 검증: bulk 조회 3/4건, theme 집계 양수 비율 100%/33.3%, foreign_top rank 1·2·3 정확, update rowcount=1
 
 ### 운영 게이트 (2영업일, 사용자 진행)
-- [ ] systemctl restart trading_system (Phase 1-B 코드 적용)
-- [ ] 5/13(화) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 (로그 `📥 DB 수급 조회: snapshot=N/M`)
-- [ ] KIS get_investor_trading 호출 횟수 감소 확인
+- [x] systemctl restart trading_system (Phase 1-B 코드 적용) — 5/13 12:34 KST (UTC 03:34) 재시작 완료
+- [ ] 5/13(화) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 — ❌ **표본 무효** (Phase 1-B 코드 커밋 시각 11:49 KST > 발화 시각 09:05 KST). 5/14(목) 09:05 첫 자연 발화로 이연
+- [x] 5/14(목) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 — ✅ 5개 테마 전부 `📥 DB 수급 조회: snapshot=N/M, foreign_top=K` 출력 (반도체 3/3·전선 8/8·조선 7/7·금융 20/20·로봇 9/20). **종합 매칭 47/58 (81%)** — 로봇 11종목 KIS 폴백 (graceful fallback 정상 동작)
+- [ ] 5/15(금) 09:05 자연 발화 누적 검증 (특히 로봇 테마 매칭 개선 여부)
+- [ ] KIS get_investor_trading 호출 횟수 감소 확인 — ✅ 09:05 시간대 ERROR 0건 (Phase 1-A 1일차에는 ERROR 0건이었으나, 그건 통상 호출 시 ERROR가 로깅 안 됨이 원인. 정확 비교는 별도 카운터 필요)
 - [ ] **사용자 확인 → Shadow Run 진입**
 
 ---
@@ -97,6 +106,7 @@
 - [ ] 모멘텀 × supply_score Pearson 상관계수 r < 0.7
 - [ ] supply_score 분포 차별성 (0/3/5점 골고루)
 - [ ] supply_score 상위/하위 테마 사이 점수 차이 명확
+- [ ] **[2026-05-13 추가] universe 내부 외인 TOP 동적 SQL 시범 측정**: snapshot 기반 `SELECT stock_code FROM daily_supply_snapshot WHERE trade_date=? ORDER BY foreign_net_5d DESC LIMIT N` 매일 실행 + 결과를 KIS TOP30 신호와 분포·상관성 비교 (Pearson r, 매칭 종목 수, 가산 시 점수 차이). Phase 1-C foreign_top 가산 신호 선택에 사용
 
 ### 운영 게이트 (Shadow Run 완료)
 - [ ] 모든 조건 PASS → Phase 1-C 진행
@@ -113,6 +123,7 @@
 ### 사전 검증
 - [ ] `grep -n ">= 58\|>= 48\|>= 38\|>= 30" modules/theme_analyzer/scorer.py main.py` 컷오프 8곳 확인
 - [ ] `web/dashboard_service.py`, `portfolio_monitor_v2.py` portfolio SELECT * 회귀 확인
+- [ ] **[2026-05-13 추가] foreign_top 가산 신호 선택 확정**: ① KIS TOP30 (시장 핫스팟, universe 매칭 ~9건/일) vs ② universe 내부 동적 TOP (snapshot 기반). Phase 1-B½ Shadow Run 측정값 기반으로 어느 신호를 `calculate_theme_supply_score_v2` 가산에 쓸지 결정 + PLAN.md 섹션 5에 결과 기록
 
 ### 구현
 - [ ] `config.py` Phase 1-C 토글: `SUPPLY_SCORE_ENABLED`, `SUPPLY_SCORE_MAX`, `SUPPLY_SCORE_TOP_N`, `SUPPLY_INTENSITY_REF_BIL`, `SUPPLY_STRENGTH_ENABLED`
@@ -144,6 +155,9 @@
 ---
 
 ## Phase 1-D 구현 (Day 23~25) — AI Verifier + 매수 박제 hook
+
+### 사전 결정 (구현 전)
+- [ ] **[2026-05-13 추가] AI 프롬프트 외인 TOP 표현 분기 결정**: foreign_top_ranking 메타(stock_name, net_amount) NULL 상태 처리 — ① 후속 단위 `supply-signal-followup-meta` 선행 처리 후 "외인 TOP10 진입, +120억" 완전 표현 / ② 메타 없이 universe 내부 동적 TOP 기반으로 "테마 내 외인 매수 1위" 등 우회 표현. Phase 1-C 결정과 같은 방향으로 정렬
 
 ### 구현
 - [ ] `config.py` `AI_PROMPT_SUPPLY_ENHANCED=True` 토글

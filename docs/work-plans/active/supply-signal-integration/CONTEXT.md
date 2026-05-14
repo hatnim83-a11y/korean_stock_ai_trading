@@ -338,7 +338,9 @@ def save_trade_review(self, review: dict) -> None:
 ### 10.3 의도된 잠재 위험 (Phase 1-D 진입 전 재확인 필요)
 
 1. **컬럼명 매핑 불일치** (심각 3): Phase 1-D `save_trade_review` 자동 보강 시 portfolio.`foreign_net_at_buy` → trade_reviews.`foreign_net_5d_at_buy`로 명시적 매핑 필요. docstring에 가이드 추가했으나 실제 코드 작성 시 매핑 표 재확인
-2. **KIS FHPTJ04400000 30건 한계**: Phase 1-C 점수 가산 시 `foreign_top_rank ≤ 200` 조건은 사실상 `≤ 30`. 이대로 둘지 vs 별도 TR로 확장할지 결정 필요 (Phase 1-C 활성화 직전)
+2. **KIS FHPTJ04400000 30건 한계**: Phase 1-C 점수 가산 시 `foreign_top_rank ≤ 200` 조건은 사실상 `≤ 30`. **2026-05-13 결정 — 30건 수용** (종가베팅 `get_top_foreign_buy_codes(top_n=30)` 동일 패턴 운영 중 + KIS API 페이지네이션 미지원). `config.SUPPLY_RANKING_TOP_N` 표기는 200으로 두되 실효 한도는 30으로 명시
+3. **foreign_top_ranking 메타데이터 NULL** (2026-05-13 발견): collector 가 `{stock_code, source}` 만 저장 → `stock_name`, `net_amount` 컬럼이 모두 NULL. Phase 1-D AI 프롬프트 강화에서 "외인 TOP10 진입, +120억" 표현 불가. **후속 단위 `supply-signal-followup-meta`** (Phase 1-C 진입 직전 또는 Phase 1-D 직전 1일 작업으로 분리). 후속 작업: ① `KISMarketProvider.get_top_foreign_buy_data() -> list[dict]` 헬퍼 신설 (코드 + 종목명 + net_amount), ② `_collect_top_ranking()` 변경, ③ 회귀 5/13 데이터 백필 (선택)
+4. **universe ↔ 09:05 종목 풀 mismatch** (2026-05-14 발견): 5/14 09:05 첫 자연 발화에서 **로봇 테마 9/20 매칭** (45%). 11종목 KIS 폴백 발생. 원인 추정 — collector `_get_theme_stocks()` 가 `stocks` 테이블 + screening_log 합집합으로 universe 구성하는데, 화요일(5/13) 테마 재선정 직후 새로 편입된 종목들이 7일 룩백 이전이라 합집합에서 누락 가능. graceful fallback(KIS 폴백) 동작으로 종목 선정 자체는 무손실이지만 Phase 1-B 목표(KIS 호출 제거)는 부분 미달성. **후속 단위 `supply-signal-followup-universe`** 후보 — ① `_get_theme_stocks()` 룩백을 화요일 재선정 시 무시하고 selected=1 테마의 최신 종목 풀 강제 포함, ② screener가 사용하는 종목 풀과 collector universe를 동일 함수에서 결정, ③ 5/15 결과 누적 후 추세 확정 시 진행 결정
 
 ### 10.4 다음 단계 (5/13 자연 발화 검증)
 
