@@ -26,11 +26,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -153,6 +154,45 @@ class KisOrderbookCollector:
             current_price=current_price, spread_pct=spread_pct,
             raw_payload=payload,
         )
+
+    # ===== 동시호가 폴링 (단위 2-4b, 2026-05-14) =====
+
+    async def poll_asking_price(
+        self,
+        ticker: str,
+        *,
+        interval_sec: float = 5.0,
+        max_iterations: Optional[int] = None,
+    ) -> AsyncIterator["OrderbookSnapshot"]:
+        """``interval_sec`` 간격으로 호가 스냅샷을 yield 하는 async generator.
+
+        PRD 9-3 동시호가 예상체결가/잔량 모니터링용. 15:20~15:28 (8분) 5초 간격 폴링
+        96회 + entry_executor 가 ``async for`` 로 소비하면서 break 조건 평가.
+
+        Args:
+            ticker: 종목코드 6자리.
+            interval_sec: 폴링 간격 (default 5초, 단위 2-4a 결정).
+            max_iterations: 최대 폴링 횟수. None=무한, 8분 = 96회 권장.
+
+        Yields:
+            OrderbookSnapshot (is_valid 가드 호출자가 직접).
+
+        Notes:
+            - 첫 yield는 즉시 (sleep 전).
+            - asyncio.CancelledError 정상 전파 (호출자 task.cancel() 시 그라스풀 종료).
+        """
+        iteration = 0
+        while True:
+            if max_iterations is not None and iteration >= max_iterations:
+                return
+            snap = await asyncio.to_thread(self.collect_snapshot, ticker)
+            yield snap
+            iteration += 1
+            try:
+                await asyncio.sleep(interval_sec)
+            except asyncio.CancelledError:
+                logger.debug(f"[orderbook_collector] {ticker} 폴링 취소됨 (iter={iteration})")
+                raise
 
     # ===== 다종목 =====
 

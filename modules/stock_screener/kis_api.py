@@ -588,7 +588,80 @@ class KISApi:
         except Exception as e:
             logger.error(f"[{stock_code}] 일별 시세 조회 실패: {e}")
             return None
-    
+
+    # ===== 분봉 시세 (종가베팅 단위 2-4b 추가, 2026-05-14) =====
+
+    def get_minute_price(
+        self,
+        stock_code: str,
+        time_to: str = "153000",
+        count: int = 30,
+    ) -> Optional[list[dict]]:
+        """당일 분봉 시세 조회 (TR FHKST03010200, /inquire-time-itemchartprice).
+
+        Args:
+            stock_code: 종목코드 6자리.
+            time_to: 조회 종료 시각 HHMMSS (default 15:30 정규장 종료).
+            count: 가져올 분봉 개수 (default 30, KIS 최대 30~100).
+
+        Returns:
+            분봉 리스트 (시간 내림차순) 또는 None:
+            [
+                {"time": "151800", "open": 75000, "high": 75100, "low": 74900,
+                 "close": 75050, "volume": 1234},
+                ...
+            ]
+
+        Notes:
+            - KIS 응답 필드 추정: stck_cntg_hour, stck_oprc/hgpr/lwpr/prpr, cntg_vol
+            - 14:50 이전 호출 시 응답이 있지만 count 미달 가능 (graceful 처리는 호출자)
+            - 분봉 데이터는 5/15 dry_run 시점에 실 응답 형식 최종 검증
+        """
+        self._rate_limit()
+
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        tr_id = "FHKST03010200"
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": stock_code,
+            "FID_INPUT_HOUR_1": time_to,
+            "FID_PW_DATA_INCU_YN": "N",
+        }
+
+        try:
+            response = self.client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    f"[{stock_code}] 분봉 조회 실패 rt_cd={data.get('rt_cd')} "
+                    f"msg={data.get('msg1')}"
+                )
+                return None
+
+            output = data.get("output2", []) or data.get("output", [])
+            result = []
+            for item in output[:count]:
+                result.append({
+                    "time": item.get("stck_cntg_hour", ""),
+                    "open": _safe_int(item.get("stck_oprc")),
+                    "high": _safe_int(item.get("stck_hgpr")),
+                    "low": _safe_int(item.get("stck_lwpr")),
+                    "close": _safe_int(item.get("stck_prpr")),
+                    "volume": _safe_int(item.get("cntg_vol")),
+                })
+
+            logger.debug(f"[{stock_code}] 분봉 {len(result)}건 조회 (time_to={time_to})")
+            return result
+
+        except Exception as e:
+            logger.error(f"[{stock_code}] 분봉 조회 실패: {e}")
+            return None
+
     # ===== 투자자별 매매동향 (수급) =====
     
     def get_investor_trading(
