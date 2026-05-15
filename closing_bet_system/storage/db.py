@@ -137,6 +137,15 @@ class ClosingBetDatabase:
         finally:
             cursor.close()
 
+    def _has_column(self, table: str, column: str) -> bool:
+        """테이블에 특정 컬럼이 있는지 확인 (ADD COLUMN idempotent용)."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"PRAGMA table_info({table})")
+            return any(row[1] == column for row in cursor.fetchall())
+        finally:
+            cursor.close()
+
     def _get_schema_version(self) -> int:
         cursor = self.conn.cursor()
         try:
@@ -168,6 +177,7 @@ class ClosingBetDatabase:
         migrations = [
             (1, "Phase 0-A: candidates/features/labels/flow_reliability 4테이블", self._migrate_v1),
             (2, "Phase 2-1: orderbook_snapshots 테이블 (호가 1단계 스냅샷)", self._migrate_v2),
+            (3, "단위 2-4c: candidates entry_phase1/2 +6 컬럼 (EntryExecutor)", self._migrate_v3),
         ]
 
         pending = [(v, d, fn) for v, d, fn in migrations if v > current]
@@ -384,6 +394,30 @@ class ClosingBetDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_orderbook_time "
                 "ON orderbook_snapshots(snapshot_time)"
             )
+
+
+    def _migrate_v3(self) -> None:
+        """v3: candidates 테이블에 EntryExecutor phase1/phase2 체결 정보 컬럼 추가.
+
+        - 옵션 A(mark_entered 1회 호출 + 가중 평균)와 호환되도록 phase1/phase2 ODNO·체결가·체결수량 박제.
+        - 단위 2-5 morning_exit_manager 가 phase1 50% 보유 상태(entry_phase2_executed_shares IS NULL)를
+          식별할 수 있도록 phase별 컬럼 분리.
+        - ALTER TABLE ADD COLUMN 은 _has_column 가드로 idempotent.
+        """
+        columns = [
+            ("entry_phase1_order_id", "TEXT"),
+            ("entry_phase1_executed_price", "REAL"),
+            ("entry_phase1_executed_shares", "INTEGER"),
+            ("entry_phase2_order_id", "TEXT"),
+            ("entry_phase2_executed_price", "REAL"),
+            ("entry_phase2_executed_shares", "INTEGER"),
+        ]
+        with self.get_cursor() as cursor:
+            for col_name, col_type in columns:
+                if not self._has_column("candidates", col_name):
+                    cursor.execute(
+                        f"ALTER TABLE candidates ADD COLUMN {col_name} {col_type}"
+                    )
 
 
 def init_db(db_path: Optional[str | Path] = None) -> ClosingBetDatabase:
