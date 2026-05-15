@@ -157,8 +157,8 @@ kis:
 #   4. 1주 모니터링 (옵션 C 3점 비교 + weekly_loss_limit)
 # 가격 임계값(vwap_premium 등)은 EntryExecutorSettings dataclass 박제 — 백테스트 정합.
 entry_executor:
-  enabled: false                           # Phase 2 자동매매 토글 (단위 2-4f에서 true)
-  dry_run: true                            # KIS 호출 직전 분기 (False면 실 발주)
+  enabled: true                            # 5/15 dry_run 부분 활성화 (run_entry_pipeline 진입 코드 흐름 검증)
+  dry_run: true                            # KIS 호출 직전 분기 (False면 실 발주) — 5/22까지 true 유지
   score_threshold: 2                       # 진입 임계: total_score ≥ 2 (5/14 사용자 결정)
   position_ratio: 0.7                      # PRD 기본 한도 × 0.7 (5/14 사용자 결정)
   phase1_ratio: 0.5                        # 1차(정규장) 50% / 2차(동시호가) 50%
