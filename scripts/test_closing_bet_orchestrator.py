@@ -29,6 +29,10 @@ from closing_bet_system.engines.overnight_risk_filter import OvernightRiskFilter
 from closing_bet_system.engines.signal_score_engine import SignalScoreEngine
 from closing_bet_system.main_orchestrator import (
     DEFAULT_GATE_OPERATIONAL_REVIEW,
+    ENTRY_PHASE2_HOUR,
+    ENTRY_PHASE2_MINUTE,
+    ENTRY_PIPELINE_SCHEDULE_HOUR,
+    ENTRY_PIPELINE_SCHEDULE_MINUTE,
     LABEL_SCHEDULE_HOUR,
     LABEL_SCHEDULE_MINUTE,
     MainOrchestrator,
@@ -416,21 +420,36 @@ def test_label_yesterday_with_provider():
 
 
 def test_register_jobs():
-    """APScheduler 잡 등록 — 3건 등록 + ID 확인."""
+    """APScheduler 잡 등록 — 5건 등록 + ID + entry_pipeline 트리거 검증 (단위 2-4d 보강)."""
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     orch = MainOrchestrator()
     sched = AsyncIOScheduler(timezone="Asia/Seoul")
     orch.register_jobs(sched)
 
-    job_ids = {j.id for j in sched.get_jobs()}
+    jobs = sched.get_jobs()
+    assert len(jobs) == 5, f"잡 5건 등록 기대, got {len(jobs)}: {[j.id for j in jobs]}"
+    job_ids = {j.id for j in jobs}
     assert "closing_bet_daily_pipeline" in job_ids
     assert "closing_bet_daily_summary" in job_ids
     assert "closing_bet_label_yesterday" in job_ids
-    # 시간 검증
-    pipeline_job = sched.get_job("closing_bet_daily_pipeline")
-    assert pipeline_job.trigger.fields[5].name == "hour"  # CronTrigger 필드
-    print(f"  [PASS] register_jobs 3건 등록 ({sorted(job_ids)})")
-    # AsyncIOScheduler 는 start() 안 했으면 shutdown 시 event loop 미존재 에러 — 무시
+    assert "closing_bet_flow_reliability" in job_ids
+    assert "closing_bet_entry_pipeline" in job_ids   # 단위 2-4d 신규
+
+    # entry_pipeline 트리거 검증 (CronTrigger fields: year/month/day/week/day_of_week/hour/minute/second)
+    entry_job = sched.get_job("closing_bet_entry_pipeline")
+    field_map = {f.name: f for f in entry_job.trigger.fields}
+    assert str(field_map["hour"]) == str(ENTRY_PIPELINE_SCHEDULE_HOUR), \
+        f"entry_pipeline hour {field_map['hour']} != {ENTRY_PIPELINE_SCHEDULE_HOUR}"
+    assert str(field_map["minute"]) == str(ENTRY_PIPELINE_SCHEDULE_MINUTE), \
+        f"entry_pipeline minute {field_map['minute']} != {ENTRY_PIPELINE_SCHEDULE_MINUTE}"
+    assert "mon-fri" in str(field_map["day_of_week"]), \
+        f"entry_pipeline day_of_week={field_map['day_of_week']}"
+    assert str(entry_job.trigger.timezone) == "Asia/Seoul"
+    # misfire_grace_time / coalesce 설정 검증
+    assert entry_job.misfire_grace_time == 120
+    assert entry_job.coalesce is True
+
+    print(f"  [PASS] register_jobs 5건 등록 + entry_pipeline 트리거 검증 ({sorted(job_ids)})")
     try:
         if getattr(sched, "running", False):
             sched.shutdown(wait=False)
@@ -490,7 +509,12 @@ def test_schedule_constants():
     assert SUMMARY_SCHEDULE_MINUTE == 35
     assert LABEL_SCHEDULE_HOUR == 10
     assert LABEL_SCHEDULE_MINUTE == 0
-    print(f"  [PASS] 스케줄 상수 (15:10 / 15:35 / 10:00) HOUR+MINUTE 6건 검증")
+    # 단위 2-4d 신규: ENTRY 상수 (PRD 9-1 정합, settings.yaml entry_phase1_start/entry_phase2_start)
+    assert ENTRY_PIPELINE_SCHEDULE_HOUR == 15
+    assert ENTRY_PIPELINE_SCHEDULE_MINUTE == 18
+    assert ENTRY_PHASE2_HOUR == 15
+    assert ENTRY_PHASE2_MINUTE == 25
+    print(f"  [PASS] 스케줄 상수 10건 검증 (15:10 / 15:35 / 10:00 / 15:18 / 15:25)")
 
 
 def main():

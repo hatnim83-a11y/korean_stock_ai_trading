@@ -20,7 +20,7 @@ TR_ID ``TTTC8001R``) 를 비동기 래핑한다. 메인 봇 ``label_provider._fe
 - ``is_filled``: 전량 체결 여부 (bool)
 - ``is_partial``: 부분 체결 여부 (bool, 일부만 체결되고 잔량 > 0)
 
-5/13 사건: KIS 500 1회 → 라벨 누락 → fill_checker는 3회 재시도(5초/10초/15초 지수 백오프).
+5/13 사건: KIS 500 1회 → 라벨 누락 → fill_checker는 3회 재시도(5초/10초/15초 선형 백오프).
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ class FillChecker:
             order_id: KIS 주문번호 (ODNO, 매수 시 발급).
             order_date: 주문일자 YYYYMMDD (None=오늘).
             max_attempts: 최대 시도 횟수 (default 3).
-            backoff_base_sec: 지수 백오프 기본값 (default 5초, 5/10/15초).
+            backoff_base_sec: 선형 백오프 기본값 (default 5초, delay = base × attempt → 5/10/15초).
 
         Returns:
             FillStatus 또는 None (max_attempts 모두 실패).

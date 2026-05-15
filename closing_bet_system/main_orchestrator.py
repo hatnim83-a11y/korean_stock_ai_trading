@@ -75,6 +75,13 @@ LABEL_SCHEDULE_MINUTE = 0
 FLOW_RELIABILITY_SCHEDULE_HOUR = 19
 FLOW_RELIABILITY_SCHEDULE_MINUTE = 27
 
+# 단위 2-4d (2026-05-15) — EntryExecutor 진입 파이프라인 (15:18 phase1 → 15:25 phase2)
+# 단일 async 잡: phase1 → sleep_until 15:25 → phase2. race 봉쇄 + run_daily_pipeline(15:10) 종료 후 시작.
+ENTRY_PIPELINE_SCHEDULE_HOUR = 15
+ENTRY_PIPELINE_SCHEDULE_MINUTE = 18
+ENTRY_PHASE2_HOUR = 15
+ENTRY_PHASE2_MINUTE = 25
+
 # 1-9 운영 점검 게이트 (settings.yaml gate.operational_review 와 동기화)
 DEFAULT_GATE_OPERATIONAL_REVIEW = 30
 
@@ -124,6 +131,7 @@ class MainOrchestrator:
         self._review_bot = review_bot
         self._orderbook_collector = orderbook_collector
         self._kind_collector = kind_collector
+        self._entry_executor = None    # 단위 2-4d: lazy 로딩 (settings.yaml entry_executor 섹션)
         self._universe_provider = universe_provider
         self._market_data_provider = market_data_provider
         self._name_lookup = name_lookup
@@ -203,6 +211,69 @@ class MainOrchestrator:
             )
             self._orderbook_collector = KisOrderbookCollector()
         return self._orderbook_collector
+
+    @property
+    def entry_executor(self):
+        """단위 2-4c EntryExecutor 지연 로딩.
+
+        settings.yaml `entry_executor` 섹션을 EntryExecutorSettings 로 매핑.
+        Phase 2 자동매매 진입 활성화 시 (`enabled=True`) `run_entry_pipeline` 에서 사용.
+        의존성: KISOrderApi / FundGuard / CandidateLogger / VWAPCollector /
+        EstimatedPriceCollector / KisOrderbookCollector / FillChecker / MarketGuard /
+        EntryNotifier — 전부 lazy import + 본 orchestrator 의 기존 collectors 재사용.
+        """
+        if getattr(self, "_entry_executor", None) is None:
+            from closing_bet_system.collectors.estimated_price_collector import (
+                EstimatedPriceCollector,
+            )
+            from closing_bet_system.collectors.vwap_collector import VWAPCollector
+            from closing_bet_system.execution.entry_executor import (
+                EntryExecutor,
+                EntryExecutorSettings,
+            )
+            from closing_bet_system.execution.fill_checker import FillChecker
+            from closing_bet_system.infra.fund_guard import FundGuard
+            from closing_bet_system.notification.entry_notifier import EntryNotifier
+            from closing_bet_system.storage.db import _load_settings
+            from modules.market_guard import MarketGuard
+            from modules.stock_screener.kis_api import KISApi
+            from modules.trading_engine.kis_order_api import KISOrderApi
+
+            yaml_settings = _load_settings().get("entry_executor", {})
+            ee_settings = EntryExecutorSettings(
+                enabled=bool(yaml_settings.get("enabled", False)),
+                dry_run=bool(yaml_settings.get("dry_run", True)),
+                score_threshold=int(yaml_settings.get("score_threshold", 2)),
+                position_ratio=float(yaml_settings.get("position_ratio", 0.7)),
+                phase1_ratio=float(yaml_settings.get("phase1_ratio", 0.5)),
+                phase2_enabled=bool(yaml_settings.get("phase2_enabled", True)),
+                polling_interval_sec=float(yaml_settings.get("polling_interval_sec", 5)),
+                fill_check_deadline_sec=float(
+                    yaml_settings.get("fill_check_deadline_sec", 300)
+                ),
+                fallback_to_next_candidate=bool(
+                    yaml_settings.get("fallback_to_next_candidate", True)
+                ),
+                market_guard_enabled=bool(
+                    yaml_settings.get("market_guard_enabled", True)
+                ),
+            )
+
+            kis_order_api = KISOrderApi()
+            kis_api = KISApi()
+            self._entry_executor = EntryExecutor(
+                kis_order_api=kis_order_api,
+                fund_guard=FundGuard(),
+                candidate_logger=self.candidate_logger,
+                vwap_collector=VWAPCollector(kis_api),
+                estimated_price_collector=EstimatedPriceCollector(kis_order_api),
+                orderbook_collector=self.orderbook_collector,
+                fill_checker=FillChecker(kis_order_api),
+                market_guard=MarketGuard(),
+                entry_notifier=EntryNotifier(),
+                settings=ee_settings,
+            )
+        return self._entry_executor
 
     @property
     def kind_collector(self):
@@ -741,6 +812,81 @@ class MainOrchestrator:
 
     # ===== APScheduler 통합 =====
 
+    async def run_entry_pipeline(self) -> dict:
+        """단위 2-4d 진입 파이프라인 — 15:18 phase1 → sleep until 15:25 → phase2.
+
+        단일 async 잡으로 phase1/phase2 를 묶어 race 위험 봉쇄. settings.yaml
+        `entry_executor.enabled=false` 시 즉시 무동작 (kill switch).
+
+        Returns:
+            ``{"phase1": Phase1Result-asdict, "phase2": Phase2Result-asdict-or-None,
+               "trade_date": str, "skipped": bool}``
+        """
+        if not self.entry_executor.settings.enabled:
+            logger.info("[orchestrator] run_entry_pipeline 스킵 — enabled=False")
+            return {"skipped": True, "reason": "enabled=False"}
+
+        trade_date = now_kst().date().isoformat()
+        logger.info(f"[orchestrator] run_entry_pipeline 시작 trade_date={trade_date}")
+
+        # Phase 1 (15:18)
+        phase1_result = await self.entry_executor.execute_phase1(trade_date)
+
+        # 15:25 까지 sleep (cron 이 15:18 fire 후 자연 대기)
+        await self._sleep_until_kst(ENTRY_PHASE2_HOUR, ENTRY_PHASE2_MINUTE)
+
+        # Phase 2 (15:25)
+        phase2_result = await self.entry_executor.execute_phase2(trade_date)
+
+        # 통합 요약 알림
+        try:
+            await asyncio.to_thread(
+                self.entry_executor.entry_notifier.send_pipeline_summary,
+                phase1_result, phase2_result,
+                self.entry_executor.settings.dry_run,
+            )
+        except Exception as exc:
+            logger.error(f"[orchestrator] send_pipeline_summary 실패: {exc}")
+
+        return {
+            "skipped": False,
+            "trade_date": trade_date,
+            "phase1": {
+                "submitted": phase1_result.submitted,
+                "filled": phase1_result.filled,
+                "skipped_price_cap": phase1_result.skipped_price_cap,
+                "fund_guard_rejected": phase1_result.fund_guard_rejected,
+                "market_guard_status": phase1_result.market_guard_status,
+            },
+            "phase2": (
+                {
+                    "submitted": phase2_result.submitted,
+                    "filled": phase2_result.filled,
+                    "skipped_estimated_price": phase2_result.skipped_estimated_price,
+                    "cancelled_ask_bid": phase2_result.cancelled_ask_bid,
+                }
+                if phase2_result is not None
+                else None
+            ),
+        }
+
+    async def _sleep_until_kst(self, hour: int, minute: int) -> None:
+        """현재 KST 시각 → 목표 시각까지 sleep. 이미 지났으면 즉시 반환."""
+        now = now_kst()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        delta = (target - now).total_seconds()
+        if delta <= 0:
+            logger.info(
+                f"[orchestrator] _sleep_until_kst({hour:02d}:{minute:02d}) — "
+                f"이미 경과 (delta={delta:.1f}s), 즉시 진행"
+            )
+            return
+        logger.info(
+            f"[orchestrator] _sleep_until_kst({hour:02d}:{minute:02d}) — "
+            f"{delta:.1f}초 대기"
+        )
+        await asyncio.sleep(delta)
+
     def register_jobs(self, scheduler) -> None:
         """기존 main.py ``scheduler`` 에 종가베팅 잡 4건 등록.
 
@@ -792,13 +938,29 @@ class MainOrchestrator:
             id="closing_bet_flow_reliability",
             replace_existing=True,
         )
+        # 단위 2-4d: EntryExecutor 진입 파이프라인 (15:18 phase1 → 15:25 phase2)
+        # settings.yaml entry_executor.enabled=false 면 잡은 등록되지만 함수 진입 시 즉시 return.
+        scheduler.add_job(
+            self.run_entry_pipeline,
+            CronTrigger(
+                hour=ENTRY_PIPELINE_SCHEDULE_HOUR,
+                minute=ENTRY_PIPELINE_SCHEDULE_MINUTE,
+                day_of_week="mon-fri", timezone=kst,
+            ),
+            id="closing_bet_entry_pipeline",
+            replace_existing=True,
+            misfire_grace_time=120,   # 15:18 미스 시 최대 2분 늦게 발화
+            coalesce=True,
+        )
         logger.info(
-            f"[orchestrator] 종가베팅 잡 4건 등록 — "
+            f"[orchestrator] 종가베팅 잡 5건 등록 — "
             f"pipeline {PIPELINE_SCHEDULE_HOUR:02d}:{PIPELINE_SCHEDULE_MINUTE:02d} / "
             f"summary {SUMMARY_SCHEDULE_HOUR:02d}:{SUMMARY_SCHEDULE_MINUTE:02d} / "
             f"label {LABEL_SCHEDULE_HOUR:02d}:{LABEL_SCHEDULE_MINUTE:02d} / "
             f"flow_reliability {FLOW_RELIABILITY_SCHEDULE_HOUR:02d}:"
-            f"{FLOW_RELIABILITY_SCHEDULE_MINUTE:02d}"
+            f"{FLOW_RELIABILITY_SCHEDULE_MINUTE:02d} / "
+            f"entry_pipeline {ENTRY_PIPELINE_SCHEDULE_HOUR:02d}:"
+            f"{ENTRY_PIPELINE_SCHEDULE_MINUTE:02d}"
         )
 
 

@@ -39,6 +39,15 @@ def _make_collector():
     return KisOrderbookCollector(mock_api)
 
 
+def _run(coro):
+    # 신규 이벤트 루프 생성 + 종료 시 close 보장 (async generator pending task 잔재 차단)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def test_POLL_1_max_iterations_3():
     """POLL-1: max_iterations=3 → 정확히 3건 yield."""
     collector = _make_collector()
@@ -51,7 +60,7 @@ def test_POLL_1_max_iterations_3():
             results.append(snap)
         return results
 
-    results = asyncio.new_event_loop().run_until_complete(consume())
+    results = _run(consume())
     assert len(results) == 3, f"len={len(results)}, 3 기대"
     assert all(isinstance(s, OrderbookSnapshot) for s in results)
     print(f"✅ POLL-1 max_iterations=3 → {len(results)}건 yield")
@@ -70,7 +79,7 @@ def test_POLL_2_interval_timing():
             count += 1
         return time.perf_counter() - start
 
-    elapsed = asyncio.new_event_loop().run_until_complete(consume())
+    elapsed = _run(consume())
     # 3건 yield 사이 2번 sleep (0.1 + 0.1 = 0.2). 첫 yield는 즉시
     # 다만 max_iterations 도달 후에도 마지막 sleep 발생 — 0.3까지 가능
     assert 0.15 < elapsed < 0.5, f"elapsed={elapsed:.3f}초, 0.15~0.5 기대"
@@ -89,7 +98,7 @@ def test_POLL_3_first_yield_immediate():
             first_yield = time.perf_counter() - start
             return first_yield
 
-    first_yield = asyncio.new_event_loop().run_until_complete(consume())
+    first_yield = _run(consume())
     # 첫 yield 시점은 KIS mock 호출 후 즉시 (< 0.1초)
     assert first_yield < 0.5, f"first_yield={first_yield:.3f}, < 0.5 기대"
     print(f"✅ POLL-3 첫 yield 즉시: {first_yield:.4f}초")
@@ -115,7 +124,7 @@ def test_POLL_4_cancel_propagation():
         except asyncio.CancelledError:
             return "cancelled"
 
-    result = asyncio.new_event_loop().run_until_complete(runner())
+    result = _run(runner())
     assert result == "cancelled", f"result={result}, 'cancelled' 기대"
     print("✅ POLL-4 cancel 전파 정확")
 

@@ -148,6 +148,26 @@ db:
 kis:
   use_mock: false                          # Phase 1 알림형 — 실전 도메인 시세 조회 (자동매수 X)
 
+# ─── EntryExecutor (단위 2-4c~f, Phase 2 자동매매 진입) ──────────────────
+# 5/14 walkforward 게이트 PASS (n=103, realistic EV +1.04% / Sharpe +1.57) 후 도입.
+# 활성화 절차:
+#   1. 단위 2-4e dry_run 통합 단발 검증 (enabled=true / dry_run=true)
+#   2. 단위 2-5 morning_exit_manager 완료 또는 수동 매도 SOP 확정
+#   3. 사용자 승인 → dry_run=false / enabled=true → systemctl restart
+#   4. 1주 모니터링 (옵션 C 3점 비교 + weekly_loss_limit)
+# 가격 임계값(vwap_premium 등)은 EntryExecutorSettings dataclass 박제 — 백테스트 정합.
+entry_executor:
+  enabled: false                           # Phase 2 자동매매 토글 (단위 2-4f에서 true)
+  dry_run: true                            # KIS 호출 직전 분기 (False면 실 발주)
+  score_threshold: 2                       # 진입 임계: total_score ≥ 2 (5/14 사용자 결정)
+  position_ratio: 0.7                      # PRD 기본 한도 × 0.7 (5/14 사용자 결정)
+  phase1_ratio: 0.5                        # 1차(정규장) 50% / 2차(동시호가) 50%
+  phase2_enabled: true                     # Step 0 ord_dvsn 폴백 시 false (15:25 동시호가 미발주)
+  polling_interval_sec: 5                  # fill_checker 폴링 간격 (Step 0 결과 따라 10초 완화 가능)
+  fill_check_deadline_sec: 300             # 5분 cut (15:23 또는 15:30까지)
+  fallback_to_next_candidate: true         # PRD 9-2 정합 (미체결 시 다음 후보)
+  market_guard_enabled: true               # Phase 0.5 시장 위기 검사 (CRISIS/DANGER/CAUTION)
+
 # ─── Kill Switch (Phase 3에서 활성화) ────────────────────────────────────
 kill_switch:
   enabled: false                           # Phase 3에서 true로 전환

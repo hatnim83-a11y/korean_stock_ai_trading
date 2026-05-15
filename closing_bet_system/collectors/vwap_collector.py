@@ -16,6 +16,7 @@ KIS API ``get_minute_price(time_to="151800", count=30)`` → 14:50~15:18 28분 �
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import time as time_cls
 from typing import Optional
 
@@ -32,6 +33,15 @@ _VWAP_BAR_COUNT = 30               # 14:50~15:18 = 28분 + 여유 2분
 
 class InsufficientDataError(RuntimeError):
     """VWAP 계산용 분봉 데이터 부족."""
+
+
+@dataclass(frozen=True)
+class VWAPSnapshot:
+    """14:50~15:18 윈도우 VWAP + 동기간 고가 스냅샷 (PRD 9-2 가격 상한용)."""
+
+    ticker: str
+    vwap: Optional[float]   # None = 거래량 0 또는 분봉 없음
+    high: int               # 윈도우 내 최고가 (원, 0=계산 불가)
 
 
 class VWAPCollector:
@@ -115,3 +125,66 @@ class VWAPCollector:
             f"[vwap_collector] {ticker} VWAP={vwap:.2f} (volume_sum={volume_sum})"
         )
         return float(vwap)
+
+    async def get_snapshot(
+        self,
+        ticker: str,
+        *,
+        time_to: str = f"{_VWAP_WINDOW_END_HHMM}00",
+        bar_count: int = _VWAP_BAR_COUNT,
+    ) -> Optional[VWAPSnapshot]:
+        """VWAP + 동기간 max(high) 동시 계산 (분봉 1회 호출).
+
+        Returns:
+            VWAPSnapshot 또는 None (분봉 응답 없음). InsufficientDataError 는
+            그대로 전파 (호출자가 가격 상한에서 VWAP 항 제외 결정).
+        """
+        # 14:50 이전 가드 — get_vwap 와 동일
+        now = now_kst().time()
+        if now < time_cls(14, 50):
+            raise InsufficientDataError(
+                f"VWAP 계산은 14:50 이후만 가능 (현재 {now.strftime('%H:%M:%S')} KST)"
+            )
+
+        try:
+            bars = await asyncio.to_thread(
+                self.kis_api.get_minute_price,
+                stock_code=ticker,
+                time_to=time_to,
+                count=bar_count,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[vwap_collector] {ticker} get_minute_price 예외(snapshot): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+        if not bars:
+            return None
+
+        weighted_sum = 0.0
+        volume_sum = 0
+        high = 0
+        for bar in bars:
+            bar_time = bar.get("time", "")
+            if not bar_time or len(bar_time) < 4:
+                continue
+            hhmm = bar_time[:4]
+            if hhmm < _VWAP_WINDOW_START_HHMM or hhmm > _VWAP_WINDOW_END_HHMM:
+                continue
+            close = bar.get("close", 0) or 0
+            volume = bar.get("volume", 0) or 0
+            bar_high = bar.get("high", 0) or 0
+            if bar_high > high:
+                high = int(bar_high)
+            if close > 0 and volume > 0:
+                weighted_sum += float(close) * float(volume)
+                volume_sum += int(volume)
+
+        vwap_val: Optional[float]
+        if volume_sum == 0:
+            vwap_val = None
+        else:
+            vwap_val = weighted_sum / volume_sum
+        return VWAPSnapshot(ticker=ticker, vwap=vwap_val, high=high)
