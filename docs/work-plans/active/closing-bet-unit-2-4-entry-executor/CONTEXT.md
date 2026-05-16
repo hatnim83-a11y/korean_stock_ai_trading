@@ -194,3 +194,23 @@ POLL 4/4 PASS (orderbook polling — max_iterations + interval + 즉시 yield + 
 ### 컨텍스트 크기
 - 이번 세션 컨텍스트 매우 큼 (walkforward + plan 리뷰 + 단위 2-4a/b)
 - 다음 세션은 **새 대화 시작 권장** — `/resume` 명령 또는 직접 이 CONTEXT.md 읽기로 시작
+
+---
+
+## 운영 봇 배포 완료 (2026-05-15 + 5-16)
+
+### 5/15 옵션 1 배포 (코드만 main 머지)
+- main 머지 `bf0caa2` push → systemctl restart PID 101811
+- DB v3 마이그레이션 적용 (자동 백업 `closing_bet.bak.20260515_223025`)
+- 종가베팅 잡 5건 등록 (entry_pipeline 15:18 신규)
+
+### 5/15 옵션 B 배포 (entry_executor dry_run 부분 활성)
+- `entry_executor.enabled=true / dry_run=true` 토글
+- 5/18(월) 15:18 KST 첫 자연 발화 예정
+
+### 5/16 단위 2-5 통합 배포
+- main 머지 `e20f2bc` push → systemctl restart PID 294777
+- 종가베팅 잡 8건 (매도 3건 신규: emergency_stop 09:01 / morning_exit 09:30 / morning_force_close 10:30)
+- `morning_exit.enabled=true / dry_run=true` 부분 활성
+- **단위 2-4f 활성화는 단위 2-5와 묶어서 5/22+ 별도 세션 사용자 승인 후**
+- 단위 2-5 CONTEXT.md 본 세션 작업 요약 참조 (`docs/work-plans/active/closing-bet-unit-2-5-morning-exit/CONTEXT.md`)
