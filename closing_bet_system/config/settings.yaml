@@ -178,8 +178,8 @@ entry_executor:
 #   4. 1주 모니터링 (시뮬 정합성 + weekly_loss_limit)
 # PRD 10-1 박제값(exit.*)은 ExitExecutorSettings frozen dataclass 박제 — 백테스트 정합.
 morning_exit:
-  enabled: false                           # Phase 2 자동매도 토글 (단위 2-5f에서 true)
-  dry_run: true                            # KIS 호출 직전 분기 (False면 실 매도)
+  enabled: true                            # 5/16 dry_run 부분 활성화 (run_emergency_stop_check / run_morning_exit / run_morning_force_close 진입 코드 흐름 검증)
+  dry_run: true                            # KIS 호출 직전 분기 (False면 실 매도) — ~5/22 1주 관찰 후 단위 2-5f 활성화 검토
   emergency_stop_enabled: true             # 09:01 emergency_stop 분기 활성 (false면 09:30 morning_exit에 위임)
   use_sell_lock: true                      # 메인 봇 sell_lock 재사용 + owner 네임스페이스 'closing_bet:*'
   polling_interval_sec: 5                  # fill_checker 폴링 간격
