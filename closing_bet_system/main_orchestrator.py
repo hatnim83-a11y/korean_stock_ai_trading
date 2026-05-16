@@ -82,6 +82,17 @@ ENTRY_PIPELINE_SCHEDULE_MINUTE = 18
 ENTRY_PHASE2_HOUR = 15
 ENTRY_PHASE2_MINUTE = 25
 
+# 단위 2-5d (2026-05-16) — ExitExecutor 자동매도 3개 잡
+# 09:01 emergency_stop (메인 봇 09:00 monitoring_start_early + midweek_sell_profit race 회피)
+# 09:30 morning_exit (PRD 10-1 4단계 매도 액션 매트릭스)
+# 10:30 force_close (미체결 잔량 시장가 전량 + 09:30 미체결 취소)
+EMERGENCY_STOP_SCHEDULE_HOUR = 9
+EMERGENCY_STOP_SCHEDULE_MINUTE = 1
+MORNING_EXIT_HOUR = 9
+MORNING_EXIT_MINUTE = 30
+MORNING_FORCE_CLOSE_HOUR = 10
+MORNING_FORCE_CLOSE_MINUTE = 30
+
 # 1-9 운영 점검 게이트 (settings.yaml gate.operational_review 와 동기화)
 DEFAULT_GATE_OPERATIONAL_REVIEW = 30
 
@@ -132,6 +143,7 @@ class MainOrchestrator:
         self._orderbook_collector = orderbook_collector
         self._kind_collector = kind_collector
         self._entry_executor = None    # 단위 2-4d: lazy 로딩 (settings.yaml entry_executor 섹션)
+        self._exit_executor = None     # 단위 2-5d: lazy 로딩 (settings.yaml morning_exit 섹션)
         self._universe_provider = universe_provider
         self._market_data_provider = market_data_provider
         self._name_lookup = name_lookup
@@ -274,6 +286,68 @@ class MainOrchestrator:
                 settings=ee_settings,
             )
         return self._entry_executor
+
+    @property
+    def exit_executor(self):
+        """단위 2-5c ExitExecutor 지연 로딩.
+
+        settings.yaml `morning_exit` 섹션을 ExitExecutorSettings 로 매핑.
+        Phase 2 자동매도 활성화 시(`enabled=True`) 3개 잡(09:01 / 09:30 / 10:30)에서 사용.
+        의존성: KISOrderApi / CandidateLogger / MorningPriceCollector / FillChecker /
+        ExitNotifier — 단위 2-4 EntryExecutor 와 동일 KISOrderApi/CandidateLogger 인스턴스 공유.
+        """
+        if self._exit_executor is None:
+            from closing_bet_system.collectors.morning_price_collector import (
+                MorningPriceCollector,
+            )
+            from closing_bet_system.execution.exit_executor import (
+                ExitExecutor,
+                ExitExecutorSettings,
+            )
+            from closing_bet_system.execution.fill_checker import FillChecker
+            from closing_bet_system.notification.exit_notifier import ExitNotifier
+            from closing_bet_system.storage.db import _load_settings
+            from modules.stock_screener.kis_api import KISApi
+            from modules.trading_engine.kis_order_api import KISOrderApi
+
+            yaml_settings = _load_settings().get("morning_exit", {})
+            exit_cfg = _load_settings().get("exit", {})
+            ee_settings = ExitExecutorSettings(
+                enabled=bool(yaml_settings.get("enabled", False)),
+                dry_run=bool(yaml_settings.get("dry_run", True)),
+                emergency_stop_enabled=bool(
+                    yaml_settings.get("emergency_stop_enabled", True)
+                ),
+                use_sell_lock=bool(yaml_settings.get("use_sell_lock", True)),
+                hard_stop_loss=float(exit_cfg.get("hard_stop_loss", -0.01)),
+                gap_up_high_threshold=float(exit_cfg.get("gap_up_high_threshold", 0.02)),
+                gap_up_low_threshold=float(exit_cfg.get("gap_up_low_threshold", 0.005)),
+                flat_lower=float(exit_cfg.get("flat_lower", -0.005)),
+                gap_up_high_partial_ratio=float(
+                    exit_cfg.get("gap_up_high_partial_ratio", 0.6)
+                ),
+                polling_interval_sec=float(
+                    yaml_settings.get("polling_interval_sec", 5.0)
+                ),
+                fill_check_deadline_sec=float(
+                    yaml_settings.get("fill_check_deadline_sec", 60.0)
+                ),
+                cancel_confirm_deadline_sec=float(
+                    yaml_settings.get("cancel_confirm_deadline_sec", 30.0)
+                ),
+            )
+
+            kis_order_api = KISOrderApi()
+            kis_api = KISApi()
+            self._exit_executor = ExitExecutor(
+                kis_order_api=kis_order_api,
+                candidate_logger=self.candidate_logger,
+                morning_price_collector=MorningPriceCollector(kis_api),
+                fill_checker=FillChecker(kis_order_api),
+                exit_notifier=ExitNotifier(),
+                settings=ee_settings,
+            )
+        return self._exit_executor
 
     @property
     def kind_collector(self):
@@ -887,6 +961,66 @@ class MainOrchestrator:
         )
         await asyncio.sleep(delta)
 
+    async def run_emergency_stop_check(self) -> dict:
+        """단위 2-5d — 09:01 emergency_stop 잡 (hard_stop_loss ≤ -1% 즉시 손절).
+
+        메인 봇 09:00 monitoring_start_early + midweek_sell_profit 종료 후 60초 오프셋.
+        settings.yaml `morning_exit.enabled=false` 또는 `emergency_stop_enabled=false` 시 즉시 무동작.
+        """
+        if not self.exit_executor.settings.enabled:
+            logger.info("[orchestrator] run_emergency_stop_check 스킵 — enabled=False")
+            return {"skipped": True, "reason": "enabled=False"}
+        if not self.exit_executor.settings.emergency_stop_enabled:
+            logger.info("[orchestrator] run_emergency_stop_check 스킵 — emergency_stop_enabled=False")
+            return {"skipped": True, "reason": "emergency_stop_enabled=False"}
+
+        # T-1 = 어제 진입한 후보 (오늘 매도). 휴장 보정은 단위 2-5g 후속.
+        trade_date = (now_kst().date() - timedelta(days=1)).isoformat()
+        logger.info(f"[orchestrator] run_emergency_stop_check 시작 trade_date={trade_date}")
+        result = await self.exit_executor.execute_emergency_stop(trade_date)
+        return {
+            "skipped": False, "trade_date": trade_date, "cycle": "emergency_stop",
+            "total_targets": result.total_targets, "filled": result.filled,
+            "unfilled": result.unfilled,
+        }
+
+    async def run_morning_exit(self) -> dict:
+        """단위 2-5d — 09:30 morning_exit 잡 (PRD 10-1 4단계 매도 액션).
+
+        emergency_stop 처리된 종목(exit_time NOT NULL)은 자동 제외.
+        """
+        if not self.exit_executor.settings.enabled:
+            logger.info("[orchestrator] run_morning_exit 스킵 — enabled=False")
+            return {"skipped": True, "reason": "enabled=False"}
+
+        trade_date = (now_kst().date() - timedelta(days=1)).isoformat()
+        logger.info(f"[orchestrator] run_morning_exit 시작 trade_date={trade_date}")
+        result = await self.exit_executor.execute_morning_exit(trade_date)
+        return {
+            "skipped": False, "trade_date": trade_date, "cycle": "morning_exit",
+            "total_targets": result.total_targets, "filled": result.filled,
+            "unfilled": result.unfilled, "action_counts": result.action_counts,
+        }
+
+    async def run_morning_force_close(self) -> dict:
+        """단위 2-5d — 10:30 morning_force_close 잡 (잔량 시장가 전량).
+
+        P1-4 순서: 09:30 미체결 cancel_order → 취소 확인 → 시장가 재발주.
+        ExitExecutor 의 _pending_exit_orders 메모리 dict 활용.
+        """
+        if not self.exit_executor.settings.enabled:
+            logger.info("[orchestrator] run_morning_force_close 스킵 — enabled=False")
+            return {"skipped": True, "reason": "enabled=False"}
+
+        trade_date = (now_kst().date() - timedelta(days=1)).isoformat()
+        logger.info(f"[orchestrator] run_morning_force_close 시작 trade_date={trade_date}")
+        result = await self.exit_executor.execute_force_close(trade_date)
+        return {
+            "skipped": False, "trade_date": trade_date, "cycle": "force_close",
+            "total_targets": result.total_targets, "filled": result.filled,
+            "unfilled": result.unfilled, "cancelled": result.cancelled,
+        }
+
     def register_jobs(self, scheduler) -> None:
         """기존 main.py ``scheduler`` 에 종가베팅 잡 4건 등록.
 
@@ -952,15 +1086,55 @@ class MainOrchestrator:
             misfire_grace_time=120,   # 15:18 미스 시 최대 2분 늦게 발화
             coalesce=True,
         )
+        # 단위 2-5d: ExitExecutor 자동매도 잡 3건 (09:01 emergency / 09:30 morning / 10:30 force_close)
+        # settings.yaml morning_exit.enabled=false 면 함수 진입 시 즉시 return.
+        scheduler.add_job(
+            self.run_emergency_stop_check,
+            CronTrigger(
+                hour=EMERGENCY_STOP_SCHEDULE_HOUR,
+                minute=EMERGENCY_STOP_SCHEDULE_MINUTE,
+                day_of_week="mon-fri", timezone=kst,
+            ),
+            id="closing_bet_emergency_stop",
+            replace_existing=True,
+            misfire_grace_time=60,   # 1분 grace (60초 이후엔 09:30 morning_exit 위임)
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self.run_morning_exit,
+            CronTrigger(
+                hour=MORNING_EXIT_HOUR, minute=MORNING_EXIT_MINUTE,
+                day_of_week="mon-fri", timezone=kst,
+            ),
+            id="closing_bet_morning_exit",
+            replace_existing=True,
+            misfire_grace_time=300,   # 5분 grace, 10:30 force_close 가 안전망
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self.run_morning_force_close,
+            CronTrigger(
+                hour=MORNING_FORCE_CLOSE_HOUR, minute=MORNING_FORCE_CLOSE_MINUTE,
+                day_of_week="mon-fri", timezone=kst,
+            ),
+            id="closing_bet_morning_force_close",
+            replace_existing=True,
+            misfire_grace_time=120,
+            coalesce=True,
+        )
         logger.info(
-            f"[orchestrator] 종가베팅 잡 5건 등록 — "
+            f"[orchestrator] 종가베팅 잡 8건 등록 — "
             f"pipeline {PIPELINE_SCHEDULE_HOUR:02d}:{PIPELINE_SCHEDULE_MINUTE:02d} / "
             f"summary {SUMMARY_SCHEDULE_HOUR:02d}:{SUMMARY_SCHEDULE_MINUTE:02d} / "
             f"label {LABEL_SCHEDULE_HOUR:02d}:{LABEL_SCHEDULE_MINUTE:02d} / "
             f"flow_reliability {FLOW_RELIABILITY_SCHEDULE_HOUR:02d}:"
             f"{FLOW_RELIABILITY_SCHEDULE_MINUTE:02d} / "
             f"entry_pipeline {ENTRY_PIPELINE_SCHEDULE_HOUR:02d}:"
-            f"{ENTRY_PIPELINE_SCHEDULE_MINUTE:02d}"
+            f"{ENTRY_PIPELINE_SCHEDULE_MINUTE:02d} / "
+            f"emergency_stop {EMERGENCY_STOP_SCHEDULE_HOUR:02d}:"
+            f"{EMERGENCY_STOP_SCHEDULE_MINUTE:02d} / "
+            f"morning_exit {MORNING_EXIT_HOUR:02d}:{MORNING_EXIT_MINUTE:02d} / "
+            f"morning_force_close {MORNING_FORCE_CLOSE_HOUR:02d}:{MORNING_FORCE_CLOSE_MINUTE:02d}"
         )
 
 

@@ -39,19 +39,21 @@
 - [x] 누적 회귀 199건 PASS (phase25 60 + 2-4b 29 + 2-4c 31 + orchestrator 16 + candidate_logger 20 + 2-5b 12 + 2-5c 31)
 - [x] code-tester 호출 — stream idle timeout 발생, 직접 6항목 검증으로 대체 (py_compile / datetime.now 잔존 0 / async to_thread 전체 적용 / sell_market_order 단일 사용 = 시뮬 정합 / dry_run 분기 위치 / P1-4 cancel_order 보강 완료)
 
-## 단위 2-5d: APScheduler 통합 (P0-3 + P1-5 잡별 misfire 정책)
-- [ ] `closing_bet_system/main_orchestrator.py` 메서드 3개 추가:
-  - [ ] `run_emergency_stop_check` (**09:01 cron**, hard_stop_loss 즉시 손절, misfire_grace_time=60, coalesce=True)
-  - [ ] `run_morning_exit` (09:30 cron, 매도 액션 매트릭스, misfire_grace_time=300, coalesce=True)
-  - [ ] `run_morning_force_close` (10:30 cron, 잔량 시장가, misfire_grace_time=120, coalesce=True)
-- [ ] **상수 박제** (P0-3): `EMERGENCY_STOP_SCHEDULE_HOUR=9, _MINUTE=1` / `MORNING_EXIT_HOUR=9, _MINUTE=30` / `MORNING_FORCE_CLOSE_HOUR=10, _MINUTE=30`
-- [ ] `register_jobs()` 잡 3건 추가 (mon-fri Asia/Seoul, 잡별 misfire 정책 반영)
-- [ ] 잡 등록 로그 "5건 → 8건" 변경
-- [ ] `closing_bet_system/config/settings.yaml`:
-  - [ ] `morning_exit:` 섹션 신규 (enabled=false / dry_run=true / emergency_stop_enabled=true / use_sell_lock=true 등 5~8개 키)
-  - [ ] `schedule.emergency_stop_start: "09:00" → "09:01"` 갱신 (P0-3 race 회피, 주석 명시)
-- [ ] ExitExecutor lazy property (idempotent)
-- [ ] orchestrator 회귀 테스트 갱신 — 잡 8건 + 신규 3개 상수 검증 + 09:01 race 회피 검증 + 잡별 misfire/coalesce 설정 검증
+## 단위 2-5d: APScheduler 통합 — 2026-05-16 완료
+- [x] `closing_bet_system/main_orchestrator.py` 메서드 3개 추가:
+  - [x] `run_emergency_stop_check` (09:01 cron, hard_stop_loss, misfire_grace_time=60, coalesce=True)
+  - [x] `run_morning_exit` (09:30 cron, 4단계 매트릭스, misfire_grace_time=300, coalesce=True)
+  - [x] `run_morning_force_close` (10:30 cron, P1-4 cancel+시장가, misfire_grace_time=120, coalesce=True)
+- [x] **상수 박제** (P0-3): `EMERGENCY_STOP_SCHEDULE_HOUR=9, _MINUTE=1` / `MORNING_EXIT_HOUR=9, _MINUTE=30` / `MORNING_FORCE_CLOSE_HOUR=10, _MINUTE=30`
+- [x] `register_jobs()` 잡 3건 추가 (mon-fri Asia/Seoul, 잡별 misfire 정책 반영)
+- [x] 잡 등록 로그 "5건 → 8건" 변경
+- [x] `closing_bet_system/config/settings.yaml`:
+  - [x] `morning_exit:` 섹션 신규 (7 키: enabled/dry_run/emergency_stop_enabled/use_sell_lock/polling_interval_sec/fill_check_deadline_sec/cancel_confirm_deadline_sec)
+  - [x] `schedule.emergency_stop_start: "09:00" → "09:01"` 갱신 + 주석
+- [x] ExitExecutor lazy property (idempotent + settings.yaml exit:* + morning_exit:* 매핑)
+- [x] orchestrator 회귀 테스트 갱신 — `test_register_jobs` 잡 8건 + 3개 신규 잡 트리거 검증 + 잡별 misfire/coalesce 설정 검증 / `test_schedule_constants` 16건(EXIT 6건 추가)
+- [x] dry_run 단발 검증: 3개 잡 모두 `enabled=False` 즉시 skip + 운영 봇 무영향 확인
+- [x] 누적 회귀 199건 PASS (이전 단위와 동일 — orchestrator 16건 보강 갱신 흡수)
 
 ## 단위 2-5e: 통합 검증
 - [ ] 단위 테스트 누적 165+건 PASS (회귀 136 + 신규 30~40)
