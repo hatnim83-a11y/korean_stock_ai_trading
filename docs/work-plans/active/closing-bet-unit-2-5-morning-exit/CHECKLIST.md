@@ -20,32 +20,24 @@
 - [x] 누적 168건 PASS 회귀 검증 (phase25 60 + 2-4b 29 + 2-4c 31 + orchestrator 16 + candidate_logger 20 + 2-5b 12)
 - [ ] code-tester 호출 ← 단위 2-5c 직전 일괄 호출
 
-## 단위 2-5c: ExitExecutor + 매도 액션 매트릭스 (P0-1/P0-2/P1-1~5 반영)
-- [ ] `closing_bet_system/execution/exit_executor.py` 신규 (**~600~700줄**, entry_executor 684줄 실측 기준)
-  - [ ] `ExitExecutor` 클래스 + `ExitExecutorSettings` frozen dataclass
-  - [ ] `ExitAction` Enum (**5단계** — trailing_stop은 단위 2-5g 분리: emergency_stop / gap_up_high / gap_up_low / flat / weak_gap_down)
-  - [ ] `ExitResult` dataclass (per-ticker + summary)
-  - [ ] `map_action(open_price, entry_price, exit_cfg)` 헬퍼 — 매트릭스 분기
-  - [ ] `execute_emergency_stop(trade_date)` (09:01 잡용 — hard_stop_loss만, **발주 직후 exit_in_progress 플래그 박제 P1-2**)
-  - [ ] `execute_morning_exit(trade_date)` (09:30 잡용 — 나머지 4단계, exit_in_progress 종목 제외)
-  - [ ] `execute_force_close(trade_date)` (10:30 잡용 — **순서: 미체결 주문 취소 → 취소 확인 → 시장가 재발주 P1-4**)
-  - [ ] **phase1 only 매도 시 mark_entered_phase1_only 선행 호출 (P0-2)**
-- [ ] `closing_bet_system/notification/exit_notifier.py` 신규 (3종 메서드 시그니처 통일: `send_emergency_stop_result(result, dry_run)` / `send_morning_exit_result` / `send_force_close_result`)
-- [ ] dry_run 토글 분기 (P1-3 entry_executor 일관성): KIS sell + log_exit 모두 건너뜀 + simulated_exit 로그 dict + 텔레그램 "[DRY-RUN] would have sold"
-- [ ] **sell_lock 재사용 + owner 네임스페이스 분리 (P1-5)**: `"closing_bet:emergency_stop|morning_exit|force_close"`
-- [ ] `candidate_logger.log_exit()` 호출 (cost_engine 비용 분해, phase1 only 는 mark_entered_phase1_only 선행)
-- [ ] `_save_exit_order_id` 발주 직후 ODNO 즉시 박제 (idempotency)
-- [ ] 단위 테스트 신규 25~30건 (EX-1~30):
-  - 5단계 매트릭스 분기 5건
-  - dry_run 정책 (KIS X + log_exit X + simulated_exit 발화) 3건
-  - phase1 only 매도 (mark_entered_phase1_only 선행) 3건
-  - 부분 체결 잔량 처리 2건
-  - 09:01 → 09:30 idempotency (exit_in_progress 플래그) 2건
-  - 10:30 force_close 미체결 취소 → 시장가 재발주 순서 3건
-  - sell_lock owner 네임스페이스 분리 2건
-  - 09:30 KIS 500 재시도 / submit_fail 2건
-  - 매도 대상 0건 graceful / 텔레그램 비활성 graceful 3건
-- [ ] code-tester 호출
+## 단위 2-5c: ExitExecutor + 매도 액션 매트릭스 — 2026-05-16 완료
+- [x] `closing_bet_system/execution/exit_executor.py` 신규 (~620줄, entry_executor 684줄 대비 작음)
+  - [x] `ExitExecutor` 클래스 + `ExitExecutorSettings` frozen dataclass
+  - [x] `ExitAction` Enum 5단계 (emergency_stop / gap_up_high / gap_up_low / flat / weak_gap_down)
+  - [x] `ExitResult` + `CandidateExit` dataclass (per-cycle + per-ticker)
+  - [x] `map_action(gap_rate, settings)` 헬퍼 — 5단계 매트릭스 분기
+  - [x] `execute_emergency_stop(trade_date)` (09:01 잡용 — hard_stop_loss만)
+  - [x] `execute_morning_exit(trade_date)` (09:30 잡용 — 4단계, exit_time NULL 가드)
+  - [x] `execute_force_close(trade_date)` (10:30 잡용 — P1-4 cancel_order → 취소 확인 → 시장가 재발주)
+  - [x] **phase1 only 매도 시 mark_entered_phase1_only 선행 호출 (P0-2)**
+- [x] `closing_bet_system/notification/exit_notifier.py` 신규 (3종 메서드 + dry_run prefix "[DRY-RUN]" 강제)
+- [x] dry_run 토글 분기 (P1-3 entry_executor 일관성): KIS sell + log_exit 둘 다 건너뜀, exit_notifier 가 dry_run=True 전달
+- [x] **sell_lock 재사용 + owner 네임스페이스 분리 (P1-5)**: `"closing_bet:emergency_stop|morning_exit|force_close"` (default 싱글톤 또는 주입 가능)
+- [x] `candidate_logger.log_exit()` 호출 (cost_engine 비용 분해, phase1 only 는 mark_entered_phase1_only 선행)
+- [x] **P1-4 force_close 보강**: `_pending_exit_orders` 메모리 dict + `cancel_order` 호출 + `_wait_cancel_confirm` 폴링 → 시장가 재발주. 단위 2-5g 후속에서 DB 컬럼 박제 가능 (현 단위는 메모리 추적)
+- [x] 단위 테스트 신규 31건 (EX-1~30 + EX-18b force_close cancel_pending) — 31/31 PASS
+- [x] 누적 회귀 199건 PASS (phase25 60 + 2-4b 29 + 2-4c 31 + orchestrator 16 + candidate_logger 20 + 2-5b 12 + 2-5c 31)
+- [x] code-tester 호출 — stream idle timeout 발생, 직접 6항목 검증으로 대체 (py_compile / datetime.now 잔존 0 / async to_thread 전체 적용 / sell_market_order 단일 사용 = 시뮬 정합 / dry_run 분기 위치 / P1-4 cancel_order 보강 완료)
 
 ## 단위 2-5d: APScheduler 통합 (P0-3 + P1-5 잡별 misfire 정책)
 - [ ] `closing_bet_system/main_orchestrator.py` 메서드 3개 추가:
