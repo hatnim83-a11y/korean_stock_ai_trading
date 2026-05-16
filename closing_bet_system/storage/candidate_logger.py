@@ -297,6 +297,46 @@ class CandidateLogger:
             f"(entry_price={entry_price}, amount={entry_amount})"
         )
 
+    def mark_entered_phase1_only(self, candidate_id: int) -> None:
+        """phase1 only 보유 상태를 'entered' 로 전환 — log_exit 호출 가능하게.
+
+        단위 2-5 morning_exit_manager P0-2 회피용. 옵션 A 인터페이스 계약 상
+        phase1 만 체결된 후보는 candidate_status='recommended' + entry_price=NULL
+        상태로 유지된다 (단위 2-4c `_finalize_mark_entered` 가 phase2 완료 시만 호출).
+        본 헬퍼는 매도 발주 직전에 phase1_executed_price/_shares 를 그대로
+        entry_price/_amount/_time 에 박제 + status='entered' 로 전환해
+        ``log_exit()`` 가 LookupError 없이 호출 가능하게 만든다.
+
+        Raises:
+            LookupError: candidate_id 미존재 또는 phase1_executed_shares <= 0
+        """
+        if not isinstance(candidate_id, int) or isinstance(candidate_id, bool) or candidate_id <= 0:
+            raise ValueError(f"candidate_id 는 양의 정수: got {candidate_id!r}")
+
+        row = self.get_candidate(candidate_id)
+        if row is None:
+            raise LookupError(f"candidate_id={candidate_id} 미존재 (mark_entered_phase1_only)")
+
+        p1_price = row.get("entry_phase1_executed_price")
+        p1_shares = row.get("entry_phase1_executed_shares")
+        if not p1_price or not p1_shares or p1_shares <= 0:
+            raise LookupError(
+                f"candidate_id={candidate_id} phase1 체결 정보 부재 "
+                f"(price={p1_price}, shares={p1_shares}). mark_entered_phase1_only 호출 불가."
+            )
+
+        entry_price = float(p1_price)
+        entry_amount = entry_price * int(p1_shares)
+        self.mark_entered(
+            candidate_id=candidate_id,
+            entry_price=entry_price,
+            entry_amount=entry_amount,
+        )
+        logger.info(
+            f"[candidate_logger] candidate_id={candidate_id} phase1 only → entered "
+            f"(price={entry_price}, shares={p1_shares}, amount={entry_amount:.0f})"
+        )
+
     def log_exit(
         self,
         candidate_id: int,

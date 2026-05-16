@@ -1,23 +1,24 @@
 # CHECKLIST: 종가베팅 단위 2-5 morning_exit_manager
 
-## 단위 2-5a: Step 0 사전 조사
-- [ ] probe 스크립트 — `scripts/probe_kis_morning_exit.py` 단발 (인증 후 5/18 09:00~10:00 자연 검증)
-- [ ] 검증 1: `KISApi.get_current_price(stock_code)` 응답 open/high/low/price 필드 정확성
-- [ ] 검증 2: 매도 대상 SQL 쿼리 (`status='entered' OR phase1 only`) — 5/15 candidates 테스트 row 직접 query
-- [ ] 검증 3: `KISOrderApi.sell_market_order` 응답 rt_cd / ODNO 필드 (entry_executor 와 동일 가정)
-- [ ] 검증 4: 부분 체결 잔량 처리 — phase2 부분 체결 시 `total_shares = phase1_shares + COALESCE(phase2_executed_shares, 0)` 정확성
-- [ ] **검증 5 (P1-4)**: KIS 주문 취소 API 엔드포인트 가능 여부 (force_close 미체결 취소 순서용)
-- [ ] **검증 6 (P0-3)**: 메인 봇 09:00 잡 (`monitoring_start_early` + `midweek_sell_profit`) 실행 시간 측정 → 09:01 emergency_stop 시점 충분성 확인
-- [ ] STEP0_MORNING_EXIT_RESEARCH.md 작성 (결과 + 권고 폴링 간격 + 폴백 결정)
+## 단위 2-5a: Step 0 사전 조사 — 2026-05-16 완료
+- [x] ~~probe 스크립트 단발 실행~~ → 인프라/매뉴얼 분석 + 운영 DB 검증 + 운영 로그 측정으로 대체 (실 probe 5/18 자연 검증)
+- [x] 검증 1: `KISApi.get_current_price(stock_code)` 응답 open/high/low/price 필드 정확성 — `_safe_int` 적용 11 필드 확인
+- [x] 검증 2: 매도 대상 SQL 쿼리 (`status='entered' OR phase1 only`) — 운영 DB 직접 query 검증 완료 (5/15 trade_date 0건, 기대값 일치)
+- [x] 검증 3: `KISOrderApi.sell_market_order` 응답 rt_cd / ODNO 필드 — entry_executor `buy_limit_order` 동일 패턴 확인
+- [x] 검증 4: 부분 체결 잔량 처리 — `COALESCE(phase1, 0) + COALESCE(phase2, 0)` NULL 안전 패턴 박제
+- [x] **검증 5 (P1-4)**: KIS 주문 취소 API — `cancel_order(order_id, stock_code, quantity)` 기존 구현 확인 (TR_CANCEL_REAL=`TTTC0803U`), 단위 2-5c force_close 재사용
+- [x] **검증 6 (P0-3)**: 메인 봇 09:00 잡 실행 시간 — `monitoring_start_early` 1초 미만 비동기 위임, `midweek_sell_profit` 평일 등록되지만 테마 교체일에만 실 매도 (최대 10~30초). 09:01 emergency_stop 60초 여유 확정
+- [x] STEP0_MORNING_EXIT_RESEARCH.md 작성 — 6 검증 결과 + 폴백 시나리오 4건 + 5/18 자연 검증 체크리스트
 - [x] **sell_lock 결정 박제** (P1-5): 재사용 + owner 네임스페이스 분리 (`"closing_bet:*"`) — CONTEXT.md 박제 완료
 
-## 단위 2-5b: collectors + 매도 대상 select + log_exit phase1 only 해결 (P0-2)
-- [ ] `closing_bet_system/collectors/morning_price_collector.py` 신규 (async get_open_high_current)
-- [ ] `closing_bet_system/execution/exit_target_query.py` 신규 (보유 식별 SQL 캡슐화 + `ExitTarget` dataclass)
-- [ ] **`closing_bet_system/storage/candidate_logger.py` 수정** (P0-2): `mark_entered_phase1_only(candidate_id)` 헬퍼 신규 — phase1_executed_price/_shares 를 entry_price/_amount/_time 로 박제 (status는 'recommended' 유지, log_exit 호출 가능 상태로 전환)
-- [ ] 단위 테스트 신규 12건 (COL 4 + QUERY 6 + P1ONLY 2 — phase1 only / phase2 완료 / 이미 exit / 빈 결과 + mark_entered_phase1_only 정상 / NULL 가드)
-- [ ] **v4 마이그레이션 필요 여부 결정** — default 불필요 (phase1+phase2 합으로 잔량 계산), exit_action 컬럼은 단위 2-5g 후속 분리
-- [ ] code-tester 호출
+## 단위 2-5b: collectors + 매도 대상 select + log_exit phase1 only 해결 (P0-2) — 2026-05-16 완료
+- [x] `closing_bet_system/collectors/morning_price_collector.py` 신규 (async `get_snapshot` + `MorningPriceSnapshot` frozen dataclass, ticker 정규식 검증)
+- [x] `closing_bet_system/execution/exit_target_query.py` 신규 (`select_exit_targets()` + `ExitTarget` frozen dataclass + `is_phase1_only` / `total_shares` property)
+- [x] **`closing_bet_system/storage/candidate_logger.py` 수정** (P0-2): `mark_entered_phase1_only(candidate_id)` 헬퍼 신규 — phase1_executed_price × shares 를 entry_price/_amount/_time 로 박제 + status='entered' 전환 (log_exit 호출 가능). LookupError 가드 포함.
+- [x] 단위 테스트 신규 12건 PASS (COL 4 + QUERY 6 + P1ONLY 2 — `scripts/test_morning_exit_unit_2_5b.py`)
+- [x] **v4 마이그레이션 필요 여부 결정** — default 불필요 (phase1+phase2 합으로 잔량 계산), exit_action 컬럼은 단위 2-5g 후속 분리
+- [x] 누적 168건 PASS 회귀 검증 (phase25 60 + 2-4b 29 + 2-4c 31 + orchestrator 16 + candidate_logger 20 + 2-5b 12)
+- [ ] code-tester 호출 ← 단위 2-5c 직전 일괄 호출
 
 ## 단위 2-5c: ExitExecutor + 매도 액션 매트릭스 (P0-1/P0-2/P1-1~5 반영)
 - [ ] `closing_bet_system/execution/exit_executor.py` 신규 (**~600~700줄**, entry_executor 684줄 실측 기준)
