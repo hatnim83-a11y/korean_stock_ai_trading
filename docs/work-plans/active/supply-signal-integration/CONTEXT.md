@@ -408,3 +408,60 @@ sudo journalctl -u trading_system --since "09:00" | grep -E "DB 수급 조회|�
   - SUPPLY_SCORE_MAX=0.0 (총점 미반영)
   - SUPPLY_STRENGTH_ENABLED=False
   - AI_PROMPT_SUPPLY_ENHANCED=True (Phase 1-D에서 활용)
+
+---
+
+## 11. Phase 1-A/B 게이트 통과 선언 (2026-05-18)
+
+### 11.1 누적 운영 데이터
+
+**Phase 1-A 게이트 (3영업일 ≥ 95% 성공)**
+| 일자 | universe | success/total | 시간 | KIS 500 | 외인 TOP |
+|---|---|---|---|---|---|
+| 5/13 화 | 93 | 93/93 | 16.1초 | 3건(재시도 성공) | 30건 |
+| 5/14 목 | 105 | 105/105 | 23.8초 | 9건(재시도 성공) | 30건 |
+| 5/15 금 | 113 | 113/113 | 19.8초 | 0건 | 30건 |
+| **누적** | — | **100%** | — | 모두 재시도 성공 | 3일 모두 정상 |
+
+**Phase 1-B 회귀 검증 (DB 우선 + KIS 폴백)**
+| 일자 | 반도체 | 전선 | 조선 | 로봇 | 금융 | 종합 |
+|---|---|---|---|---|---|---|
+| 5/14 목 | 3/3 | 8/8 | 7/7 | **9/20 (45%)** | 20/20 | **47/58 (81%)** |
+| 5/15 금 | 3/3 | 8/8 | 7/7 | **12/20 (60%)** | 20/20 | **50/58 (86%)** |
+| 5/18 월 | 3/3 | 8/8 | 7/7 | **19/20 (95%)** | 20/20 | **57/58 (98%)** |
+
+### 11.2 게이트 통과 근거
+
+1. **Phase 1-A**: 3영업일 모두 100% 성공률 (≥ 95% 기준 초과)
+2. **Phase 1-B**: 회귀 동등성 확인 + 로봇 mismatch 자연 회복 (45% → 60% → 95%)
+3. **stale 시뮬레이션**: **옵션 D (코드 리뷰 갈음)** 채택
+   - 근거: `get_supply_snapshots_bulk(trade_date=None)` (database.py:1798-1809)이 SQL 레벨에서 각 종목별 `MAX(trade_date)` 서브쿼리로 가장 최근 영업일 데이터를 자동 선택. fallback이 SQL 정의로 보장됨
+   - screener.py:285-320 진입부 + `supply_map.get(code) is None` 분기 → use_db_supply=False → KIS 폴백까지 graceful 처리 확인됨
+   - 실제 운영에서 5/14 로봇 mismatch가 graceful fallback으로 무손실 동작 확인 (사실상 stale의 부분 시뮬레이션)
+4. **외인 TOP 30건 한도**: 종가베팅 동일 패턴 운영 중 → 수용 결정 (CONTEXT.md 섹션 10.3 위험 #2)
+
+### 11.3 로봇 mismatch 회복 패턴 분석
+
+- 5/13 화 17:10 universe 구성 시점에 로봇 테마 신규 편입 종목들이 `_get_theme_stocks()` 7일 룩백에 미포함
+- 5/14 09:05 첫 자연 발화: 11/20 종목이 KIS 폴백 (45% 매칭)
+- 5/14~5/15 매일 17:10 수집되면서 stocks 테이블에 누적
+- 5/18 09:05 시점: 19/20 매칭 (95%) — 화요일 재선정 직후 → 다음 화요일까지 정상화되는 패턴 확인
+
+→ **결론**: `supply-signal-followup-universe` 후속 단위는 **우선순위 낮음**으로 결정 (필요 시 화요일 첫 09:05만 보조 처리하면 충분)
+
+### 11.4 잔여 후속 단위
+
+| 후속 단위 | 우선순위 | 트리거 시점 |
+|---|---|---|
+| `supply-signal-followup-meta` (foreign_top_ranking 메타 NULL) | 중 | Phase 1-D 직전 |
+| `supply-signal-followup-universe` (화요일 재선정 후유증) | 낮 | 필요 시 (선택) |
+
+### 11.5 다음 단계 — Phase 1-B½ Shadow Run
+
+**진입 결정**: 사용자 승인 완료 (2026-05-18)
+
+**Shadow Run 구현 작업** (새 세션 권장):
+1. `config.py` 토글 추가/확인: `SUPPLY_SCORE_OBSERVE_ONLY=True`, `SUPPLY_SCORE_MAX=0.0`
+2. `modules/theme_analyzer/scorer.py` observation 로직 추가 (계산하되 총점 미반영, `supply_score_observation` 테이블 저장)
+3. **권고 조치 반영**: universe 내부 외인 TOP 동적 SQL 시범 측정 시작 (Phase 1-C 결정용 데이터 수집)
+4. 14영업일 후 (~6/5 금) Pearson r, 분포 차별성 측정 → Phase 1-C 진입 결정

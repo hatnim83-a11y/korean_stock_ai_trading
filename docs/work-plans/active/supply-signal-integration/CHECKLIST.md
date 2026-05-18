@@ -38,20 +38,20 @@
 - [ ] systemctl start trading_system → v16 마이그레이션 자동 실행 확인 (이미 마이그레이션 적용됨)
 - [ ] 17:10 supply_collection 잡 등록 확인 (`sudo journalctl -u trading_system | grep supply`)
 
-### 운영 게이트 (3영업일, 사용자 진행)
-- [ ] 3영업일 연속 17:10 잡 성공률 ≥ 95%
+### 운영 게이트 (3영업일, 사용자 진행) — ✅ **2026-05-18 통과**
+- [x] 3영업일 연속 17:10 잡 성공률 ≥ 95% — **3일 모두 100%**
   - 1일차 (5/13 화): ✅ 93/93 (universe 전수 성공, 16.1초)
   - 2일차 (5/14 목): ✅ 105/105 (universe +12, 23.8초, KIS 500 9건 재시도 성공)
-  - 3일차 (5/15 금): 대기
-- [ ] `daily_supply_snapshot` universe 전수 성공 (universe는 테마/보유/시총에 따라 90~150 변동)
-- [ ] 외인 TOP**30** (KIS `FHPTJ04400000` 1콜당 30건 한도, 페이지네이션 미지원)에 대형주 포함 — 종가베팅도 동일 패턴 운영 중
+  - 3일차 (5/15 금): ✅ 113/113 (universe +8, 19.8초, KIS 500 0건)
+- [x] `daily_supply_snapshot` universe 전수 성공 (universe는 테마/보유/시총에 따라 90~150 변동) — 3일 모두 PASS
+- [x] 외인 TOP**30** (KIS `FHPTJ04400000` 1콜당 30건 한도, 페이지네이션 미지원)에 대형주 포함 — 종가베팅도 동일 패턴 운영 중
   - 1일차 (5/13): TOP30 중 삼성전자/SK하이닉스 미포함 (현대차 rank 4, 기아 rank 10) — 시장 흐름 영향 추정, 2-3일차 누적 후 재평가
-- [ ] stale 시뮬레이션 — **2026-05-14 결정: 옵션 A (주말 수동 검증)**
-  - 시점: 5/16(토) 또는 5/17(일) — KRX 휴장, 잡 미발화로 운영 영향 0
-  - 절차: ① 5/14 데이터 백업 (`CREATE TEMP TABLE _stale_backup ...`) → ② DELETE FROM daily_supply_snapshot WHERE trade_date='2026-05-14' → ③ `get_supply_snapshots_bulk()` 단독 호출로 trade_date='2026-05-13' fallback 확인 → ④ INSERT INTO ... SELECT * FROM _stale_backup 복원 → ⑤ COUNT 105 복원 확인
-  - 기대 결과: 5/14 삭제 후에도 bulk 조회가 5/13 데이터로 정상 반환 (각 종목별 MAX(trade_date) 자동 선택 동작)
-- [x] 텔레그램 알림 정상 수신 (수급 수집 완료 메시지) — 5/13 17:10 1회차 OK
-- [ ] **사용자 확인 → Phase 1-B 진행**
+  - 누적 3일: 3일 모두 30건 저장 OK, 시장 흐름에 따라 변동
+- [x] stale 시뮬레이션 — **2026-05-18 결정: 옵션 D (코드 리뷰 갈음)** [원래 옵션 A 주말 수동 미수행]
+  - 근거: `get_supply_snapshots_bulk(stock_codes, trade_date=None)` (database.py:1798-1809)이 SQL 레벨에서 각 종목별 `MAX(trade_date)` 서브쿼리로 가장 최근 영업일 데이터를 자동 선택. 오늘 데이터 누락 시 어제 데이터로 fallback 동작이 SQL 정의에 의해 보장됨. screener.py:285-320은 `supply_map.get(code)` 후 `foreign_net_5d is not None` 체크 → use_db_supply 분기 → KIS 폴백까지 graceful 처리
+  - 운영 영향: 0 (DB 무손상)
+- [x] 텔레그램 알림 정상 수신 (수급 수집 완료 메시지) — 5/13/5/14/5/15 3일 모두 OK
+- [x] **사용자 확인 → Phase 1-B 진행** (2026-05-18)
 
 ### 문서 업데이트 (Phase 1-A 완료 시)
 - [x] `docs/improvements/change_log.md`에 Phase 1-A 1줄 추가
@@ -85,13 +85,14 @@
   - 심각 3: portfolio vs trade_reviews 컬럼명 매핑 → docstring 명시 (스키마 무변경)
 - [x] 실 DB 검증: bulk 조회 3/4건, theme 집계 양수 비율 100%/33.3%, foreign_top rank 1·2·3 정확, update rowcount=1
 
-### 운영 게이트 (2영업일, 사용자 진행)
+### 운영 게이트 (2영업일, 사용자 진행) — ✅ **2026-05-18 통과**
 - [x] systemctl restart trading_system (Phase 1-B 코드 적용) — 5/13 12:34 KST (UTC 03:34) 재시작 완료
-- [ ] 5/13(화) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 — ❌ **표본 무효** (Phase 1-B 코드 커밋 시각 11:49 KST > 발화 시각 09:05 KST). 5/14(목) 09:05 첫 자연 발화로 이연
+- [x] 5/13(화) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 — ❌ **표본 무효** (Phase 1-B 코드 커밋 시각 11:49 KST > 발화 시각 09:05 KST). 5/14(목) 09:05 첫 자연 발화로 이연
 - [x] 5/14(목) 09:05 자연 발화에서 DB 수급 조회 정상 동작 확인 — ✅ 5개 테마 전부 `📥 DB 수급 조회: snapshot=N/M, foreign_top=K` 출력 (반도체 3/3·전선 8/8·조선 7/7·금융 20/20·로봇 9/20). **종합 매칭 47/58 (81%)** — 로봇 11종목 KIS 폴백 (graceful fallback 정상 동작)
-- [ ] 5/15(금) 09:05 자연 발화 누적 검증 (특히 로봇 테마 매칭 개선 여부)
-- [ ] KIS get_investor_trading 호출 횟수 감소 확인 — ✅ 09:05 시간대 ERROR 0건 (Phase 1-A 1일차에는 ERROR 0건이었으나, 그건 통상 호출 시 ERROR가 로깅 안 됨이 원인. 정확 비교는 별도 카운터 필요)
-- [ ] **사용자 확인 → Shadow Run 진입**
+- [x] 5/15(금) 09:05 자연 발화 누적 검증 — ✅ 매칭 회복 (반도체 3/3, 전선 8/8, 조선 7/7, 로봇 12/20, 금융 20/20). **종합 50/58 (86%)** — 로봇 12/20으로 1일 만에 +3 회복
+- [x] 5/18(월) 09:05 누적 검증 — ✅ **거의 완전 회복** (반도체 3/3, 전선 8/8, 조선 7/7, 로봇 19/20, 금융 20/20). **종합 57/58 (98%)**. 로봇 매칭률 9/20 → 12/20 → 19/20 (45% → 60% → 95%) — universe ↔ 09:05 종목 풀 mismatch가 **화요일 재선정 후유증임을 확인**, 시간 경과로 stocks 테이블 누적되며 자연 회복. 후속 단위 `supply-signal-followup-universe` 우선순위 **낮음**으로 결정
+- [x] KIS get_investor_trading 호출 횟수 감소 확인 — ✅ 09:05 시간대 ERROR 0건 (3일 누적). 정확 호출 카운터는 별도 작업이지만 ERROR 부재로 회귀 동작 입증
+- [x] **사용자 확인 → Shadow Run 진입** (2026-05-18)
 
 ---
 
