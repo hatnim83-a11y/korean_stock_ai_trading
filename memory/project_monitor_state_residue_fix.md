@@ -50,3 +50,52 @@
 - [[project_partial_profit_early_monitoring]] — SellLock 동시성 (09:00 조기 모니터링)
 - [[project_theme_score_zero_fix]] — DB 박제값 자동 폴백 패턴 (유사한 정합성 보완)
 - [[feedback_plan_review_process]] — strategy-planner + code-tester 병렬 리뷰 프로세스 (이번 작업 본격 적용)
+
+---
+
+# Phase 2 (2026-05-18) — Phase 1 sanity 우회 차단 + 무한 매도 루프 봉쇄
+
+## 사건
+- **2026-05-18 09:10 KST** 기아(000270) 11주 @ 175,700원 매수(5/11) 후 portfolio.status='closed' 인데 self.positions 메모리/`monitor_state.json` 잔존
+- 09:10 `_execute_max_hold_sell` → KIS "주문 가능한 수량을 초과했습니다." 에러 → `on_sell_failed` 콜백 → **2~3초 간격 텔레그램 알림 도배**
+- Phase 1 sanity (`highest > buy × 1.02`) 우회: buy=175,700 × 1.02 = 179,214 < highest=184,200 (장중 +5% 갭상승 이력) → 잔재 판정 못 함
+
+## 근본 원인 (Phase 1과의 차이)
+- Phase 1은 "갭 ≤ +2% 정상 사이클" 경계만 보호 — +2% 초과 후 매도된 closed 종목은 보호 못 함
+- 매도 실패 후 `remove_position` 호출이 없어 다음 모니터링 사이클에서 또 발사 → 영원히 반복
+
+## 패치
+**2단 방어 구조**:
+
+### 1차 — DB 화이트리스트 (`_restore_trailing_state` JSON 폴백)
+- `_filter_state_by_holding_whitelist(state)` 신규 헬퍼: `Database.get_portfolio("holding")`로 화이트리스트 추출 → state 키 ∉ 화이트리스트 즉시 제거 + WARN 로그
+- JSON 폴백 진입 직후 적용. DB 경로(`_dump_monitor_state` 30초 갱신)는 면제
+- DB 조회 실패 시 state 그대로 반환 — Phase 1 ×1.02 sanity가 2차 폴백
+
+### 2차 — 매도 실패 카운터 (`_record_sell_failure` 헬퍼)
+- `self.sell_failure_counts: dict[str, int]` (재시작 시 0 리셋)
+- 매도 진입점 3곳(`_execute_stop_loss` / `_execute_trailing_stop` / `_execute_max_hold_sell`)의 실패 분기에서 호출
+- 카운터 증가 → `settings.MAX_SELL_FAILURES`(=3) 도달 시 강제 `remove_position` + `on_sell_failed` 1회만 발사 → 도배 봉쇄
+- 분할 익절(`_execute_partial_sell`)은 **카운터 미적용** — 트리거 조건(+10/15/20%) 재도달 필요해 도배 위험 낮고, 익절 기회 보존
+- `remove_position` 내부에서 `sell_failure_counts.pop` 동시 정리 (예외 분기에서도 명시 정리)
+
+## 변경 파일
+- `config.py`: `MAX_SELL_FAILURES = 3` 신규 상수
+- `modules/trading_engine/portfolio_monitor_v2.py`:
+  - `__init__` self.sell_failure_counts dict 추가
+  - `remove_position` 마지막에 카운터 pop
+  - `_record_sell_failure` 신규 헬퍼
+  - `_filter_state_by_holding_whitelist` 신규 헬퍼
+  - `_restore_trailing_state` JSON 폴백 직후 화이트리스트 호출
+  - 매도 진입점 3곳(_execute_stop_loss/_execute_trailing_stop/_execute_max_hold_sell) 실패 분기 `_record_sell_failure` 교체
+- `tests/test_monitor_state_residue.py`: 신규 케이스 4개 추가 (총 10/10 PASS)
+- `memory/MEMORY.md`: 본 메모리 갱신 표시
+
+## 검증
+- `pytest tests/test_monitor_state_residue.py -v` 10/10 PASS (기존 6 + 신규 4)
+- code-tester 에이전트: 심각 1건은 false alarm(콜백 위치 재정의 흐름) / 주의 2건 반영(분할익절 카운터 미적용 + remove_position 예외 시 카운터 정리)
+- 실사건 즉시 조치: `scripts/cleanup_monitor_state_json.py`로 잔재 1건(000270) 제거 + systemctl restart → 도배 즉시 멈춤 확인
+
+## 미해결 / 후속
+- ×1.02 sanity는 폴백 안전장치로 유지 (DB 조회 실패 시)
+- `partial_sell` 실패 카운터 적용 여부는 1주 운영 데이터 후 재평가

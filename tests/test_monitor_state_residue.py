@@ -69,6 +69,9 @@ def _fresh_monitor(db_path: Path) -> PortfolioMonitorV2:
     monitor.enable_be_stop = True
     monitor.trail_be_activate_pct = 0.05
     monitor.trail_be_stop_pct = -0.01
+    # 매도 실패 카운터 (Phase 2 추가) — _record_sell_failure / remove_position 가 참조
+    monitor.sell_failure_counts = {}
+    monitor.on_sell_failed = None
     return monitor
 
 
@@ -285,6 +288,168 @@ def test_dashboard_json_fallback_filters_residue(tmp_path, monkeypatch):
 
     assert "000270" in result, "holding 종목은 통과해야 함"
     assert "448900" not in result, "잔재 키는 필터링되어야 함"
+
+
+# ===== Test 5 (Phase 2): JSON 폴백 holding 화이트리스트 가드 =====
+
+def test_restore_skips_residue_by_holding_whitelist(tmp_path, monkeypatch):
+    """portfolio.status='closed' 종목의 JSON 잔재가 ×1.02 sanity 우회해도
+    holding 화이트리스트로 차단되어야 한다 (2026-05-18 기아 사건 회귀 방지).
+    """
+    db_path = tmp_path / "trading.db"
+    _init_db(db_path)
+    json_path = tmp_path / "monitor_state.json"
+    # 기아 시나리오: buy_price 175,700, JSON highest 184,200
+    # ×1.02 임계 = 179,214 → 184,200 통과 (Phase 1 sanity 우회)
+    # 그러나 portfolio.status='closed' 이므로 화이트리스트가 즉시 차단해야 함
+    json_path.write_text(json.dumps({
+        "000270": {
+            "highest_price": 184_200,
+            "max_profit_rate": 0.048,
+            "trailing_active": False,
+            "current_price": 163_200,
+            "remaining_shares": 11,
+        },
+    }))
+
+    # DB에 closed 상태로 기록
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO portfolio (stock_code, stock_name, status, shares, buy_price) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("000270", "기아", "closed", 11, 175_700),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        "modules.trading_engine.portfolio_monitor_v2.settings.DATABASE_PATH",
+        str(db_path),
+        raising=False,
+    )
+
+    monitor = _fresh_monitor(db_path)
+    # 모니터 메모리에 잔존한다고 가정 (실사건과 동일)
+    pos = _make_position("000270", "기아", 175_700, shares=11)
+    initial_stop = pos.stop_loss_price
+    monitor.positions["000270"] = pos
+
+    monitor._restore_trailing_state()
+
+    # 화이트리스트로 state 자체가 비워졌으므로 어느 필드도 갱신되면 안 됨
+    assert pos.highest_price == 175_700, (
+        f"화이트리스트 차단 실패 — highest_price={pos.highest_price}"
+    )
+    assert pos.stop_loss_price == initial_stop, (
+        f"BE 손절 복원 차단 실패 — stop={pos.stop_loss_price}"
+    )
+    assert pos.max_profit_rate == 0
+
+
+def test_restore_keeps_holding_when_whitelist_passes(tmp_path, monkeypatch):
+    """holding 종목은 화이트리스트 통과 후 정상 복원되어야 한다 (회귀 방지)."""
+    db_path = tmp_path / "trading.db"
+    _init_db(db_path)
+    json_path = tmp_path / "monitor_state.json"
+    json_path.write_text(json.dumps({
+        "000270": {
+            "highest_price": 178_000,  # ×1.02=179,214 미만 → sanity 통과
+            "max_profit_rate": 0.013,
+            "trailing_active": False,
+            "current_price": 177_000,
+            "remaining_shares": 11,
+        },
+    }))
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO portfolio (stock_code, stock_name, status, shares, buy_price) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("000270", "기아", "holding", 11, 175_700),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        "modules.trading_engine.portfolio_monitor_v2.settings.DATABASE_PATH",
+        str(db_path),
+        raising=False,
+    )
+
+    monitor = _fresh_monitor(db_path)
+    pos = _make_position("000270", "기아", 175_700, shares=11)
+    monitor.positions["000270"] = pos
+    monitor._restore_trailing_state()
+
+    assert pos.highest_price == 178_000, (
+        f"holding 종목 정상 복원 실패 — highest={pos.highest_price}"
+    )
+
+
+# ===== Test 6 (Phase 2): 매도 실패 카운터 무한 루프 차단 =====
+
+def test_max_sell_failures_force_remove(tmp_path, monkeypatch):
+    """매도가 임계(MAX_SELL_FAILURES) 연속 실패 시 강제 remove_position +
+    텔레그램 1회 알림 후 도배가 멈춰야 한다.
+    """
+    from config import settings as cfg
+    threshold = getattr(cfg, "MAX_SELL_FAILURES", 3)
+
+    db_path = tmp_path / "trading.db"
+    _init_db(db_path)
+    monkeypatch.setattr(
+        "modules.trading_engine.portfolio_monitor_v2.settings.DATABASE_PATH",
+        str(db_path),
+        raising=False,
+    )
+
+    monitor = _fresh_monitor(db_path)
+    pos = _make_position("000270", "기아", 175_700, shares=11)
+    monitor.positions["000270"] = pos
+
+    alerts: list[tuple[str, str]] = []
+    monitor.on_sell_failed = lambda p, t, m: alerts.append((t, m))
+
+    # 임계까지 연속 실패 시뮬레이션
+    for i in range(threshold):
+        monitor._record_sell_failure(pos, "보유기간 초과", "주문 가능한 수량을 초과했습니다.")
+
+    # 임계 도달 → 강제 제거
+    assert "000270" not in monitor.positions, "임계 도달 시 메모리에서 제거되어야 함"
+    assert monitor.sell_failure_counts.get("000270") is None, "카운터 리셋되어야 함"
+    # 알림: 매 실패마다 1회씩 발사 (마지막은 "연속 N회 실패" 메시지)
+    assert len(alerts) == threshold, f"알림 발사 횟수 불일치: {len(alerts)} vs {threshold}"
+    assert "연속" in alerts[-1][1], f"최종 알림 메시지에 '연속' 포함 안됨: {alerts[-1]}"
+
+    # 강제 제거 후 추가 호출은 카운터 0부터 다시 시작 (도배 봉쇄)
+    monitor.positions["000270"] = pos  # 다시 잔존 시뮬
+    monitor._record_sell_failure(pos, "보유기간 초과", "재진입 테스트")
+    assert monitor.sell_failure_counts["000270"] == 1, "리셋 후 1부터 시작해야 함"
+
+
+def test_sell_failure_below_threshold_keeps_position(tmp_path, monkeypatch):
+    """임계 미만 실패는 메모리 유지 + 통상 알림만 발사되어야 한다."""
+    from config import settings as cfg
+    threshold = getattr(cfg, "MAX_SELL_FAILURES", 3)
+    assert threshold >= 2, "본 테스트는 threshold>=2 가정"
+
+    db_path = tmp_path / "trading.db"
+    _init_db(db_path)
+    monkeypatch.setattr(
+        "modules.trading_engine.portfolio_monitor_v2.settings.DATABASE_PATH",
+        str(db_path),
+        raising=False,
+    )
+
+    monitor = _fresh_monitor(db_path)
+    pos = _make_position("000270", "기아", 175_700, shares=11)
+    monitor.positions["000270"] = pos
+    alerts: list = []
+    monitor.on_sell_failed = lambda p, t, m: alerts.append((t, m))
+
+    monitor._record_sell_failure(pos, "손절", "일시 네트워크 오류")
+    assert "000270" in monitor.positions, "임계 미만은 메모리 유지"
+    assert monitor.sell_failure_counts["000270"] == 1
+    assert len(alerts) == 1
 
 
 if __name__ == "__main__":

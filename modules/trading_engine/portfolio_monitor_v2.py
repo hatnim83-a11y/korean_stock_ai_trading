@@ -173,6 +173,11 @@ class PortfolioMonitorV2:
         self._running = False
         self._last_check = now_kst()
 
+        # 매도 실패 카운터 (2026-05-18 Phase 2)
+        # KIS 잔량 불일치/JSON 잔재로 매도가 반복 실패할 때 무한 도배를 봉쇄한다.
+        # 임계(settings.MAX_SELL_FAILURES) 도달 시 강제 remove_position + 1회 알림.
+        self.sell_failure_counts: dict[str, int] = {}
+
         # 설정 로드
         self._load_settings()
         
@@ -324,7 +329,53 @@ class PortfolioMonitorV2:
                             json.dump(state, f, ensure_ascii=False)
             except Exception as e:
                 logger.debug(f"monitor_state.json 잔재 정리 실패: {e}")
-    
+            # 매도 실패 카운터도 함께 정리 (재진입 시 0부터 시작)
+            self.sell_failure_counts.pop(stock_code, None)
+
+    def _record_sell_failure(self, pos: "Position", sell_type: str, err: str) -> None:
+        """매도 실패 후처리: 카운터 증가 + 임계 도달 시 강제 모니터링 제거.
+
+        2026-05-18 Phase 2: KIS 잔량 불일치/JSON 잔재로 매도가 반복 실패할 때 텔레그램
+        도배를 봉쇄한다. 임계(`settings.MAX_SELL_FAILURES`) 도달 시:
+          - 강제 `remove_position()` (메모리/position_state DB/JSON 동기 정리)
+          - `on_sell_failed` 콜백을 "최종 포기" 사유로 1회만 발사
+        portfolio.status 자체는 손대지 않는다 — DB 정합성은 별도 매도 잡/수동 정리에 위임.
+        """
+        self.sell_failure_counts[pos.stock_code] = (
+            self.sell_failure_counts.get(pos.stock_code, 0) + 1
+        )
+        count = self.sell_failure_counts[pos.stock_code]
+        threshold = getattr(settings, "MAX_SELL_FAILURES", 3)
+
+        if count >= threshold:
+            logger.error(
+                f"🚨 매도 연속 {count}회 실패 — {pos.stock_name}({pos.stock_code}) "
+                f"모니터링 강제 제거. 마지막 사유: {err}"
+            )
+            if self.on_sell_failed:
+                try:
+                    self.on_sell_failed(
+                        pos, sell_type,
+                        f"연속 {count}회 실패로 모니터링 제거 (마지막 사유: {err})"
+                    )
+                except Exception as e:
+                    logger.error(f"on_sell_failed 콜백 오류: {e}")
+            try:
+                self.remove_position(pos.stock_code)  # 내부에서 카운터도 pop
+            except Exception as e:
+                logger.error(f"강제 remove_position 실패: {e}")
+                # remove_position 예외 시에도 카운터는 명시 정리 — 다음 사이클 잔존 차단
+                self.sell_failure_counts.pop(pos.stock_code, None)
+        else:
+            logger.warning(
+                f"⚠️ {pos.stock_name} 매도 실패 {count}/{threshold}: {err}"
+            )
+            if self.on_sell_failed:
+                try:
+                    self.on_sell_failed(pos, sell_type, err)
+                except Exception as e:
+                    logger.error(f"on_sell_failed 콜백 오류: {e}")
+
     def load_positions_from_db(self) -> int:
         """
         DB에서 보유 포지션 로드
@@ -373,6 +424,32 @@ class PortfolioMonitorV2:
             if db:
                 db.close()
 
+    def _filter_state_by_holding_whitelist(self, state: dict) -> dict:
+        """JSON 폴백 state에서 portfolio.status='holding' 종목만 남긴다.
+
+        2026-05-18 Phase 2: DB가 매도 시 즉시 status='closed'로 갱신되므로,
+        JSON에 남은 closed 종목 키는 모두 잔재로 간주한다.
+        DB 조회 실패 시 안전을 위해 state를 그대로 반환한다 (기존 ×1.02 sanity가 2차 방어).
+        """
+        db = None
+        try:
+            db = Database()
+            db.connect()
+            holding_codes = {row["stock_code"] for row in db.get_portfolio("holding")}
+        except Exception as e:
+            logger.warning(f"holding 화이트리스트 조회 실패 → JSON state 그대로 사용: {e}")
+            return state
+        finally:
+            if db:
+                db.close()
+
+        residue = [code for code in state.keys() if code not in holding_codes]
+        if residue:
+            logger.warning(
+                f"🚮 JSON 잔재 키 {len(residue)}개 화이트리스트 차단: {residue}"
+            )
+        return {code: s for code, s in state.items() if code in holding_codes}
+
     def _restore_trailing_state(self) -> None:
         """DB에서 트레일링 상태 복원 (재시작 시). DB 우선, JSON 폴백."""
         # 1) DB에서 position_state 로드 시도
@@ -401,6 +478,12 @@ class PortfolioMonitorV2:
                         state = json.load(f)
             except Exception as e:
                 logger.debug(f"monitor_state.json 로드 실패: {e}")
+
+            # JSON 폴백 전용: portfolio.status='holding' 화이트리스트 1차 필터링
+            # (2026-05-18 Phase 2) 기아(000270) 사건 — closed 종목의 JSON 잔재가
+            # ×1.02 sanity 임계를 우회한 케이스 차단. DB가 single source of truth.
+            if state:
+                state = self._filter_state_by_holding_whitelist(state)
 
         if not state:
             return
@@ -981,8 +1064,7 @@ class PortfolioMonitorV2:
             self.remove_position(pos.stock_code)
         else:
             err = result.get("message") or result.get("error", "알 수 없는 오류")
-            if self.on_sell_failed:
-                self.on_sell_failed(pos, "손절", f"매도 주문 실패: {err}")
+            self._record_sell_failure(pos, "손절", f"매도 주문 실패: {err}")
 
         # 콜백
         if self.on_stop_loss:
@@ -1128,8 +1210,14 @@ class PortfolioMonitorV2:
             err = result.get("message") or result.get("error", "알 수 없는 오류")
             reason = f"매도 주문 실패: {err}"
             logger.error(f"⚠️ {stage}차 익절 매도 실패: {pos.stock_name} - {reason}")
+            # 분할 익절 실패는 카운터 미적용 — 일시적 호가 문제가 흔하며,
+            # 트리거 조건(+10/15/20%)에 다시 도달해야 발화하므로 도배 위험이 낮다.
+            # 손절/트레일링/보유기간 초과만 카운터로 무한 루프 차단.
             if self.on_sell_failed:
-                self.on_sell_failed(pos, f"{stage}차 익절", reason)
+                try:
+                    self.on_sell_failed(pos, f"{stage}차 익절", reason)
+                except Exception as e:
+                    logger.error(f"on_sell_failed 콜백 오류: {e}")
             return False
     
     # ===== 트레일링 스탑 =====
@@ -1309,8 +1397,7 @@ class PortfolioMonitorV2:
         else:
             err = result.get("message") or result.get("error", "알 수 없는 오류")
             level_label = f"트레일링L{pos.trailing_level}" if pos.trailing_level > 0 else "트레일링"
-            if self.on_sell_failed:
-                self.on_sell_failed(pos, level_label, f"매도 주문 실패: {err}")
+            self._record_sell_failure(pos, level_label, f"매도 주문 실패: {err}")
 
         if self.on_trailing_stop:
             self.on_trailing_stop(pos, actual_sell_price if result.get("success") else pos.current_price)
@@ -1367,8 +1454,7 @@ class PortfolioMonitorV2:
             self.remove_position(pos.stock_code)
         else:
             err = result.get("message") or result.get("error", "알 수 없는 오류")
-            if self.on_sell_failed:
-                self.on_sell_failed(pos, "보유기간 초과", f"매도 주문 실패: {err}")
+            self._record_sell_failure(pos, "보유기간 초과", f"매도 주문 실패: {err}")
 
     # ===== 상태 조회 =====
     

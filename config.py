@@ -367,6 +367,15 @@ class Settings(BaseSettings):
         default=-0.01,
         description="BE 손절가 오프셋 (기본 매수가 -1%, 슬리피지 완충)"
     )
+    # ----- 매도 실패 무한 루프 차단 (2026-05-18 Phase 2) -----
+    MAX_SELL_FAILURES: int = Field(
+        default=3,
+        description=(
+            "매도 진입점에서 같은 종목 연속 실패 허용 횟수. "
+            "초과 시 모니터링 메모리에서 강제 제거 + 텔레그램 1회 알림 → "
+            "monitor_state.json 잔재/KIS 잔량 불일치로 인한 무한 매도 실패 도배 봉쇄"
+        )
+    )
     TRAIL_ACTIVATION_PCT: float = Field(
         default=0.08,
         description="트레일링 시작 수익률 (+8%)"
