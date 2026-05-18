@@ -220,8 +220,184 @@ def calculate_supply_score_from_amount(
         f"수급 점수: {score:.1f}/25 "
         f"(외국인: {foreign_net_buy:+.0f}억, 기관: {institution_net_buy:+.0f}억)"
     )
-    
+
     return round(score, 2)
+
+
+# ===== Phase 1-B½/1-C 수급 점수 v2 (DB 기반 정규화) =====
+
+def calculate_theme_supply_score_v2(
+    stock_codes: list,
+    db,
+    top_n: int = 5,
+    ref_bil: float = 30.0,
+    max_score: float = 5.0,
+) -> dict:
+    """테마 종목 풀의 외국인 5일 누적 net 기반 supply_score_v2 계산.
+
+    Phase 1-B½ Shadow Run에서는 관측만 (총점 미반영), Phase 1-C에서 활성화.
+
+    Args:
+        stock_codes: 테마의 종목코드 리스트 (6자리)
+        db: Database 인스턴스 (close 안 함)
+        top_n: 외인 5일 절댓값 상위 N개 종목 선정 (기본 5)
+        ref_bil: 정규화 기준액 (억원, 평균 net이 이 값 이상이면 만점)
+        max_score: 최대 가산 점수 (Phase 1-B½ 0.0, Phase 1-C 2.5 → 5.0)
+
+    Returns:
+        {
+            'score': float (0~max_score, 양의 평균만 점수, 음의 평균은 0),
+            'foreign_pos_ratio': float (0~1, 양수 비율),
+            'avg_net_bil': float (선정 종목 평균 외인 5일 net, 억원),
+            'top_codes': list[str] (선정된 종목코드, 디버그용)
+        }
+    """
+    empty_result = {
+        "score": 0.0,
+        "foreign_pos_ratio": 0.0,
+        "avg_net_bil": 0.0,
+        "top_codes": [],
+    }
+    if not stock_codes:
+        return empty_result
+
+    try:
+        snapshots = db.get_supply_snapshots_bulk(stock_codes)
+    except Exception as e:
+        logger.warning(f"supply_score_v2 — get_supply_snapshots_bulk 실패: {e}")
+        return empty_result
+
+    if not snapshots:
+        return empty_result
+
+    # foreign_net_5d 절댓값 상위 top_n 선정 (양/음 모두 포함, 신호 강도 기준)
+    sorted_codes = sorted(
+        snapshots.keys(),
+        key=lambda c: abs(snapshots[c].get("foreign_net_5d") or 0),
+        reverse=True,
+    )[:top_n]
+
+    nets = [(snapshots[c].get("foreign_net_5d") or 0) for c in sorted_codes]
+    if not nets:
+        return empty_result
+
+    avg_net = sum(nets) / len(nets)
+    avg_net_bil = avg_net / 1e8  # 원 → 억원
+    pos_count = sum(1 for n in nets if n > 0)
+    pos_ratio = pos_count / len(nets)
+
+    # 양의 평균만 점수 (음의 평균은 0)
+    if avg_net_bil <= 0:
+        score = 0.0
+    else:
+        ratio = min(1.0, avg_net_bil / ref_bil)
+        score = ratio * max_score
+
+    return {
+        "score": round(score, 3),
+        "foreign_pos_ratio": round(pos_ratio, 3),
+        "avg_net_bil": round(avg_net_bil, 2),
+        "top_codes": sorted_codes,
+    }
+
+
+def measure_universe_top_supply_signal(
+    db,
+    trade_date=None,
+    top_n: int = 30,
+    ref_bil: float = 30.0,
+    max_score: float = 5.0,
+) -> dict:
+    """[권고 조치, 2026-05-13] universe 내부 외인 5일 net 상위 N개 신호 측정.
+
+    KIS FHPTJ04400000 30건 한도(시장 전체 핫스팟)와 별도로, universe 종목 풀
+    안에서 외인 매수 상위를 동적 계산한 신호를 측정. Phase 1-C에서 KIS TOP30 vs
+    universe 내부 TOP 중 어느 쪽을 점수 가산에 쓸지 결정하기 위한 추적 데이터.
+
+    Args:
+        db: Database 인스턴스
+        trade_date: 측정 기준일 (None이면 daily_supply_snapshot MAX)
+        top_n: universe 내부 상위 N개 종목
+        ref_bil: 정규화 기준액 (억원)
+        max_score: 최대 점수
+
+    Returns:
+        {
+            'score': float (테마와 무관한 시장 전체 universe 신호 점수),
+            'top_codes': list[str] (상위 종목코드),
+            'top_avg_net_bil': float,
+            'pos_ratio': float,
+            'measured_date': str (ISO),
+            'universe_size': int
+        }
+    """
+    empty_result = {
+        "score": 0.0,
+        "top_codes": [],
+        "top_avg_net_bil": 0.0,
+        "pos_ratio": 0.0,
+        "measured_date": None,
+        "universe_size": 0,
+    }
+
+    try:
+        with db.get_cursor() as cursor:
+            # 측정 기준일 결정
+            if trade_date is None:
+                cursor.execute(
+                    "SELECT MAX(trade_date) FROM daily_supply_snapshot"
+                )
+                row = cursor.fetchone()
+                td = row[0] if row and row[0] else None
+                if not td:
+                    return empty_result
+            else:
+                td = trade_date.isoformat() if hasattr(trade_date, "isoformat") else trade_date
+
+            # universe 전체 외인 5일 net 상위 top_n
+            cursor.execute(
+                """SELECT stock_code, foreign_net_5d
+                   FROM daily_supply_snapshot
+                   WHERE trade_date = ? AND foreign_net_5d IS NOT NULL
+                   ORDER BY foreign_net_5d DESC
+                   LIMIT ?""",
+                (td, top_n),
+            )
+            rows = cursor.fetchall()
+
+            # universe 전체 크기
+            cursor.execute(
+                "SELECT COUNT(*) FROM daily_supply_snapshot WHERE trade_date = ?",
+                (td,),
+            )
+            universe_size = cursor.fetchone()[0]
+    except Exception as e:
+        logger.warning(f"universe_top_supply_signal 측정 실패: {e}")
+        return empty_result
+
+    if not rows:
+        return {**empty_result, "measured_date": td, "universe_size": universe_size}
+
+    nets = [r[1] for r in rows]
+    top_codes = [r[0] for r in rows]
+    avg_net_bil = (sum(nets) / len(nets)) / 1e8
+    pos_count = sum(1 for n in nets if n > 0)
+    pos_ratio = pos_count / len(nets)
+
+    if avg_net_bil <= 0:
+        score = 0.0
+    else:
+        ratio = min(1.0, avg_net_bil / ref_bil)
+        score = ratio * max_score
+
+    return {
+        "score": round(score, 3),
+        "top_codes": top_codes,
+        "top_avg_net_bil": round(avg_net_bil, 2),
+        "pos_ratio": round(pos_ratio, 3),
+        "measured_date": td,
+        "universe_size": universe_size,
+    }
 
 
 # ===== 뉴스 화제성 점수 계산 =====
@@ -572,6 +748,33 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
     if include_news:
         news_data = _collect_news_data(themes)
 
+    # v16 Phase 1-B½ Shadow Run — supply_score_v2 계산용 DB 인스턴스 + universe 측정
+    # SUPPLY_SIGNAL_ENABLED=False 시 전체 분기 스킵 (기존 동작 보존)
+    _supply_db = None
+    _universe_top_signal = None
+    if settings.SUPPLY_SIGNAL_ENABLED:
+        try:
+            from database import Database  # lazy import (circular 방지)
+            _supply_db = Database()
+            _supply_db.connect()
+            # 권고 조치 (2026-05-13): universe 내부 동적 TOP 신호 1회 측정
+            _universe_top_signal = measure_universe_top_supply_signal(
+                _supply_db,
+                top_n=settings.SUPPLY_UNIVERSE_TOP_N,
+                ref_bil=settings.SUPPLY_INTENSITY_REF_BIL,
+                max_score=settings.SUPPLY_SCORE_MAX or 5.0,
+            )
+            logger.info(
+                f"📊 universe top signal — date={_universe_top_signal.get('measured_date')}, "
+                f"size={_universe_top_signal.get('universe_size')}, "
+                f"top_avg={_universe_top_signal.get('top_avg_net_bil'):.2f}억, "
+                f"pos_ratio={_universe_top_signal.get('pos_ratio'):.0%}"
+            )
+        except Exception as e:
+            logger.warning(f"Phase 1-B½ DB 초기화/universe 측정 실패 (계속): {e}")
+            _supply_db = None
+            _universe_top_signal = None
+
     for theme in themes:
         theme_name = theme.get("name", theme.get("theme", ""))
 
@@ -615,6 +818,26 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
         # 7. 기본점수 10점
         total = momentum_score + overheat + news_score + ai_score + size_bonus + BASE_SCORE + liquidity_penalty
 
+        # 8. v16 Phase 1-B½ Shadow Run — supply_score_v2 계산 (관측 모드면 미반영)
+        supply_v2_result = None
+        supply_score_v2 = 0.0
+        if _supply_db is not None:
+            theme_stock_codes = theme.get("stocks", []) or []
+            # 6자리 종목코드만 (URL 보강 실패 케이스 방어)
+            theme_stock_codes = [c for c in theme_stock_codes
+                                  if isinstance(c, str) and len(c) == 6 and c.isdigit()]
+            supply_v2_result = calculate_theme_supply_score_v2(
+                theme_stock_codes,
+                _supply_db,
+                top_n=settings.SUPPLY_SCORE_TOP_N,
+                ref_bil=settings.SUPPLY_INTENSITY_REF_BIL,
+                max_score=settings.SUPPLY_SCORE_MAX or 5.0,  # 0이면 관측용 5점 만점 기준
+            )
+            supply_score_v2 = supply_v2_result["score"]
+            # 관측 모드 OFF + MAX > 0 일 때만 총점 가산 (Phase 1-C 활성화 시)
+            if (not settings.SUPPLY_SCORE_OBSERVE_ONLY) and settings.SUPPLY_SCORE_MAX > 0:
+                total += supply_score_v2
+
         # 등급 산정 (최대 65점 기준)
         if total >= 58:
             grade = "S"
@@ -651,6 +874,12 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
         # 원본 테마 정보에 점수 추가
         # 주의: main.py:_pick_momentum 폴백 체인이 momentum/momentum_score 양쪽 키 존재에 의존.
         #       한쪽 키만 남기는 변경은 main.py 수정과 동시 진행 필수 (회귀 방지).
+        # 관측 모드: supply_score는 0 유지 (총점 미반영). 활성화 모드: supply_score_v2 노출
+        _displayed_supply_score = (
+            round(supply_score_v2, 2)
+            if (not settings.SUPPLY_SCORE_OBSERVE_ONLY) and settings.SUPPLY_SCORE_MAX > 0
+            else 0
+        )
         scored_theme = {
             **theme,
             "theme": theme_name,
@@ -659,7 +888,7 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
             "score": round(total, 2),
             "momentum": round(momentum_score, 2),
             "momentum_score": round(momentum_score, 2),
-            "supply_score": 0,
+            "supply_score": _displayed_supply_score,
             "news_score": round(news_score, 2),
             "news_count": news_count,
             "news": news_text,  # AI 감성분석용 뉴스 텍스트
@@ -674,6 +903,49 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
             "selection_reason": selection_reason
         }
         scored_themes.append(scored_theme)
+
+        # v16 Phase 1-B½ — supply_score_observation 기록 (관측 모드 포함, 항상 저장)
+        if _supply_db is not None and supply_v2_result is not None:
+            try:
+                import json as _json
+                # code-tester 주의 2/3 반영: score_applied + stocks_available 명시
+                # — Phase 1-C 분석 시 noise 데이터 필터링용
+                _score_applied = (
+                    (not settings.SUPPLY_SCORE_OBSERVE_ONLY)
+                    and settings.SUPPLY_SCORE_MAX > 0
+                )
+                breakdown = {
+                    "theme_top_codes": supply_v2_result.get("top_codes", []),
+                    "theme_avg_net_bil": supply_v2_result.get("avg_net_bil"),
+                    "theme_pos_ratio": supply_v2_result.get("foreign_pos_ratio"),
+                    # 권고 조치: universe 내부 동적 TOP 신호 병기 저장
+                    "universe_top_signal": _universe_top_signal,
+                    "observe_only": settings.SUPPLY_SCORE_OBSERVE_ONLY,
+                    "score_applied": _score_applied,          # 실제 총점 가산 여부 (분석용)
+                    "stocks_available": len(theme_stock_codes) > 0,  # noise 필터링용
+                    "score_max": settings.SUPPLY_SCORE_MAX,
+                    "ref_bil": settings.SUPPLY_INTENSITY_REF_BIL,
+                    "top_n": settings.SUPPLY_SCORE_TOP_N,
+                }
+                _supply_db.save_supply_score_observation(
+                    obs_date=now_kst().date(),
+                    theme_name=theme_name,
+                    supply_score_v2=supply_score_v2,
+                    momentum_score=round(momentum_score, 2),
+                    news_score=round(news_score, 2),
+                    ai_score=round(ai_score, 2),
+                    theme_total_actual=round(total, 2),
+                    breakdown_json=_json.dumps(breakdown, ensure_ascii=False),
+                )
+            except Exception as e:
+                logger.warning(f"supply_score_observation 저장 실패 [{theme_name}] (계속): {e}")
+
+    # DB 인스턴스 cleanup (lazy init된 경우만)
+    if _supply_db is not None:
+        try:
+            _supply_db.close()
+        except Exception:
+            pass
 
     # 총점 기준 내림차순 정렬
     scored_themes.sort(key=lambda x: x["total_score"], reverse=True)

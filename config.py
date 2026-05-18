@@ -735,6 +735,32 @@ class Settings(BaseSettings):
         description="17:10 잡 전체 실패 시 자동 재시도 잡 분"
     )
 
+    # ===== Phase 1-B½/1-C 수급 점수 활성화 토글 =====
+    SUPPLY_SCORE_OBSERVE_ONLY: bool = Field(
+        default=True,
+        description="Phase 1-B½ Shadow Run — True면 supply_score_v2 계산하되 테마 총점에 미반영 (관측만, supply_score_observation 테이블 저장). Phase 1-C 진입 시 False로 전환"
+    )
+    SUPPLY_SCORE_MAX: float = Field(
+        default=0.0,
+        description="테마 점수 가산 최대값 (점수). Phase 1-B½에서는 0.0 (총점 미반영), Phase 1-C Day 20 2.5 → Day 21 5.0 단계 상향"
+    )
+    SUPPLY_SCORE_TOP_N: int = Field(
+        default=5,
+        description="테마당 supply_score_v2 계산에 사용할 상위 N개 종목 (외인 5일 누적 절댓값 기준)"
+    )
+    SUPPLY_INTENSITY_REF_BIL: float = Field(
+        default=30.0,
+        description="supply_score_v2 정규화 기준액 (억원). 평균 외인 net이 이 값에 도달하면 SUPPLY_SCORE_MAX 만점. 30억=5점 매핑"
+    )
+    SUPPLY_STRENGTH_ENABLED: bool = Field(
+        default=False,
+        description="Phase 1-C 종목 필터(filters.py) supply_strength 키 가산 활성화. Phase 1-B½에서는 False"
+    )
+    SUPPLY_UNIVERSE_TOP_N: int = Field(
+        default=30,
+        description="universe 내부 외인 동적 TOP 측정 시 상위 N개 종목 (KIS TOP30 대비 비교용, Phase 1-C 결정에 사용)"
+    )
+
     # ===== 스케줄 시간 =====
     SCHEDULE_THEME_ANALYSIS: str = Field(
         default="08:30",

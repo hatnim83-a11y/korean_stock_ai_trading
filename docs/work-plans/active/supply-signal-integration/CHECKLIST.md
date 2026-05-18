@@ -98,9 +98,15 @@
 
 ## Phase 1-B½ Shadow Run (Day 6~19, 14영업일)
 
-### 구현
-- [ ] `config.py` `SUPPLY_SCORE_OBSERVE_ONLY=True`, `SUPPLY_SCORE_MAX=0.0` 토글 추가
-- [ ] `modules/theme_analyzer/scorer.py` observation 로직 (계산하되 총점 미반영, `supply_score_observation` 테이블에 저장)
+### 구현 (2026-05-18 완료)
+- [x] `config.py` 토글 6개 추가 — `SUPPLY_SCORE_OBSERVE_ONLY=True`, `SUPPLY_SCORE_MAX=0.0`, `SUPPLY_SCORE_TOP_N=5`, `SUPPLY_INTENSITY_REF_BIL=30.0`, `SUPPLY_STRENGTH_ENABLED=False`, `SUPPLY_UNIVERSE_TOP_N=30` (code-tester 주의 1 반영)
+- [x] `modules/theme_analyzer/scorer.py` observation 로직 — `calculate_theme_supply_score_v2()` 신규 + `measure_universe_top_supply_signal()` 신규 (권고 조치, universe 내부 동적 TOP) + `score_themes()` 통합 + 라인 662 분기 (관측 모드 0 / 활성화 시 v2 점수)
+- [x] `tests/test_theme_supply_score.py` 신규 — 10 테스트 PASS (빈 리스트/no_snapshot/강한 케이스/음수/경계/top_n 선정/max=0 관측/universe 빈/정상/cap)
+- [x] code-tester 통과 — 심각 0/주의 3/참고 3, "배포 가능". 주의 3건 모두 즉시 처리 완료
+  - 주의 1: top_n=30 하드코딩 → `SUPPLY_UNIVERSE_TOP_N` 신설
+  - 주의 2: observation `observe_only` 의미 모호 → `score_applied` 필드 추가
+  - 주의 3: 비화요일 08:30 stocks 누락 noise → `stocks_available` 필드 추가
+- [x] 실제 운영 DB로 통합 검증 — universe 113종목/조선 테마 score=5.0/강한 케이스 score=5.0/빈 리스트 score=0.0 정상
 
 ### 검증 (Day 14 종료 시점)
 - [ ] 14영업일 데이터 ≥ 200건
