@@ -145,6 +145,12 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
         avg_momentum = td["weighted_momentum"] / tw
         avg_ai = td["total_ai"] / td["ai_count"] if td["ai_count"] > 0 else 0
 
+        # 표시용 avg_change_rate 폴백 — momentum_score 역산 (clamped ±10% 범위 내 근사)
+        # scorer.py 공식: momentum_score = ((clamped + 10) / 20) * 25
+        # → avg_return ≈ (momentum_score / 25) * 20 - 10
+        # 화요일 enrich 시 실측값이 t["avg_change_rate"]에 덮어써짐 (main.py:_enrich_tuesday_themes)
+        avg_change_fallback = round((avg_momentum / 25.0) * 20.0 - 10.0, 2)
+
         results.append({
             "name": name,
             "theme": name,
@@ -152,6 +158,7 @@ def aggregate_weekly_scores(db, base_date: date = None) -> list[dict]:
             "score": round(avg_score, 2),
             "momentum": round(avg_momentum, 2),
             "momentum_score": round(avg_momentum, 2),
+            "avg_change_rate": avg_change_fallback,
             "news_count": td["latest_news"] if td["latest_news"] is not None else 0,
             "ai_sentiment": round(avg_ai, 2),
             "category": td["category"],

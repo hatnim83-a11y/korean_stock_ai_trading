@@ -2869,6 +2869,10 @@ class TradingSystem:
                         realtime_momentum = await asyncio.to_thread(
                             _calculate_theme_momentum, t, kis
                         )
+                        # 실측값은 보정 발화 여부와 무관하게 표시 채널에 저장
+                        # (메시지 빌더가 avg_change_rate 읽음 — 미설정 시 +0.0% 회귀)
+                        t["avg_change_rate"] = round(realtime_momentum, 2)
+                        t["momentum_realtime"] = round(realtime_momentum, 2)
                         db_momentum = t.get("momentum", 0) or 0
                         momentum_delta = realtime_momentum - db_momentum
                         if abs(momentum_delta) > 3.0:
@@ -2879,7 +2883,6 @@ class TradingSystem:
                                 clamped_count += 1
                             t["total_score"] = round(t.get("total_score", 0) + adjustment, 2)
                             t["score"] = t["total_score"]
-                            t["momentum_realtime"] = round(realtime_momentum, 2)
                             momentum_updates += 1
                             adjustments_log.append(adjustment)
                             logger.info(
