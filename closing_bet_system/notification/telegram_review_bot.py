@@ -204,13 +204,17 @@ class TelegramReviewBot:
         trade_date: Any,
         status_counts: dict,
         recommended_count: int = 0,
+        closed_positions: Optional[list[dict]] = None,
     ) -> bool:
-        """일일 요약 (15:35 마감 후).
+        """일일 요약 (15:35 마감 후, 스윙 send_daily_report 형식 통일).
 
         Args:
             trade_date: 거래일 (date / str / datetime)
             status_counts: 1-6 ``count_by_status()`` 결과 dict
             recommended_count: 누적 recommended 건수 (1-9 게이트 진척도)
+            closed_positions: 오늘 청산된 포지션 리스트 (각 dict: ticker, name,
+                entry_price_avg, exit_price, qty, profit_abs, profit_rate).
+                None 또는 빈 리스트 시 PnL 섹션 생략.
 
         Returns:
             발송 성공 여부.
@@ -222,19 +226,115 @@ class TelegramReviewBot:
         ent = status_counts.get("entered", 0)
         rej_f = status_counts.get("rejected_filter", 0)
         rej_m = status_counts.get("rejected_manual", 0)
-        text = (
-            f"📊 *종가베팅 일일 요약*\n"
-            f"{_SEPARATOR}\n"
-            f"📅 {date_str}\n"
-            f"\n"
-            f"• Recommended: {rec}건\n"
-            f"• Entered (수동 진입): {ent}건\n"
-            f"• Rejected (필터): {rej_f}건\n"
-            f"• Rejected (수동): {rej_m}건\n"
-            f"\n"
-            f"누적 recommended: *{recommended_count}건* / 게이트 {_GATE_OPERATIONAL_REVIEW}건"
+
+        lines = [
+            f"📊 *종가베팅 일일 요약*",
+            _SEPARATOR,
+            f"📅 {date_str}",
+            "",
+            "📋 *후보 통계*",
+            f"• Recommended: {rec}건",
+            f"• Entered: {ent}건",
+            f"• Rejected (필터): {rej_f}건",
+            f"• Rejected (수동): {rej_m}건",
+        ]
+
+        # 오늘 청산된 포지션 PnL 섹션 (선택적)
+        if closed_positions:
+            # 전체 합산 (표시는 5건만, 누적은 전체)
+            all_pnl_pairs = [
+                (float(p["profit_abs"]), float(p["profit_rate"]))
+                for p in closed_positions
+                if p.get("profit_abs") is not None
+                and p.get("profit_rate") is not None
+            ]
+            lines.append("")
+            lines.append(f"💼 *오늘 청산 종목 PnL* ({len(closed_positions)}건)")
+            for pos in closed_positions[:5]:
+                tk = _escape_markdown(pos.get("ticker", ""))
+                nm = _escape_markdown(pos.get("name", ""))
+                pa = pos.get("profit_abs")
+                pr = pos.get("profit_rate")
+                if pa is None or pr is None:
+                    continue
+                pa = float(pa)
+                pr = float(pr)
+                pnl_emoji = "🟢" if pa >= 0 else "🔴"
+                lines.append(
+                    f"{pnl_emoji} {nm} ({tk}): {pa:+,.0f}원 ({pr:+.2f}%)"
+                )
+            if len(closed_positions) > 5:
+                lines.append(f"… +{len(closed_positions) - 5}건 더")
+            if all_pnl_pairs:
+                total_pnl_all = sum(p[0] for p in all_pnl_pairs)
+                avg_rate_all = sum(p[1] for p in all_pnl_pairs) / len(all_pnl_pairs)
+                total_emoji = "🟢" if total_pnl_all >= 0 else "🔴"
+                lines.append("")
+                lines.append(
+                    f"{total_emoji} *오늘 총 손익* ({len(all_pnl_pairs)}건 전체): "
+                    f"{total_pnl_all:+,.0f}원 (평균 {avg_rate_all:+.2f}%)"
+                )
+
+        lines.append("")
+        lines.append(
+            f"📈 누적 recommended: *{recommended_count}건* / 게이트 {_GATE_OPERATIONAL_REVIEW}건"
         )
+        text = "\n".join(lines)
         return bool(self.notifier.send_message(text, parse_mode="Markdown"))
+
+    def send_system_start(self, info: Optional[dict] = None) -> bool:
+        """종가베팅 시스템 시작 알림 (스윙 send_system_start 패턴).
+
+        Args:
+            info: 추가 정보 dict (예: dry_run 상태, capital_ratio 등). 옵션.
+
+        Returns:
+            발송 성공 여부.
+        """
+        if not self.is_enabled:
+            return False
+        ts = now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
+        lines = [
+            "🚀 *종가베팅 시스템 시작*",
+            _SEPARATOR,
+            f"⏰ {ts}",
+        ]
+        if info:
+            dr_entry = info.get("entry_dry_run")
+            dr_exit = info.get("exit_dry_run")
+            cap = info.get("capital_ratio")
+            if dr_entry is not None:
+                lines.append(
+                    f"📈 매수: {'🧪 DRY-RUN' if dr_entry else '✅ 실발주'}"
+                )
+            if dr_exit is not None:
+                lines.append(
+                    f"📉 매도: {'🧪 DRY-RUN' if dr_exit else '✅ 실 매도'}"
+                )
+            if cap is not None:
+                lines.append(f"💰 자금 비중: {float(cap)*100:.1f}%")
+        return bool(self.notifier.send_message("\n".join(lines), parse_mode="Markdown"))
+
+    def send_system_stop(self, reason: str = "") -> bool:
+        """종가베팅 시스템 중지 알림.
+
+        Args:
+            reason: 중지 사유 (옵션).
+
+        Returns:
+            발송 성공 여부.
+        """
+        if not self.is_enabled:
+            return False
+        ts = now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
+        lines = [
+            "🛑 *종가베팅 시스템 중지*",
+            _SEPARATOR,
+            f"⏰ {ts}",
+        ]
+        if reason:
+            lines.append(f"📝 사유: {_escape_markdown(reason)}")
+        return bool(self.notifier.send_message("\n".join(lines), parse_mode="Markdown"))
 
     # ===== 메시지 포맷 =====
 

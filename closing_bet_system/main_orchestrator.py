@@ -344,7 +344,7 @@ class MainOrchestrator:
                 candidate_logger=self.candidate_logger,
                 morning_price_collector=MorningPriceCollector(kis_api),
                 fill_checker=FillChecker(kis_order_api),
-                exit_notifier=ExitNotifier(),
+                exit_notifier=ExitNotifier(candidate_logger=self.candidate_logger),
                 settings=ee_settings,
             )
         return self._exit_executor
@@ -531,12 +531,18 @@ class MainOrchestrator:
             start, end, "recommended"
         )
 
+        # 오늘 청산된 포지션 (T-1 진입 → T 청산) PnL 조회
+        closed_today = await asyncio.to_thread(
+            self.candidate_logger.get_closed_today, today
+        )
+
         sent = await asyncio.to_thread(
             self.review_bot.send_daily_summary,
-            today, counts, len(recent_recommended)
+            today, counts, len(recent_recommended), closed_today
         )
         logger.info(
-            f"[orchestrator] 일일 요약 발송={sent} — 오늘 {counts}, 누적 {len(recent_recommended)}/{self.gate_threshold}"
+            f"[orchestrator] 일일 요약 발송={sent} — 오늘 {counts}, 청산 {len(closed_today)}건, "
+            f"누적 {len(recent_recommended)}/{self.gate_threshold}"
         )
         return {
             "date": str(today), "today_counts": counts,

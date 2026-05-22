@@ -604,6 +604,79 @@ class CandidateLogger:
             rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
+    def get_closed_today(self, exit_date: Any) -> list[dict]:
+        """exit_date 일자에 청산된 후보 조회 + PnL 가공.
+
+        T+1 매도 정책: trade_date=T 진입 → exit_time=T+1 청산.
+        반환 dict 필드: ticker, name, entry_price_avg, exit_price, qty,
+        profit_abs, profit_rate, exit_time.
+
+        Args:
+            exit_date: 청산 발생 일자 (date / str / datetime). 일반적으로 오늘.
+
+        Returns:
+            청산 dict 리스트 (체결+entry/exit 가격 모두 있는 건만, exit_time 오름차순).
+        """
+        date_str = _to_date_str(exit_date)
+        with self.db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT candidate_id, ticker, name,
+                       entry_phase1_executed_price, entry_phase1_executed_shares,
+                       entry_phase2_executed_price, entry_phase2_executed_shares,
+                       entry_price, exit_price, exit_time
+                FROM candidates
+                WHERE DATE(exit_time) = ?
+                  AND exit_price IS NOT NULL
+                ORDER BY exit_time ASC
+                """,
+                (date_str,),
+            )
+            rows = cursor.fetchall()
+        result: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            p1 = d.get("entry_phase1_executed_price")
+            s1 = d.get("entry_phase1_executed_shares")
+            p2 = d.get("entry_phase2_executed_price")
+            s2 = d.get("entry_phase2_executed_shares")
+            # 가중평균 매수가
+            if p1 and s1 and p1 > 0 and s1 > 0:
+                if p2 and s2 and p2 > 0 and s2 > 0:
+                    entry_avg = (float(p1) * int(s1) + float(p2) * int(s2)) / (
+                        int(s1) + int(s2)
+                    )
+                    qty = int(s1) + int(s2)
+                else:
+                    entry_avg = float(p1)
+                    qty = int(s1)
+            elif d.get("entry_price") and d["entry_price"] > 0:
+                entry_avg = float(d["entry_price"])
+                qty = (int(s1) if s1 else 0) + (int(s2) if s2 else 0)
+            else:
+                continue  # 원가 미상은 PnL 산출 불가
+
+            exit_price = d.get("exit_price")
+            if not exit_price or exit_price <= 0:
+                continue
+            profit_per_share = float(exit_price) - entry_avg
+            profit_abs = profit_per_share * qty if qty else 0.0
+            profit_rate = (float(exit_price) - entry_avg) / entry_avg * 100
+            result.append(
+                {
+                    "candidate_id": d["candidate_id"],
+                    "ticker": d["ticker"],
+                    "name": d["name"],
+                    "entry_price_avg": entry_avg,
+                    "exit_price": float(exit_price),
+                    "qty": qty,
+                    "profit_abs": profit_abs,
+                    "profit_rate": profit_rate,
+                    "exit_time": d.get("exit_time"),
+                }
+            )
+        return result
+
     # ===== 내부 헬퍼 =====
 
     def _update_status(self, candidate_id: int, new_status: str, reason: str) -> None:
