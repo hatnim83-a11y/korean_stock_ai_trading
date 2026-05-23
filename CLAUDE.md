@@ -57,6 +57,13 @@
 - **release**: 발주 완료 후 try/finally 1차 해제 + 15:30 `clear_all()` 2차 안전망
 - SellLock 동일 종목 점유 중이면 BuyLock acquire 자체 skip
 
+### 종가베팅 충돌 가드 (2026-05-23 hotfix — closing_bet absorb_swing_idle 정합)
+- **가드 A (시간 차단)**: v17 2차 진입은 **15:15 이후 차단** — 종가베팅 phase1(15:18)/phase2(15:25) 보호
+- **가드 B' (자본 한도)**: v17 2차 진입에 **swing_capital_pool(총자본 × SWING_CAPITAL_RATIO=0.9) 한도** 적용 — `target_amount = min(target_amount, swing_pool - swing_used)`. swing_used = `Σ(p.first_buy_price × p.shares)` (fund_guard.compute_capital_limit cost_basis 식과 동일)
+- **위치**: `_check_and_execute_pyramid_in()` 1-B(시간) + 7-B(자본). 모니터 진입 순간 차단 → BuyLock acquire 자체 안 함
+- **로그**: 시간 차단 = debug / 자본 축소 = info. 무음 차단 아니므로 운영 가시성 보장
+- **연동**: closing_bet `settings.yaml fund.absorb_swing_idle=true / closing_bet_pool_cap=0.5` 정책과 양방향 대칭 (스윙→종가베팅 침해 차단)
+
 ### ATR 폴백 정책
 - pykrx 우선, KIS API 폴백, 양쪽 실패 시 `atr_at_buy=0.0`
 - 호출 측 `effective_trailing_pct()`에서 `max(고정, 0)` = 고정값 안전 디그레이드
