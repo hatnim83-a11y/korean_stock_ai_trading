@@ -31,6 +31,55 @@
 - **release 정책**: 매도 함수 종료 시 release하지 **않음** → 15:30 `stop_monitoring()`에서 `clear_all()` 일괄 해제 (race window 봉쇄). 같은 거래일 내 한 종목에 두 매도 잡이 발화하지 않으므로 누수 위험 없음
 - **무력화**: `PARTIAL_PROFIT_EARLY_MONITORING_ENABLED=False` + systemctl restart → acquire 호출 자체가 분기되어 NO-OP, 09:26 legacy 시작
 
+## 분할 진입 + 불타기 + ATR 트레일링 (v17 — 2026-05-20 코드, 2026-05 활성화)
+
+### 핵심 정책 분기 (절대 헷갈리지 말 것)
+- **익절 트리거** (`_check_and_execute_partial_profit`) → **`avg_buy_price`** 기준 (수익 실현 직관)
+- **손절/BE/트레일링/2차 진입 트리거** → **`first_buy_price`** 기준 (평균단가 함정 회피)
+- `pos.buy_price` 직접 참조 금지 (deprecated). `pos.first_buy_price` 또는 `pos.avg_buy_price` 명시 사용
+- 코드 변경 시 의도가 "리스크 트리거"인지 "손익 보고/실현"인지 확인 후 기준 선택
+
+### 운용 파라미터
+- 1차 진입: 50% (`TRANCHE_FIRST_RATIO=0.5`)
+- 2차 진입(불타기): 50%, 트리거 **+5% first 기준** (`PYRAMID_TRIGGER_PCT=0.05`)
+- 분할 익절: **+12%/+20%/+30% avg 기준** × 25/20/20% (잔여 35%)
+- 트레일링 폭: `max(L1=4%/L2=3%/L3=2%, 2.0×ATR(14)/first_buy_price)`
+
+### 토글 (`.env` 또는 환경변수)
+- `TRANCHE_ENTRY_ENABLED` (default **False** 안전): True=1차 50% + 2차 트리거 활성
+- `DRY_RUN_PYRAMID` (default **True** 안전): True=2차 진입 시뮬레이션(실발주 차단)
+- `PARTIAL_PROFIT_BASE` (default `'avg'`): 'first' 토글로 익절 기준 기존 복귀
+- `TRAILING_USE_ATR` (default True): False 토글로 고정값만 사용
+
+### 동시성 — OrderLock 우선순위 (Sell > Buy)
+- **모듈**: `modules/trading_engine/buy_lock.py` (싱글톤 `buy_lock`, SellLock 동일 패턴)
+- **우선순위 가드**: `_check_all_positions` 흐름에서 분할익절 발화 시 그 사이클 2차 진입 skip → 다음 사이클 재평가
+- **release**: 발주 완료 후 try/finally 1차 해제 + 15:30 `clear_all()` 2차 안전망
+- SellLock 동일 종목 점유 중이면 BuyLock acquire 자체 skip
+
+### ATR 폴백 정책
+- pykrx 우선, KIS API 폴백, 양쪽 실패 시 `atr_at_buy=0.0`
+- 호출 측 `effective_trailing_pct()`에서 `max(고정, 0)` = 고정값 안전 디그레이드
+- 매수 직후 동기 호출 (캐시 hit 우선), 09:20 prefetch 잡은 추후 작업
+- 매수 시점 박제만 (보유 중 미갱신, Phase 2에서 일일 재계산 검토)
+
+### monitor_state.json sanity 분기 (v17 확장)
+- `tranche_count==1`: 기존 `first_buy_price × 1.02` 임계 유지
+- `tranche_count==2`: `max(first×1.02, avg×1.02)` 임계 완화 (2차 진입 후 정상 데이터 보호)
+- 복원 시 `avg_buy_price <= 0` 강제 폴백 `avg = first` (catastrophic bug 방어)
+
+### 활성화 절차 (안전)
+1. 머지: `git checkout main && git merge worktree-tranche-entry-pyramid`
+2. `.env`에 두 줄 추가: `TRANCHE_ENTRY_ENABLED=true` + `DRY_RUN_PYRAMID=false`
+3. `sudo systemctl restart trading_system`
+4. DB v17 마이그레이션 자동 실행 + 기존 holding 백필 UPDATE 4문장 자동 처리
+
+### 롤백
+- `.env` 두 줄 false/true 토글 + restart
+- 익절 임계 강제 원복: `TAKE_PROFIT_1/2/3 = 0.10/0.15/0.20` + `PARTIAL_SELL_RATIO_1 = 0.30`
+
+**상세**: `memory/project_tranche_entry.md`
+
 ## 모니터 상태 정합성 (monitor_state.json — 2026-05-13 도입)
 - **3중 동기화**: 매도 시 메모리/DB/JSON 동시 정리 (`portfolio_monitor_v2.remove_position()` 내부)
   - JSON 잔재로 BE 손절가 즉시 활성화되던 회귀 버그 차단 (2026-05-12 한화오션 사건)

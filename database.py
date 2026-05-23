@@ -177,6 +177,7 @@ class Database:
             (14, "screening_log 관찰 컬럼 2개 추가 (RSI·슬롯 보호)", self._migrate_v14),
             (15, "portfolio buy_message 컬럼 추가", self._migrate_v15),
             (16, "외국인/기관 수급 신호 도입 (daily_supply_snapshot, foreign_top_ranking, supply_score_observation + portfolio/trade_reviews 보강)", self._migrate_v16),
+            (17, "분할 진입(Tranche Entry) + 불타기(Pyramid-In) + ATR 트레일링 도입", self._migrate_v17),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -611,6 +612,60 @@ class Database:
             for col_name, col_type in review_columns:
                 if not self._has_column("trade_reviews", col_name):
                     cursor.execute(f"ALTER TABLE trade_reviews ADD COLUMN {col_name} {col_type}")
+
+    def _migrate_v17(self) -> None:
+        """분할 진입(Tranche Entry) + 불타기(Pyramid-In) + ATR 트레일링 도입.
+
+        목적: 1차 50% 진입 + 수익률 +5% 도달 시 2차 50% 추가 진입(불타기)으로
+        리스크 절반 축소 + 추세 종목 수익 끌기. 분할 익절 임계는 평균단가 기준으로,
+        손절/BE/트레일링/2차 트리거는 1차 진입가 기준으로 분리(평균단가 함정 회피).
+        트레일링 폭은 `max(고정값, 2.0 × ATR(14))`로 변동성 보호.
+
+        portfolio 테이블에 7개 컬럼 추가:
+        - first_buy_price: 1차 진입가 (손절/BE/2차 트리거/트레일링 기준)
+        - avg_buy_price: 평균단가 (분할 익절 트리거 기준 — avg 정책 분기)
+        - tranche_count: 진입 회차 (1 또는 2)
+        - second_tranche_executed: 2차 진입 완료 플래그
+        - second_tranche_pending: 1차 진입 후 2차 대기 상태
+          (⚠️ DEFAULT 0 — 기존 holding 안전 / 신규 매수에서 명시적 =1 설정)
+        - atr_at_buy: ATR(14일) 박제값 (트레일링 폭 계산용)
+        - atr_period: ATR 기간 (감사용, DEFAULT 14)
+
+        백필 4문장 (Coder 리뷰 P5 — 기존 holding 200% 매수 사고 차단):
+        second_tranche_pending DEFAULT 0 + 백필 UPDATE로 이중 방어.
+        만약 DEFAULT를 1로 잘못 설정했다면, 기존 보유 종목이 max_profit_rate >= 5%일 때
+        봇 재시작 직후 2차 매수 발화로 100% 추가 진입 위험이 있다.
+        본 마이그레이션은 DEFAULT 0 + 명시적 UPDATE 0으로 안전 보장.
+        """
+        columns = [
+            ("first_buy_price", "REAL"),
+            ("avg_buy_price", "REAL"),
+            ("tranche_count", "INTEGER DEFAULT 1"),
+            ("second_tranche_executed", "BOOLEAN DEFAULT 0"),
+            ("second_tranche_pending", "BOOLEAN DEFAULT 0"),
+            ("atr_at_buy", "REAL"),
+            ("atr_period", "INTEGER DEFAULT 14"),
+        ]
+        with self.get_cursor() as cursor:
+            for col_name, col_type in columns:
+                if not self._has_column("portfolio", col_name):
+                    cursor.execute(f"ALTER TABLE portfolio ADD COLUMN {col_name} {col_type}")
+
+            # 기존 holding 백필 (200% 매수 사고 차단)
+            cursor.execute(
+                "UPDATE portfolio SET first_buy_price = buy_price WHERE first_buy_price IS NULL"
+            )
+            cursor.execute(
+                "UPDATE portfolio SET avg_buy_price = buy_price WHERE avg_buy_price IS NULL"
+            )
+            cursor.execute(
+                "UPDATE portfolio SET second_tranche_executed = 0 WHERE second_tranche_executed IS NULL"
+            )
+            cursor.execute(
+                "UPDATE portfolio SET second_tranche_pending = 0 "
+                "WHERE status='holding' AND second_tranche_pending IS NULL"
+            )
+            # atr_at_buy는 NULL 유지 (호출 측에서 0.0 폴백 → 트레일링 고정값 사용)
 
     def init_tables(self) -> None:
         """
@@ -1086,43 +1141,126 @@ class Database:
             """, (current_price, profit_rate, profit_amount, stock_code))
 
     def save_holding_position(self, position: dict) -> None:
-        """
-        매수 체결 후 holding 포지션 저장
+        """매수 체결 후 holding 포지션 저장 (v17: 분할 진입 컬럼 포함).
 
         Args:
-            position: 포지션 정보 딕셔너리
+            position: 포지션 정보 딕셔너리. 필수: stock_code, stock_name, shares, buy_price.
+                선택 (v17): first_buy_price, avg_buy_price, atr_at_buy, atr_period,
+                            second_tranche_pending, tranche_count.
+                미전달 시 first/avg=buy_price 폴백, pending은 TRANCHE_ENTRY_ENABLED 추론.
         """
         shares = position.get('shares')
+        buy_price = position.get('buy_price')
+        stock_code = position['stock_code']
+
+        # v17 컬럼 폴백 (호환성)
+        first_buy_price = position.get('first_buy_price') or buy_price
+        avg_buy_price = position.get('avg_buy_price') or buy_price
+        atr_at_buy = position.get('atr_at_buy')  # NULL 허용
+        atr_period = position.get('atr_period', 14)
+        tranche_count = position.get('tranche_count', 1)
+        # second_tranche_pending: 명시 전달이 우선. 미전달 시 설정 토글 따라 결정.
+        if 'second_tranche_pending' in position:
+            second_tranche_pending = 1 if position['second_tranche_pending'] else 0
+        else:
+            try:
+                from config import settings as _settings
+                second_tranche_pending = 1 if _settings.TRANCHE_ENTRY_ENABLED else 0
+            except Exception:
+                second_tranche_pending = 0
+
         with self.get_cursor() as cursor:
             # 같은 종목의 기존 pending/holding 엔트리 정리
             cursor.execute("""
                 UPDATE portfolio SET status = 'replaced'
                 WHERE stock_code = ? AND status IN ('pending', 'holding')
-            """, (position['stock_code'],))
+            """, (stock_code,))
 
             cursor.execute("""
                 INSERT INTO portfolio (
                     date, stock_code, stock_name, theme, weight,
                     shares, buy_price, current_price,
                     stop_loss, take_profit, status,
-                    original_shares, buy_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'holding', ?, ?)
+                    original_shares, buy_date,
+                    first_buy_price, avg_buy_price,
+                    tranche_count, second_tranche_executed, second_tranche_pending,
+                    atr_at_buy, atr_period
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'holding', ?, ?,
+                          ?, ?, ?, 0, ?, ?, ?)
             """, (
                 position.get('date'),
-                position['stock_code'],
+                stock_code,
                 position['stock_name'],
                 position.get('theme'),
                 position.get('weight'),
                 shares,
-                position.get('buy_price'),
-                position.get('buy_price'),  # current_price = buy_price 초기값
+                buy_price,
+                buy_price,  # current_price = buy_price 초기값
                 position.get('stop_loss'),
                 position.get('take_profit'),
                 shares,  # original_shares = shares
                 position.get('date'),  # buy_date = date
+                # v17 컬럼
+                first_buy_price,
+                avg_buy_price,
+                tranche_count,
+                second_tranche_pending,
+                atr_at_buy,
+                atr_period,
             ))
 
-        logger.info(f"포지션 저장: {position['stock_name']} (holding)")
+        logger.info(
+            f"포지션 저장: {position['stock_name']} (holding, tranche={tranche_count}, "
+            f"first={first_buy_price}, avg={avg_buy_price}, atr={atr_at_buy}, pending={second_tranche_pending})"
+        )
+
+    def update_portfolio_second_tranche(
+        self,
+        stock_code: str,
+        added_shares: int,
+        second_filled_price: float,
+        avg_buy_price: float,
+    ) -> int:
+        """v17 2차 진입(불타기) 체결 후 portfolio 업데이트.
+
+        - shares / original_shares: 누적 가산
+        - avg_buy_price: 가중평균으로 갱신
+        - tranche_count = 2, second_tranche_executed = 1, second_tranche_pending = 0
+        - first_buy_price는 불변 (손절/BE/트레일링 기준 유지)
+
+        Args:
+            stock_code: 종목코드
+            added_shares: 2차 매수 체결 수량
+            second_filled_price: 2차 체결가 (감사용, DB는 avg만 저장)
+            avg_buy_price: 호출 측에서 계산한 가중평균 단가
+
+        Returns:
+            업데이트된 row 수 (0이면 holding row 없음 — race 경고)
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE portfolio
+                SET shares = shares + ?,
+                    original_shares = original_shares + ?,
+                    avg_buy_price = ?,
+                    tranche_count = 2,
+                    second_tranche_executed = 1,
+                    second_tranche_pending = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE stock_code = ? AND status = 'holding'
+            """, (added_shares, added_shares, avg_buy_price, stock_code))
+            rowcount = cursor.rowcount
+
+        if rowcount == 0:
+            logger.warning(
+                f"[v17] 2차 진입 DB 업데이트 실패: {stock_code} - holding row 없음"
+            )
+        else:
+            logger.info(
+                f"[v17] 2차 진입 DB 업데이트: {stock_code} +{added_shares}주 @{second_filled_price}, "
+                f"avg={avg_buy_price:.2f}"
+            )
+        return rowcount
 
     def update_portfolio_shares(self, stock_code: str, new_shares: int) -> None:
         """

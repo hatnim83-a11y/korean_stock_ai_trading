@@ -375,6 +375,21 @@
   → 안전 실행 순서: systemctl stop → repair → systemctl start 권장 (스크립트에 안내 없음)
 - repair_theme_zeros_2026_05.py line 44: `datetime.now()` UTC → 백업 파일 타임스탬프 KST+9h 불일치 (기능 무관)
 
+### v17 분할 진입 + 불타기 + ATR 트레일링 패턴 (2026-05-21 검증)
+- `DRY_RUN_PYRAMID` 기본값 False → **배포 전 settings.yaml에 `DRY_RUN_PYRAMID=true` 명시 필수** (미설정 시 즉시 실발주)
+- 가중평균 계산 line 1505-1509: `pos.shares`(원래 총수량) 사용 → 분할 익절 후 실제 remaining_shares와 오차 발생
+  → pyramid 트리거(+5%)가 분할 익절(+12%) 전에 항상 먼저 발화하므로 실전 무해 (P3)
+- `_close_position_in_db`: profit_amount 계산이 `pos.buy_price(=first)` 기준 → 2차 진입 후 avg 기준 대비 과대계산
+  → DB 수익 통계 bias (trade_reviews, daily_snapshots), 거래 안전에는 무관 (P2)
+- `PYRAMID_MAX_WAIT_DAYS=10` config에만 존재, 코드 미사용 → `MAX_HOLD_DAYS_PROFIT=10`과 동일하여 자연 만료 (의도된 설계)
+- `_migrate_v17` 주석 line 635: "DEFAULT 1" → 실제 코드는 DEFAULT 0 (주석 오류, P3)
+- SQLite `ALTER TABLE ADD COLUMN DEFAULT 0` → 기존 row에 0 채워짐 → IS NULL 백필 noop (정상)
+- `first_buy_price/avg_buy_price REAL` (DEFAULT 없음) → 기존 row는 NULL → IS NULL 백필 작동 (정상)
+- BuyLock은 SellLock과 달리 try/finally 즉시 release (2차 진입은 1회성)
+- MarketGuard 캐시 없음: 2차 트리거 충족 후 1~2 사이클만 호출 → API 과다 위험 낮음
+- 13개 단위 테스트 전체 PASS 확인 (2026-05-21 실행 완료)
+- py_compile: atr_calculator.py/buy_lock.py/portfolio_monitor_v2.py/trading_engine.py/database.py 모두 통과
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`

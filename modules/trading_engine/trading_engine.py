@@ -1022,12 +1022,20 @@ class TradingEngine:
                     pass
 
     def _save_positions(self, orders: list[dict]) -> None:
-        """체결된 주문을 portfolio 테이블에 holding 상태로 저장"""
+        """체결된 주문을 portfolio 테이블에 holding 상태로 저장 (v17: 분할 진입 컬럼 포함)."""
         db = None
         try:
             db = Database()
             db.connect()
             today = str(now_kst().date())
+
+            # v17: 분할 진입 활성화 여부 + ATR 박제
+            tranche_enabled = False
+            try:
+                from config import settings as _settings
+                tranche_enabled = getattr(_settings, "TRANCHE_ENTRY_ENABLED", False)
+            except Exception:
+                pass
 
             for order in orders:
                 if not order.get("success"):
@@ -1035,6 +1043,7 @@ class TradingEngine:
 
                 quantity = order.get("quantity", 0)
                 filled_price = order.get("filled_price") or order.get("price", 0)
+                stock_code = order.get("stock_code")
 
                 # 체결량 0 또는 체결가 0은 portfolio 저장 skip
                 if quantity <= 0 or filled_price <= 0:
@@ -1043,9 +1052,18 @@ class TradingEngine:
                     )
                     continue
 
+                # v17: ATR 박제 (캐시 hit이면 즉시, miss면 동기 호출 — 09:20 prefetch로 캐시 채움)
+                atr_value = 0.0
+                if tranche_enabled and stock_code:
+                    try:
+                        from modules.atr_calculator import compute_atr
+                        atr_value = compute_atr(stock_code, period=14)
+                    except Exception as e:
+                        logger.debug(f"[v17] ATR 박제 실패 {stock_code}: {e}")
+
                 db.save_holding_position({
                     "date": today,
-                    "stock_code": order.get("stock_code"),
+                    "stock_code": stock_code,
                     "stock_name": order.get("stock_name"),
                     "theme": order.get("theme"),
                     "shares": quantity,
@@ -1053,6 +1071,13 @@ class TradingEngine:
                     "stop_loss": order.get("stop_loss"),
                     "take_profit": order.get("take_profit"),
                     "weight": order.get("weight"),
+                    # v17: 분할 진입 컬럼 (1차 매수 시점 — first/avg 모두 체결가, pending=True)
+                    "first_buy_price": filled_price,
+                    "avg_buy_price": filled_price,
+                    "tranche_count": 1,
+                    "second_tranche_pending": tranche_enabled,
+                    "atr_at_buy": atr_value if atr_value > 0 else None,
+                    "atr_period": 14,
                 })
 
         except Exception as e:

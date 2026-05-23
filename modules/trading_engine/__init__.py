@@ -70,6 +70,10 @@ from modules.trading_engine.portfolio_monitor_v2 import (
     SellReason
 )
 
+# v17 동시성 잠금 (Tranche Entry + Pyramid-In)
+from modules.trading_engine.sell_lock import sell_lock, SellLockRegistry
+from modules.trading_engine.buy_lock import buy_lock, BuyLockRegistry
+
 
 __all__ = [
     # 주문 API
@@ -98,5 +102,10 @@ __all__ = [
     "TRAILING_STOP_DISTANCE",
     # 모니터링 V2
     "PortfolioMonitorV2",
-    "SellReason"
+    "SellReason",
+    # v17 동시성 잠금
+    "sell_lock",
+    "SellLockRegistry",
+    "buy_lock",
+    "BuyLockRegistry"
 ]

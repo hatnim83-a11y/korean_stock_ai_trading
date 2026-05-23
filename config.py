@@ -309,22 +309,22 @@ class Settings(BaseSettings):
         description="기본 익절률 (+15%)"
     )
     
-    # ===== 분할 익절 설정 =====
+    # ===== 분할 익절 설정 (v17: avg_buy_price 기준으로 트리거, 임계/비율 상향) =====
     TAKE_PROFIT_1: float = Field(
-        default=0.10,
-        description="1차 익절률 (+10%)"
+        default=0.12,
+        description="1차 익절률 (+12%, avg_buy_price 기준 — v17 +10→+12 상향, 수익 끌기)"
     )
     TAKE_PROFIT_2: float = Field(
-        default=0.15,
-        description="2차 익절률 (+15%)"
+        default=0.20,
+        description="2차 익절률 (+20%, avg_buy_price 기준 — v17 +15→+20 상향)"
     )
     TAKE_PROFIT_3: float = Field(
-        default=0.20,
-        description="3차 익절률 (+20%)"
+        default=0.30,
+        description="3차 익절률 (+30%, avg_buy_price 기준 — v17 +20→+30 상향)"
     )
     PARTIAL_SELL_RATIO_1: float = Field(
-        default=0.30,
-        description="1차 익절 시 매도 비율 (30%)"
+        default=0.25,
+        description="1차 익절 시 매도 비율 (25% — v17 30→25 축소, 잔여 trend로)"
     )
     PARTIAL_SELL_RATIO_2: float = Field(
         default=0.20,
@@ -332,11 +332,79 @@ class Settings(BaseSettings):
     )
     PARTIAL_SELL_RATIO_3: float = Field(
         default=0.20,
-        description="3차 익절 시 매도 비율 (20%)"
+        description="3차 익절 시 매도 비율 (20%, 잔여 35%)"
+    )
+    PARTIAL_PROFIT_BASE: str = Field(
+        default="avg",
+        description=(
+            "분할 익절 트리거 기준 ('avg' 또는 'first'). "
+            "'avg'=평균단가 기준(권장, v17 기본), 'first'=1차 진입가 기준(롤백용). "
+            "손절/BE/트레일링/2차 트리거는 항상 first_buy_price 기준 (avg 정책 분기)"
+        )
     )
     PARTIAL_PROFIT_EARLY_MONITORING_ENABLED: bool = Field(
         default=True,
         description="09:00 조기 모니터링 + SellLock 활성화 (False=09:26 legacy)"
+    )
+
+    # ===== 분할 진입 + 불타기 (v17 Tranche Entry + Pyramid-In) =====
+    TRANCHE_ENTRY_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "분할 진입 + 불타기 마스터 토글. "
+            "True=1차 50% 매수 후 +5% 도달 시 2차 50% 추가 진입. "
+            "False=기존 단일 진입 100% (롤백). "
+            "⚠️ default=False (안전 default). 사용자 명시 승인 + 1주 dry-run 후 활성화 권장"
+        )
+    )
+    TRANCHE_FIRST_RATIO: float = Field(
+        default=0.5,
+        description="1차 진입 비율 (50% — 종목당 자금 중 1차에 사용)"
+    )
+    TRANCHE_SECOND_RATIO: float = Field(
+        default=0.5,
+        description="2차 진입(불타기) 비율 (50% — +5% 도달 시 추가 매수)"
+    )
+    PYRAMID_TRIGGER_PCT: float = Field(
+        default=0.05,
+        description=(
+            "2차 진입(불타기) 트리거 수익률 (+5%, first_buy_price 기준). "
+            "BE 손절 활성화(+5%)와 동기화 — 1차분 보호 확보 후 2차 진입"
+        )
+    )
+    PYRAMID_MAX_WAIT_DAYS: int = Field(
+        default=10,
+        description="2차 진입 대기 최대 영업일 (보유기간과 동일, 1차 매도 시 자동 취소)"
+    )
+    TRANCHE_SECOND_AMOUNT_MODE: str = Field(
+        default="mirror_first",
+        description=(
+            "2차 진입 금액 산정 모드. "
+            "'mirror_first'=1차 매수금 그대로(권장, 균등 진입), "
+            "'orderable_cash'=KIS 현재가용 현금 기준 재산정"
+        )
+    )
+    DRY_RUN_PYRAMID: bool = Field(
+        default=True,
+        description=(
+            "2차 진입 dry-run 모드. True=KIS 실발주 차단(시뮬레이션만, 로그/알림만 발화). "
+            "⚠️ default=True (안전 default). 1주 검증 후 False 전환. "
+            "TRANCHE_ENTRY_ENABLED=True 상태에서만 의미 있음(1차 진입은 영향 X)"
+        )
+    )
+
+    # ===== ATR 기반 트레일링 (v17 — max(고정값, 2.0×ATR)) =====
+    TRAILING_USE_ATR: bool = Field(
+        default=True,
+        description=(
+            "ATR 기반 트레일링 활성화. "
+            "True=trailing_pct = max(TRAIL_LEVELn_PCT, ATR_MULTIPLIER × atr_at_buy / first_buy_price). "
+            "False=고정값만 사용 (롤백)"
+        )
+    )
+    ATR_PERIOD: int = Field(
+        default=14,
+        description="ATR 계산 기간 (전통적 표준 14일, True Range 14일 평균)"
     )
 
     # ===== 트레일링 스탑 =====
@@ -403,7 +471,10 @@ class Settings(BaseSettings):
 
     ATR_MULTIPLIER: float = Field(
         default=2.0,
-        description="ATR 기반 손절 계산 시 배수"
+        description=(
+            "ATR 배수 (트레일링 폭 계산 + 기존 손절 계산 공용). "
+            "v17 트레일링: effective_pct = max(고정값, ATR_MULTIPLIER × atr_at_buy / first_buy_price)"
+        )
     )
     
     # ===== 스크리닝 조건 =====
