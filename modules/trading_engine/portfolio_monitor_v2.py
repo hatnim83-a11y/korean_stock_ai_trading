@@ -1387,6 +1387,17 @@ class PortfolioMonitorV2:
         if not getattr(settings, "TRANCHE_ENTRY_ENABLED", False):
             return False
 
+        # 1-B) 종가베팅 시간 보호 가드 — 15:15 이후 v17 2차 진입 차단 (2026-05-23 hotfix)
+        # 종가베팅 phase1=15:18 / phase2=15:25 매수 시점 보호. 종가베팅 cap=50% 정책
+        # 충돌 방지 (closing_bet_pool_cap 50% 정책 + absorb_swing_idle=true 환경).
+        # 15:15~15:30 사이 +5% 도달 종목은 자연 만료(다음 거래일 재발화 또는 보유기간 종료).
+        now = now_kst()
+        if now.hour == 15 and now.minute >= 15:
+            logger.debug(
+                f"[v17] {pos.stock_name} 2차 진입 skip: 15:15+ 종가베팅 시간 보호"
+            )
+            return False
+
         # 2) 상태 가드
         if pos.second_tranche_executed or not pos.second_tranche_pending:
             return False
@@ -1447,6 +1458,40 @@ class PortfolioMonitorV2:
                     target_amount = min(target_amount, max(0, cash))
                 except Exception as e:
                     logger.debug(f"[v17] orderable_cash 조회 실패, mirror_first 폴백: {e}")
+
+            # 7-B) swing_capital_pool 한도 적용 (2026-05-23 hotfix)
+            # 종가베팅 cap 50% 정책 정합 — v17 1차+2차 합쳐 swing_pool(90%) 한도 절대 안 넘김.
+            # fund_guard.compute_capital_limit 의 swing_used 계산(cost_basis) 과 동일 식.
+            # 환경변수 SWING_CAPITAL_RATIO 미설정 시 default 0.9 (settings.yaml과 동기화).
+            try:
+                import os as _os
+                swing_capital_ratio = float(_os.getenv("SWING_CAPITAL_RATIO", "0.9"))
+                # TOTAL_CAPITAL 이 동적이면 trading_engine.get_total_value 사용, 폴백 settings.TOTAL_CAPITAL
+                total_capital_now = getattr(settings, "TOTAL_CAPITAL", 0)
+                try:
+                    if hasattr(self.trading_engine, "get_balance"):
+                        bal = self.trading_engine.get_balance()
+                        tv = bal.get("total_value") or 0
+                        if tv > 0:
+                            total_capital_now = tv
+                except Exception:
+                    pass
+                if total_capital_now > 0:
+                    swing_pool = int(total_capital_now * swing_capital_ratio)
+                    swing_used = sum(
+                        (p.first_buy_price or p.buy_price or 0) * (p.shares or 0)
+                        for p in self.positions.values()
+                    )
+                    swing_available = max(0, swing_pool - swing_used)
+                    if target_amount > swing_available:
+                        logger.info(
+                            f"[v17] {stock_name} 2차 진입 금액 축소: "
+                            f"target={target_amount:,.0f}원 → swing_pool 잔여={swing_available:,}원 "
+                            f"(used={swing_used:,}원 / pool={swing_pool:,}원, ratio={swing_capital_ratio:.0%})"
+                        )
+                        target_amount = float(swing_available)
+            except Exception as e:
+                logger.debug(f"[v17] swing_pool 한도 계산 실패 {stock_code}: {e}")
 
             # 8) 2차 매수 수량 계산
             second_qty = int(target_amount // max(1, pos.current_price))

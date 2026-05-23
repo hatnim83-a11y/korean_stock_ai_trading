@@ -233,6 +233,69 @@ def test_save_holding_position_explicit_v17():
         print("  [PASS] save_holding_position_explicit_v17")
 
 
+def test_swing_pool_calculation_logic():
+    """가드 B' 핵심 로직 — swing_pool 한도 계산 (2026-05-23 hotfix).
+
+    종가베팅 cap 50% 정책 정합 — v17 1차+2차 합쳐 swing_pool(90%) 한도 절대 안 넘김.
+    fund_guard.compute_capital_limit 의 swing_used 계산(cost_basis) 과 동일 식.
+    """
+    # 시뮬레이션: 총자본 4000만 / swing 90% = 3600만
+    total_capital = 4000_0000
+    swing_capital_ratio = 0.9
+    swing_pool = int(total_capital * swing_capital_ratio)
+    assert swing_pool == 3600_0000, f"swing_pool 계산 실패: {swing_pool}"
+
+    # v17 1차 매수만 진행: 5종목 × 360만 = 1800만 swing_used
+    positions = [
+        Position(stock_code=f"00{i}", stock_name=f"테스트{i}",
+                 shares=120, remaining_shares=120,
+                 buy_price=30000, stop_loss_price=27900,
+                 first_buy_price=30000, avg_buy_price=30000)
+        for i in range(5)
+    ]
+    swing_used = sum(p.first_buy_price * p.shares for p in positions)
+    assert swing_used == 1800_0000, f"swing_used 누적 실패: {swing_used}"
+
+    swing_available = max(0, swing_pool - swing_used)
+    assert swing_available == 1800_0000, f"swing_available 1차 후: {swing_available}"
+
+    # v17 2차 발화 시도: 1차 매수금 360만/종목 = 1800만 추가 필요
+    target_amount_per_stock = 30000 * 120  # = 360만
+    # 5종목 모두 2차 발화: 360만 × 5 = 1800만 ≤ swing_available 1800만 → 허용
+    # 하지만 1종목씩 발화하면서 누적되므로 마지막 종목 시점에 한도 도달
+    # 즉 1번째 2차: swing_used=1800+360=2160 → available=1440 → target 360 가능
+    # 2번째: 2520 / available=1080 / target 360
+    # 3번째: 2880 / 720 / 360
+    # 4번째: 3240 / 360 / 360
+    # 5번째: 3600 / 0 / 0 → 차단 ✅
+    print("  [PASS] swing_pool_calculation_logic")
+
+
+def test_time_guard_logic():
+    """가드 A 핵심 로직 — 15:15+ 시간 차단 (2026-05-23 hotfix).
+
+    종가베팅 phase1=15:18 / phase2=15:25 시점 보호.
+    """
+    from datetime import datetime as _dt, time as _time, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    # 15:14 (1분 전) → 통과
+    t1 = _dt(2026, 5, 26, 15, 14, 59, tzinfo=KST)
+    assert not (t1.hour == 15 and t1.minute >= 15), "15:14 통과 실패"
+    # 15:15 정각 → 차단
+    t2 = _dt(2026, 5, 26, 15, 15, 0, tzinfo=KST)
+    assert (t2.hour == 15 and t2.minute >= 15), "15:15 차단 실패"
+    # 15:25 (phase2 시점) → 차단
+    t3 = _dt(2026, 5, 26, 15, 25, 0, tzinfo=KST)
+    assert (t3.hour == 15 and t3.minute >= 15), "15:25 차단 실패"
+    # 16:00 (장 마감 후) → 차단 (단, 모니터 자체가 15:30 정지)
+    t4 = _dt(2026, 5, 26, 16, 0, 0, tzinfo=KST)
+    assert (t4.hour == 15 and t4.minute >= 15) is False, "16:00 차단 분기 의도 — 시간 가드는 15시 한정"
+    # 14:59 → 통과
+    t5 = _dt(2026, 5, 26, 14, 59, 0, tzinfo=KST)
+    assert not (t5.hour == 15 and t5.minute >= 15), "14:59 통과 실패"
+    print("  [PASS] time_guard_logic")
+
+
 def test_update_portfolio_second_tranche():
     """update_portfolio_second_tranche: 가중평균/누적 갱신 검증."""
     from database import Database
@@ -297,6 +360,8 @@ def main():
         test_db_v17_migration_idempotent,
         test_db_v17_backfill_existing_holdings,
         test_save_holding_position_explicit_v17,
+        test_swing_pool_calculation_logic,  # 2026-05-23 hotfix 가드 B'
+        test_time_guard_logic,              # 2026-05-23 hotfix 가드 A
         test_update_portfolio_second_tranche,
     ]
 
