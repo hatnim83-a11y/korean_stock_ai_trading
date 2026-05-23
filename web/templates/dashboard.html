@@ -732,17 +732,17 @@ async function loadPortfolio() {
   if (!holdingsData.length) {
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-tertiary)">보유 종목 없음</td></tr>';
   } else {
-    tbody.innerHTML = holdingsData.map(h => `<tr data-buy-msg="${escapeHtml(h.buy_message || '')}">
-      <td><strong>${escapeHtml(h.stock_name)}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${escapeHtml(h.stock_code)}</span></td>
+    tbody.innerHTML = holdingsData.map(h => `<tr data-buy-msg="${escapeHtml(h.buy_message || '')}" data-tranche="${h.tranche_count || 1}" data-avg-price="${h.avg_buy_price || h.buy_price}" data-first-price="${h.first_buy_price || h.buy_price}">
+      <td><strong>${escapeHtml(h.stock_name)}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${escapeHtml(h.stock_code)}</span>${h.tranche_count === 2 ? '<br><span style="font-size:0.66rem;color:#f59e0b">🔥 2/2 불타기</span>' : (h.second_tranche_pending ? '<br><span style="font-size:0.66rem;color:var(--text-tertiary)">1/2 대기</span>' : '')}</td>
       <td>${escapeHtml(h.theme || '-')}</td>
       <td>${fmt(h.shares)}</td>
-      <td>${fmt(h.buy_price)}</td>
+      <td>${fmt(h.buy_price)}${h.tranche_count === 2 ? '<br><span style="font-size:0.66rem;color:var(--text-tertiary)">avg ' + fmt(h.avg_buy_price) + ' / first ' + fmt(h.first_buy_price) + '</span>' : ''}</td>
       <td>${fmt(h.current_price)}</td>
       <td>${fmt(h.eval_amount)}원</td>
       <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
       <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
       <td>${h.hold_days}일<span style="color:var(--text-tertiary);font-size:0.72rem">(${h.hold_trading_days})</span></td>
-      <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
+      <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+' <small>(first)</small></span>' : ''}${h.atr_at_buy ? '<br><span style="font-size:0.66rem;color:var(--text-tertiary)">ATR ' + fmt(h.atr_at_buy) + '</span>' : ''}</td>
     </tr>`).join('');
   }
 
@@ -1136,17 +1136,17 @@ function updatePortfolioTable(d) {
 
   const tbody = document.getElementById('portfolio-body');
   if (!d.holdings.length) return;
-  tbody.innerHTML = d.holdings.map(h => `<tr data-buy-msg="${escapeHtml(h.buy_message || '')}">
-    <td><strong>${escapeHtml(h.stock_name)}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${escapeHtml(h.stock_code)}</span></td>
+  tbody.innerHTML = d.holdings.map(h => `<tr data-buy-msg="${escapeHtml(h.buy_message || '')}" data-tranche="${h.tranche_count || 1}" data-avg-price="${h.avg_buy_price || h.buy_price}" data-first-price="${h.first_buy_price || h.buy_price}">
+    <td><strong>${escapeHtml(h.stock_name)}</strong><br><span style="color:var(--text-tertiary);font-size:0.72rem">${escapeHtml(h.stock_code)}</span>${h.tranche_count === 2 ? '<br><span style="font-size:0.66rem;color:#f59e0b">🔥 2/2 불타기</span>' : (h.second_tranche_pending ? '<br><span style="font-size:0.66rem;color:var(--text-tertiary)">1/2 대기</span>' : '')}</td>
     <td>${escapeHtml(h.theme || '-')}</td>
     <td>${fmt(h.shares)}</td>
-    <td>${fmt(h.buy_price)}</td>
+    <td>${fmt(h.buy_price)}${h.tranche_count === 2 ? '<br><span style="font-size:0.66rem;color:var(--text-tertiary)">avg ' + fmt(h.avg_buy_price) + ' / first ' + fmt(h.first_buy_price) + '</span>' : ''}</td>
     <td>${fmt(h.current_price)}</td>
     <td>${fmt(h.eval_amount)}원</td>
     <td class="${profitClass(h.profit_rate)}">${fmtPct(h.profit_rate)}</td>
     <td class="${profitClass(h.profit)}">${fmt(h.profit)}원</td>
     <td>${h.hold_days}일<span style="color:var(--text-tertiary);font-size:0.72rem">(${h.hold_trading_days})</span></td>
-    <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+'</span>' : ''}</td>
+    <td>${badgeLvl(h.trailing_level)}${h.trailing_stop_price ? '<br><span style="font-size:0.68rem;color:var(--text-tertiary)">@'+fmt(h.trailing_stop_price)+' <small>(first)</small></span>' : ''}${h.atr_at_buy ? '<br><span style="font-size:0.66rem;color:var(--text-tertiary)">ATR ' + fmt(h.atr_at_buy) + '</span>' : ''}</td>
   </tr>`).join('');
 }
 

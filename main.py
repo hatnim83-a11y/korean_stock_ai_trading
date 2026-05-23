@@ -1339,6 +1339,19 @@ class TradingSystem:
             # 종목당 상한: 총자산 ÷ MAX_POSITIONS (동적 — 수익 누적 반영, 몰빵 방지)
             max_per_stock = int(total_capital) // settings.MAX_POSITIONS
             per_slot_capital = min(available_cash // available_slots, max_per_stock)
+
+            # v17 분할 진입: 1차 진입은 TRANCHE_FIRST_RATIO(기본 50%)만 사용.
+            # 나머지는 모니터에서 +5% 도달 시 2차 진입(불타기)으로 활용 (보유 종료까지 대기).
+            if settings.TRANCHE_ENTRY_ENABLED:
+                tranche_ratio = settings.TRANCHE_FIRST_RATIO
+                per_slot_capital_full = per_slot_capital
+                per_slot_capital = int(per_slot_capital * tranche_ratio)
+                logger.info(
+                    f"   🔀 분할 진입 활성: 1차 {tranche_ratio*100:.0f}% 사용 "
+                    f"({per_slot_capital_full:,.0f}원 → {per_slot_capital:,.0f}원/종목, "
+                    f"2차 trigger=+{settings.PYRAMID_TRIGGER_PCT*100:.0f}% first 기준)"
+                )
+
             target_capital = per_slot_capital * len(new_ai_stocks)
             capital_for_new = min(target_capital, available_cash)
             logger.info(f"   슬롯 배분: {per_slot_capital:,.0f}원/종목 × {len(new_ai_stocks)}종목 (상한: {max_per_stock:,.0f}원, 총자산÷{settings.MAX_POSITIONS})")
@@ -1379,11 +1392,23 @@ class TradingSystem:
                         filled_price = order.get("filled_price") or order.get("price", 0)
                         quantity = order.get("quantity", 0)
                         requested_qty = order.get("requested_quantity", quantity)
+                        # v17: 분할 진입 활성 시 1차 라벨 + ATR 박제값 표시
+                        tranche_label = None
+                        atr_value = None
+                        if settings.TRANCHE_ENTRY_ENABLED:
+                            tranche_label = f"1/2 진입 ({settings.TRANCHE_FIRST_RATIO*100:.0f}%)"
+                            try:
+                                from modules.atr_calculator import compute_atr
+                                atr_value = compute_atr(order.get("stock_code", ""), period=settings.ATR_PERIOD)
+                            except Exception:
+                                pass
                         self.notifier.send_buy_alert(
                             order.get("stock_name", ""),
                             order.get("stock_code", ""),
                             quantity,
-                            filled_price
+                            filled_price,
+                            tranche_label=tranche_label,
+                            atr_at_buy=atr_value if atr_value and atr_value > 0 else None,
                         )
                         # limit_aggressive 부분체결 경고
                         remaining = order.get("remaining_shares", 0)
@@ -1654,6 +1679,14 @@ class TradingSystem:
         cleared = sell_lock.clear_all()
         if cleared > 0:
             logger.info(f"   [SellLock] 일괄 해제: {cleared}건")
+        # v17 BuyLock 일괄 해제 — 2차 진입 발주 도중 예외 시 누수 차단 (2차 안전망)
+        try:
+            from modules.trading_engine.buy_lock import buy_lock
+            buy_cleared = buy_lock.clear_all()
+            if buy_cleared > 0:
+                logger.info(f"   [v17 BuyLock] 일괄 해제: {buy_cleared}건")
+        except Exception as e:
+            logger.debug(f"[v17] BuyLock clear_all 실패: {e}")
     
     def _on_stop_loss(self, position, price) -> None:
         """손절 발동 콜백"""

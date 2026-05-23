@@ -285,11 +285,13 @@ class TelegramNotifier:
         quantity: int,
         price: int,
         theme: Optional[str] = None,
-        score: Optional[float] = None
+        score: Optional[float] = None,
+        tranche_label: Optional[str] = None,
+        atr_at_buy: Optional[float] = None,
     ) -> bool:
         """
-        매수 완료 알림
-        
+        매수 완료 알림 (v17: 분할 진입 라벨 + ATR 표시)
+
         Args:
             stock_name: 종목명
             stock_code: 종목코드
@@ -297,14 +299,21 @@ class TelegramNotifier:
             price: 매수가
             theme: 테마
             score: 점수
-        
+            tranche_label: v17 분할 진입 라벨 (예: "1/2 진입 (50%)")
+            atr_at_buy: v17 ATR(14일) 박제값
+
         Returns:
             전송 성공 여부
         """
         amount = quantity * price
-        
+
+        # v17: 분할 진입 활성 시 헤더에 라벨 표시
+        header = "🟢 *매수 완료*"
+        if tranche_label:
+            header = f"🟢 *매수 완료* — {tranche_label}"
+
         text = f"""
-🟢 *매수 완료*
+{header}
 
 📈 {stock_name} ({stock_code})
 💰 {quantity}주 × {price:,}원 = {amount:,}원
@@ -313,9 +322,11 @@ class TelegramNotifier:
             text += f"🏷️ 테마: {theme}\n"
         if score:
             text += f"⭐ 점수: {score:.1f}\n"
-        
+        if atr_at_buy and atr_at_buy > 0:
+            text += f"📊 ATR(14): {atr_at_buy:,.0f}원\n"
+
         text += f"📅 {now_kst().strftime('%H:%M:%S')}"
-        
+
         return self.send_message(text)
     
     def send_sell_alert(

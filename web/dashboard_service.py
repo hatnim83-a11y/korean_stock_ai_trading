@@ -126,6 +126,13 @@ async def get_portfolio_data() -> dict:
         # 트레일링 상태
         ts = monitor_state.get(stock_code, {})
 
+        # v17: 분할 진입 컬럼 노출 (정책 분기 가시화)
+        first_buy_price = h.get("first_buy_price") or buy_price
+        avg_buy_price = h.get("avg_buy_price") or buy_price
+        tranche_count = h.get("tranche_count") or 1
+        second_tranche_pending = bool(h.get("second_tranche_pending") or 0)
+        atr_at_buy = h.get("atr_at_buy")
+
         result_holdings.append({
             "stock_code": stock_code,
             "stock_name": h["stock_name"],
@@ -145,6 +152,12 @@ async def get_portfolio_data() -> dict:
             "highest_price": ts.get("highest_price"),
             "max_profit_rate": ts.get("max_profit_rate"),
             "buy_message": h.get("buy_message") or "",
+            # v17 (Planner P3): 정책 분기 가시화 — 트레일링/손절=first / 익절=avg
+            "first_buy_price": int(first_buy_price) if first_buy_price else buy_price,
+            "avg_buy_price": int(avg_buy_price) if avg_buy_price else buy_price,
+            "tranche_count": int(tranche_count),
+            "second_tranche_pending": second_tranche_pending,
+            "atr_at_buy": float(atr_at_buy) if atr_at_buy else None,
         })
 
     unrealized_pnl = total_eval - total_invest

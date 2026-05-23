@@ -57,12 +57,18 @@ class SellReason(Enum):
 
 @dataclass
 class Position:
-    """포지션 정보"""
+    """포지션 정보 (v17: 분할 진입 + 불타기 + ATR 트레일링 지원)
+
+    정책 분기 (v17 핵심):
+    - profit_rate (first_buy_price 기준): 손절/BE/트레일링/2차 트리거
+    - profit_rate_avg (avg_buy_price 기준): 분할 익절 트리거
+    - buy_price는 first_buy_price의 alias로 유지 (deprecated, 호환성용)
+    """
     stock_code: str
     stock_name: str
-    shares: int  # 원본 수량
-    remaining_shares: int  # 남은 수량
-    buy_price: float
+    shares: int  # 현재 보유 수량 (분할 진입 시 1차+2차 합산)
+    remaining_shares: int  # 분할 익절 후 잔여 수량
+    buy_price: float  # ⚠️ DEPRECATED: first_buy_price와 동일 유지 (호환성 alias)
     stop_loss_price: float
     current_price: float = 0
     highest_price: float = 0  # 트레일링용
@@ -77,32 +83,91 @@ class Position:
 
     # 이익 추종 전략 상태 (Let Profits Run)
     trailing_active: bool = False  # 트레일링 활성화 여부
-    trailing_level: int = 0  # 트레일링 레벨 (0=미활성, 1=5%, 2=3%, 3=2%)
-    max_profit_rate: float = 0.0  # 최대 수익률 기록
+    trailing_level: int = 0  # 트레일링 레벨 (0=미활성, 1=L1, 2=L2, 3=L3)
+    max_profit_rate: float = 0.0  # 최대 수익률 기록 (first_buy_price 기준)
 
     # WebSocket 가격 수신 확인 (재시작 시 오발동 방지)
     price_confirmed: bool = False
-    
+
+    # ===== v17: 분할 진입 + 불타기 + ATR 트레일링 =====
+    # 1차 진입가 (불변, 손절/BE/2차 트리거/트레일링 기준)
+    first_buy_price: float = 0.0
+    # 평균단가 (2차 진입 시 가중평균 갱신, 분할 익절 트리거 기준)
+    avg_buy_price: float = 0.0
+    # 진입 회차 (1=1차만, 2=2차까지 완료)
+    tranche_count: int = 1
+    # 2차 진입 완료 플래그 (중복 발주 방지)
+    second_tranche_executed: bool = False
+    # 2차 진입 대기 상태 (신규 매수 시 True, 2차 완료/매도 시 False)
+    second_tranche_pending: bool = False
+    # ATR(N일) 박제값 (트레일링 폭 계산용, 0.0이면 고정값 폴백)
+    atr_at_buy: float = 0.0
+    # ATR 기간 (감사용)
+    atr_period: int = 14
+
+    def __post_init__(self) -> None:
+        """first_buy_price 미설정 시 buy_price와 동기화 (마이그레이션 호환).
+
+        기존 코드에서 Position(buy_price=X)로 생성한 경우 first/avg를 buy_price로 폴백.
+        """
+        if self.first_buy_price <= 0:
+            self.first_buy_price = self.buy_price
+        if self.avg_buy_price <= 0:
+            # avg = first 폴백 (catastrophic bug 방어 — Coder P2)
+            self.avg_buy_price = self.first_buy_price
+
     @property
     def profit(self) -> float:
-        """현재 수익금 (남은 수량 기준)"""
-        return (self.current_price - self.buy_price) * self.remaining_shares
-    
+        """현재 수익금 (남은 수량 기준, avg_buy_price 기준 — 실제 손익)"""
+        return (self.current_price - self.avg_buy_price) * self.remaining_shares
+
     @property
     def profit_rate(self) -> float:
-        """현재 수익률"""
-        if self.buy_price > 0:
-            return (self.current_price - self.buy_price) / self.buy_price
+        """현재 수익률 (first_buy_price 기준 — 손절/BE/트레일링/2차 트리거 통일).
+
+        ⚠️ 익절 트리거는 profit_rate_avg를 사용해야 함 (정책 분기).
+        """
+        if self.first_buy_price > 0:
+            return (self.current_price - self.first_buy_price) / self.first_buy_price
         return 0
-    
+
+    @property
+    def profit_rate_avg(self) -> float:
+        """평균단가 기준 수익률 (분할 익절 트리거 전용 — v17 정책 분기).
+
+        2차 진입 후 평균단가가 상승하면 익절 기준도 동기 상향 → 실제 수익 실현 직관.
+        """
+        if self.avg_buy_price > 0:
+            return (self.current_price - self.avg_buy_price) / self.avg_buy_price
+        return 0
+
+    def effective_trailing_pct(self, fixed_pct: float) -> float:
+        """트레일링 폭 계산: max(고정값, ATR_MULTIPLIER × atr_at_buy / first_buy_price).
+
+        Args:
+            fixed_pct: 레벨별 고정 트레일링 비율 (예: TRAIL_LEVEL1_PCT=0.04)
+
+        Returns:
+            실제 적용할 트레일링 비율. ATR 데이터 누락 시 고정값 폴백.
+
+        예시:
+            - 변동성 큰 종목: ATR=2000, first=50000, MULT=2.0 → atr_pct=8% > 4%(L1) → 8% 적용
+            - 안정 종목: ATR=500, first=50000, MULT=2.0 → atr_pct=2% < 4%(L1) → 4% 적용
+            - ATR 누락 (atr_at_buy=0): atr_pct=0 → max(고정, 0) = 고정값 안전 폴백
+        """
+        if not settings.TRAILING_USE_ATR or self.atr_at_buy <= 0 or self.first_buy_price <= 0:
+            return fixed_pct
+        atr_pct = (settings.ATR_MULTIPLIER * self.atr_at_buy) / self.first_buy_price
+        return max(fixed_pct, atr_pct)
+
     @property
     def value(self) -> float:
         """현재 평가금액 (남은 수량 기준)"""
         return self.current_price * self.remaining_shares
-    
+
     @property
     def hold_days(self) -> int:
-        """보유 영업일수 (주말/공휴일 제외)"""
+        """보유 영업일수 (주말/공휴일 제외, 1차 매수일 기준 — 2차 진입 후에도 리셋 X)"""
         return count_trading_days(self.buy_date)
 
 
@@ -500,17 +565,61 @@ class PortfolioMonitorV2:
             # state의 highest_price가 현재 buy_price 대비 비현실적으로 크면
             # 직전 매수 사이클의 잔재로 판단하고 스킵 (2026-05-12 한화오션 사건 차단).
             # DB 경로는 _dump_monitor_state로 매 30초 갱신되므로 잔재 가능성 없음.
+            #
+            # v17 (Coder P2): tranche_count==2 인 경우 highest > first × 1.02 가 정상 데이터.
+            #   - 2차 진입 후 첫 거래일에 +5% 이상 도달은 평범
+            #   - threshold를 max(first×1.02, avg×1.02)로 완화하여 정상 데이터 보호
+            #   - tranche_count==1 인 경우 기존 임계 그대로 유지
             if not db_source:
                 saved_highest_check = s.get("highest_price", 0) or 0
-                threshold = pos.buy_price * _RESIDUE_SANITY_RATIO
+                saved_tranche_count = s.get("tranche_count", pos.tranche_count) or 1
+                saved_avg = s.get("avg_buy_price", 0) or 0
+                base_first = pos.first_buy_price if pos.first_buy_price > 0 else pos.buy_price
+                if saved_tranche_count >= 2 and saved_avg > 0:
+                    threshold = max(
+                        base_first * _RESIDUE_SANITY_RATIO,
+                        saved_avg * _RESIDUE_SANITY_RATIO,
+                    )
+                else:
+                    threshold = base_first * _RESIDUE_SANITY_RATIO
                 if saved_highest_check > threshold:
                     logger.warning(
                         f"🚮 JSON 잔재 무시: {pos.stock_name} ({code}) "
                         f"highest={saved_highest_check:,}원 > "
-                        f"buy_price×1.02={threshold:,.0f}원 → 직전 매수 사이클 잔재"
+                        f"threshold={threshold:,.0f}원 (tranche={saved_tranche_count}) "
+                        f"→ 직전 매수 사이클 잔재"
                     )
                     skipped_residue += 1
                     continue
+
+            # v17: 분할 진입 상태 복원 (avg_buy_price/tranche_count/executed/pending/atr)
+            # 폴백: avg <= 0 → avg = first 강제 (catastrophic bug 방어 — Coder P2)
+            saved_first = s.get("first_buy_price", 0) or 0
+            if saved_first > 0:
+                pos.first_buy_price = saved_first
+            else:
+                # 마이그레이션 호환: 구 JSON에 first 없으면 buy_price로 폴백
+                if pos.first_buy_price <= 0:
+                    pos.first_buy_price = pos.buy_price
+
+            saved_avg = s.get("avg_buy_price", 0) or 0
+            if saved_avg <= 0:
+                # 폴백: avg = first (분할 익절 트리거 무한대 방지)
+                pos.avg_buy_price = pos.first_buy_price
+                if not db_source:
+                    logger.warning(
+                        f"⚠️ {pos.stock_name} avg_buy_price 누락 → first로 폴백 "
+                        f"(={pos.first_buy_price:,.0f})"
+                    )
+            else:
+                pos.avg_buy_price = saved_avg
+
+            pos.tranche_count = s.get("tranche_count", 1) or 1
+            pos.second_tranche_executed = bool(s.get("second_tranche_executed", False))
+            pos.second_tranche_pending = bool(s.get("second_tranche_pending", False))
+            saved_atr = s.get("atr_at_buy", 0) or 0
+            if saved_atr > 0:
+                pos.atr_at_buy = saved_atr
 
             # current_price 복원 (WebSocket 수신 전 buy_price로 오발동 방지)
             saved_price = s.get("current_price", 0)
@@ -720,7 +829,12 @@ class PortfolioMonitorV2:
         logger.info("\n".join(lines))
 
     def _dump_monitor_state(self) -> None:
-        """트레일링 상태를 DB + JSON에 동시 저장 (30초 간격)"""
+        """트레일링 상태를 DB + JSON에 동시 저장 (30초 간격).
+
+        v17: 분할 진입 + 불타기 키 6개 추가 (first_buy_price, avg_buy_price,
+        tranche_count, second_tranche_executed, second_tranche_pending, atr_at_buy)
+        → 봇 재시작 후 복원 시 정책 분기 유지 + sanity 임계 정확 판정.
+        """
         state = {}
         for code, pos in self.positions.items():
             state[code] = {
@@ -734,6 +848,13 @@ class PortfolioMonitorV2:
                 "partial_2_executed": pos.partial_2_executed,
                 "partial_3_executed": pos.partial_3_executed,
                 "remaining_shares": pos.remaining_shares,
+                # v17: 분할 진입 + 불타기 + ATR 상태
+                "first_buy_price": pos.first_buy_price,
+                "avg_buy_price": pos.avg_buy_price,
+                "tranche_count": pos.tranche_count,
+                "second_tranche_executed": pos.second_tranche_executed,
+                "second_tranche_pending": pos.second_tranche_pending,
+                "atr_at_buy": pos.atr_at_buy,
             }
 
         # 1) JSON 파일 (대시보드 캐시용)
@@ -815,11 +936,17 @@ class PortfolioMonitorV2:
                 result.stop_loss_triggered.append(stock_code)
                 continue
             
-            # 2. 분할 익절 체크 (3단계)
+            # 2. 분할 익절 체크 (3단계) — v17: avg_buy_price 기준
             partial_sell = await self._check_and_execute_partial_profit(pos)
             if partial_sell:
                 result.partial_profit_triggered.append(stock_code)
-                continue  # 이번 주기 트레일링 체크 스킵, 다음 주기에 처리
+                continue  # 이번 주기 2차/트레일링 스킵 (우선순위: Sell > Buy)
+
+            # 2-B. v17 2차 진입(불타기) 체크 — 분할익절 미발화 시에만 평가
+            # 우선순위 가드: SellLock 점유 시 skip → 다음 사이클 재평가
+            pyramid_executed = await self._check_and_execute_pyramid_in(pos)
+            if pyramid_executed:
+                continue  # 트레일링 체크 스킵 (avg 갱신 후 다음 사이클부터 적용)
 
             # 3. 트레일링 스탑 체크
             if self._check_trailing_stop(pos):
@@ -1075,12 +1202,22 @@ class PortfolioMonitorV2:
     
     async def _check_and_execute_partial_profit(self, pos: Position) -> bool:
         """
-        분할 익절 체크 및 실행
+        분할 익절 체크 및 실행 (v17: avg_buy_price 기준 트리거 — 정책 분기)
+
+        v17 변경:
+        - 트리거 기준: `pos.profit_rate_avg` (평균단가 기준, 수익 실현 직관)
+        - PARTIAL_PROFIT_BASE='first' 토글 시 기존 first 기준 복귀 (롤백 안전장치)
+        - 임계값 +12/+20/+30%, 비율 25/20/20% (config에서 갱신)
 
         Returns:
             분할 매도 실행 여부
         """
-        profit_rate = pos.profit_rate
+        # v17: PARTIAL_PROFIT_BASE 토글로 트리거 기준 선택 (avg 권장 / first 롤백용)
+        base_mode = getattr(settings, "PARTIAL_PROFIT_BASE", "avg")
+        if base_mode == "first":
+            profit_rate = pos.profit_rate
+        else:
+            profit_rate = pos.profit_rate_avg
 
         # SellLock: 매도 잡(midweek/hold_period)이 같은 종목을 처리 중이면 분할익절 skip
         # 트리거 조건이 충족된 경우만 잠금 시도 (건당 acquire 호출 비용 최소화)
@@ -1220,6 +1357,229 @@ class PortfolioMonitorV2:
                     logger.error(f"on_sell_failed 콜백 오류: {e}")
             return False
     
+    # ===== v17: 2차 진입(불타기) =====
+
+    async def _check_and_execute_pyramid_in(self, pos: Position) -> bool:
+        """v17 2차 진입(불타기) 체크 및 실행.
+
+        트리거 (모두 AND):
+        - settings.TRANCHE_ENTRY_ENABLED 활성화
+        - pos.second_tranche_pending == True
+        - pos.second_tranche_executed == False
+        - pos.profit_rate (first_buy_price 기준) >= PYRAMID_TRIGGER_PCT (+5%)
+
+        사전 조건:
+        - MarketGuard 재호출 (CRISIS/DANGER 시 스킵)
+        - SellLock 미점유 (분할익절 발화 사이클이면 skip — 다음 사이클 재평가)
+        - BuyLock acquire (try/finally)
+
+        실행:
+        - DRY_RUN_PYRAMID=True 면 KIS 실발주 차단, 알림만 발화
+        - trading_engine.execute_portfolio([order], save_to_db=False) — 기존 row 유지
+        - 체결 시: 가중평균 avg 계산 → DB UPDATE(update_portfolio_second_tranche)
+                  → trades save → 메모리 Position 갱신 → dump_monitor_state → 텔레그램
+
+        Returns:
+            True=2차 진입 발주 시도(체결 결과 무관, 후속 트레일링 평가 skip),
+            False=조건 미충족 → 트레일링 정상 평가
+        """
+        # 1) 토글 가드
+        if not getattr(settings, "TRANCHE_ENTRY_ENABLED", False):
+            return False
+
+        # 2) 상태 가드
+        if pos.second_tranche_executed or not pos.second_tranche_pending:
+            return False
+
+        # 3) 트리거 (first_buy_price 기준)
+        trigger_pct = getattr(settings, "PYRAMID_TRIGGER_PCT", 0.05)
+        if pos.profit_rate < trigger_pct:
+            return False
+
+        stock_code = pos.stock_code
+        stock_name = pos.stock_name
+
+        # 4) SellLock 우선 가드 — 분할익절 발화 사이클이면 skip (Coder P3)
+        if sell_lock.is_locked(stock_code):
+            logger.debug(
+                f"[v17] {stock_name} 2차 진입 skip: SellLock 점유 중 (다음 사이클 재평가)"
+            )
+            return False
+
+        # 5) MarketGuard 재호출 (5분 캐시 — market_guard 모듈 내부 캐시)
+        try:
+            from modules.market_guard import MarketGuard
+            guard = MarketGuard()
+            status, _ctx = await asyncio.to_thread(guard.check)
+            # CRISIS/DANGER 면 2차 진입 스킵
+            from modules.market_guard import MarketStatus
+            if status in (MarketStatus.CRISIS, MarketStatus.DANGER):
+                logger.info(
+                    f"[v17] {stock_name} 2차 진입 스킵: MarketGuard {status.name}"
+                )
+                return False
+        except Exception as e:
+            # 가드 모듈 실패는 보수적으로 진행 (가드 미적용)
+            logger.debug(f"[v17] MarketGuard 호출 실패 {stock_code}: {e}")
+
+        # 6) BuyLock acquire
+        from modules.trading_engine.buy_lock import buy_lock
+        owner = "pyramid_in"
+        if not buy_lock.acquire(stock_code, owner):
+            logger.debug(f"[v17] {stock_name} 2차 진입 skip: BuyLock 이미 점유")
+            return False
+
+        try:
+            # 7) 2차 매수 금액 산정
+            mode = getattr(settings, "TRANCHE_SECOND_AMOUNT_MODE", "mirror_first")
+            first_amount = pos.first_buy_price * pos.shares  # 1차 진입 금액 추정
+            # tranche 비율로 환산 — first 진입은 shares×first_buy_price, 2차는 동일 비율
+            second_ratio = getattr(settings, "TRANCHE_SECOND_RATIO", 0.5)
+            first_ratio = getattr(settings, "TRANCHE_FIRST_RATIO", 0.5)
+            if first_ratio <= 0:
+                first_ratio = 0.5
+            target_amount = first_amount * (second_ratio / first_ratio)
+
+            if mode == "orderable_cash":
+                try:
+                    from modules.kis_api import KISApi
+                    cash = KISApi().get_orderable_cash()
+                    target_amount = min(target_amount, max(0, cash))
+                except Exception as e:
+                    logger.debug(f"[v17] orderable_cash 조회 실패, mirror_first 폴백: {e}")
+
+            # 8) 2차 매수 수량 계산
+            second_qty = int(target_amount // max(1, pos.current_price))
+            if second_qty <= 0:
+                logger.warning(
+                    f"[v17] {stock_name} 2차 진입 스킵: 산정 수량 0 "
+                    f"(target_amount={target_amount}, cur_price={pos.current_price})"
+                )
+                return False
+
+            # 9) DRY_RUN 게이트 — 시뮬레이션 모드면 실발주 차단
+            if getattr(settings, "DRY_RUN_PYRAMID", False):
+                logger.info(
+                    f"[v17][DRY_RUN] 2차 진입 시뮬레이션: {stock_name} ({stock_code}) "
+                    f"+{second_qty}주 @{pos.current_price:,.0f}원 "
+                    f"(profit_rate={pos.profit_rate:+.2%}, target={target_amount:,.0f}원)"
+                )
+                # 메모리 상태는 갱신하지 않음 (드라이런)
+                return True
+
+            # 10) 실발주 (limit_aggressive — 매도 1호가 + 재시도)
+            order = {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "quantity": second_qty,
+                "order_type": "limit_aggressive",
+                "price": int(pos.current_price),
+                "expected_price": int(pos.current_price),
+                "amount": int(target_amount),
+                "theme": pos.theme,
+            }
+            result = await asyncio.to_thread(
+                self.trading_engine.execute_portfolio,
+                [order],
+                False,  # save_to_db=False (기존 holding row 유지, 별도 update_portfolio_second_tranche 호출)
+                True,   # wait_for_fill
+            )
+
+            # 11) 체결 결과 확인
+            filled_qty = 0
+            filled_price = 0.0
+            executed_orders = result.get("orders", [])
+            for o in executed_orders:
+                if o.get("success") and o.get("stock_code") == stock_code:
+                    filled_qty = o.get("quantity", 0) or 0
+                    filled_price = o.get("filled_price") or o.get("price", 0) or 0
+                    break
+
+            if filled_qty <= 0 or filled_price <= 0:
+                logger.warning(
+                    f"[v17] {stock_name} 2차 진입 실패: filled_qty={filled_qty}, "
+                    f"filled_price={filled_price}, result={result.get('failed_count')}건 실패"
+                )
+                return True  # 발주 시도는 했으므로 후속 트레일링은 skip
+
+            # 12) 가중평균 avg_buy_price 계산
+            total_qty_after = pos.shares + filled_qty
+            new_avg = (
+                pos.first_buy_price * pos.shares + filled_price * filled_qty
+            ) / total_qty_after if total_qty_after > 0 else pos.first_buy_price
+
+            # 13) DB UPDATE (기존 row 유지하며 누적)
+            db = None
+            try:
+                db = Database()
+                db.connect()
+                rowcount = db.update_portfolio_second_tranche(
+                    stock_code=stock_code,
+                    added_shares=filled_qty,
+                    second_filled_price=filled_price,
+                    avg_buy_price=new_avg,
+                )
+                if rowcount == 0:
+                    logger.warning(
+                        f"[v17] {stock_name} 2차 진입 DB UPDATE 0 row — holding 없음 (race?)"
+                    )
+                # trades 테이블에 2차 진입 기록
+                db.save_trade({
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "action": "buy",
+                    "shares": filled_qty,
+                    "price": filled_price,
+                    "amount": filled_qty * filled_price,
+                    "reason": "2차 진입 (불타기)",
+                    "buy_price": filled_price,
+                    "filled_price": filled_price,
+                    "slippage": None,
+                    "remaining_shares": total_qty_after,
+                })
+            except Exception as e:
+                logger.error(f"[v17] {stock_name} 2차 진입 DB 기록 실패: {e}")
+            finally:
+                if db:
+                    db.close()
+
+            # 14) 메모리 Position 갱신
+            pos.shares = total_qty_after
+            pos.remaining_shares = pos.remaining_shares + filled_qty
+            pos.avg_buy_price = new_avg
+            pos.tranche_count = 2
+            pos.second_tranche_executed = True
+            pos.second_tranche_pending = False
+
+            # 15) 3중 동기화 즉시 호출
+            try:
+                self._dump_monitor_state()
+            except Exception as e:
+                logger.debug(f"[v17] dump_monitor_state 실패 {stock_code}: {e}")
+
+            # 16) 텔레그램 알림
+            try:
+                if hasattr(self, "notifier") and self.notifier:
+                    self.notifier.send_message(
+                        f"🔥 2/2 불타기 진입\n"
+                        f"종목: {stock_name} ({stock_code})\n"
+                        f"매수: {filled_qty}주 @ {filled_price:,.0f}원\n"
+                        f"first={pos.first_buy_price:,.0f}원, "
+                        f"avg={new_avg:,.0f}원 (가중평균)\n"
+                        f"트리거: +{pos.profit_rate*100:.1f}% (first 기준)\n"
+                        f"누적 보유: {total_qty_after}주"
+                    )
+            except Exception as e:
+                logger.debug(f"[v17] 텔레그램 알림 실패: {e}")
+
+            logger.info(
+                f"✅ [v17] {stock_name} 2차 진입 완료: +{filled_qty}주 @{filled_price:,.0f}, "
+                f"avg={new_avg:,.2f}, total={total_qty_after}주"
+            )
+            return True
+        finally:
+            buy_lock.release(stock_code)
+
     # ===== 트레일링 스탑 =====
 
     def _update_trailing_stop(self, pos: Position) -> None:
@@ -1281,14 +1641,17 @@ class PortfolioMonitorV2:
                 except Exception as e:
                     logger.error(f"트레일링 레벨 변경 콜백 오류: {e}")
 
-            # 트레일링 스탑 가격 계산 (레벨별)
+            # 트레일링 스탑 가격 계산 (레벨별 — v17: max(고정값, 2.0×ATR/first_buy_price))
             if pos.trailing_active:
                 if pos.trailing_level == 3:
-                    trail_pct = self.trail_level3_pct  # 2%
+                    fixed_pct = self.trail_level3_pct  # 2%
                 elif pos.trailing_level == 2:
-                    trail_pct = self.trail_level2_pct  # 3%
+                    fixed_pct = self.trail_level2_pct  # 3%
                 else:
-                    trail_pct = self.trail_level1_pct  # 5%
+                    fixed_pct = self.trail_level1_pct  # 5%
+
+                # v17: ATR 기반 동적 폭 (atr_at_buy=0 시 고정값 폴백)
+                trail_pct = pos.effective_trailing_pct(fixed_pct)
 
                 new_trailing_stop = pos.highest_price * (1 - trail_pct)
 
