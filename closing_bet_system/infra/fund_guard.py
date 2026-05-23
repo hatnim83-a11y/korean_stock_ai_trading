@@ -61,18 +61,40 @@ _CONSERVATIVE_LARGE_COUNT = 10**6     # 100만 (카운트 한도 트리거)
 
 @dataclass(frozen=True)
 class GuardConfig:
-    """fund_guard 한도 파라미터. settings.yaml 의 ``fund:`` 섹션을 매핑."""
+    """fund_guard 한도 파라미터. settings.yaml 의 ``fund:`` 섹션을 매핑.
 
-    capital_ratio: float = 0.10                 # 종가베팅 전용 자금 비중
-    max_position_per_stock: float = 0.25        # 1종목 최대 비중 (종가베팅 자금 기준)
+    2026-05-23: 동적 자본 분리(absorb_swing_idle) 필드 5개 추가.
+    """
+
+    capital_ratio: float = 0.10                 # 종가베팅 base 자금 비중 (기본 10%)
+    max_position_per_stock: float = 0.25        # 1종목 최대 비중 (absorb 활성 시 unused)
     max_concurrent_positions: int = 4
-    max_daily_entries: int = 2
-    weekly_loss_limit: float = -0.05            # 최근 7일 누적 net_pnl_pct ≤ 한도 시 매매 중지
+    max_daily_entries: int = 4                  # 2026-05-23: 4종목 강제 진입에 맞춰 2→4
+    weekly_loss_limit: float = -0.05
+    # 동적 자본 분리 (2026-05-23 도입)
+    absorb_swing_idle: bool = False             # 기본 False (롤백 안전)
+    swing_capital_ratio: float = 0.9            # 스윙 풀 비율
+    closing_bet_pool_cap: float = 0.5           # 종가베팅 풀 최대 cap
+    swing_used_source: str = "cost_basis"       # 'cost_basis' | 'evaluation'
+    disable_absorb_on_crisis: bool = True       # CRISIS 시 absorb 비활성
 
     @classmethod
     def from_settings(cls, settings: Optional[dict] = None) -> "GuardConfig":
         s = settings if settings is not None else _load_settings()
         f = s.get("fund", {})
+        # 범위 검증 (DC 주의 5): closing_bet_pool_cap 0 < val <= 1.0
+        cap = float(f.get("closing_bet_pool_cap", cls.closing_bet_pool_cap))
+        if not (0.0 < cap <= 1.0):
+            logger.warning(
+                f"[fund_guard] closing_bet_pool_cap={cap} 범위 이탈 → 기본값 {cls.closing_bet_pool_cap} 사용"
+            )
+            cap = cls.closing_bet_pool_cap
+        used_src = str(f.get("swing_used_source", cls.swing_used_source))
+        if used_src not in ("cost_basis", "evaluation"):
+            logger.warning(
+                f"[fund_guard] swing_used_source={used_src!r} 미지원 → 'cost_basis' 폴백"
+            )
+            used_src = "cost_basis"
         return cls(
             capital_ratio=float(f.get("capital_ratio", cls.capital_ratio)),
             max_position_per_stock=float(
@@ -83,6 +105,15 @@ class GuardConfig:
             ),
             max_daily_entries=int(f.get("max_daily_entries", cls.max_daily_entries)),
             weekly_loss_limit=float(f.get("weekly_loss_limit", cls.weekly_loss_limit)),
+            absorb_swing_idle=bool(f.get("absorb_swing_idle", cls.absorb_swing_idle)),
+            swing_capital_ratio=float(
+                f.get("swing_capital_ratio", cls.swing_capital_ratio)
+            ),
+            closing_bet_pool_cap=cap,
+            swing_used_source=used_src,
+            disable_absorb_on_crisis=bool(
+                f.get("disable_absorb_on_crisis", cls.disable_absorb_on_crisis)
+            ),
         )
 
 
@@ -103,6 +134,7 @@ class FundGuard:
         db_path: Optional[Path] = None,
         total_value_provider: Optional[Callable[[], int]] = None,
         swing_holdings_provider: Optional[Callable[[], set[str]]] = None,
+        swing_used_provider: Optional[Callable[[str], int]] = None,
     ):
         self.config = config or GuardConfig.from_settings()
         self.db_path = db_path or _resolve_db_path(_load_settings())
@@ -110,10 +142,18 @@ class FundGuard:
         # 콜백 lazy import — 테스트 시 주입 가능, 운영 시 기본 구현 사용
         self._total_value_provider = total_value_provider
         self._swing_holdings_provider = swing_holdings_provider
+        # 2026-05-23 동적 자본 분리 — 스윙 사용 자본 조회 콜백 (테스트 mock용)
+        self._swing_used_provider = swing_used_provider
 
     # ===== 외부 API =====
 
-    def allow_order(self, ticker: str, amount: int) -> tuple[bool, str]:
+    def allow_order(
+        self,
+        ticker: str,
+        amount: int,
+        *,
+        external_risk_active: bool = False,
+    ) -> tuple[bool, str]:
         """주문 허용 여부 + 차단 사유.
 
         Args:
@@ -121,6 +161,8 @@ class FundGuard:
             amount: 주문 금액(원). 호출 측이 (1주 가격 × 수량 + 수수료 추정치)
                 를 ``int`` 로 올림 처리하여 전달해야 한다.
                 ``float`` 또는 음수는 차단된다.
+            external_risk_active: MarketGuard CRISIS/DANGER 상태 (2026-05-23 추가).
+                True + ``cfg.disable_absorb_on_crisis`` → swing_idle 흡수 비활성.
 
         Returns:
             ``(allowed: bool, reason: str)`` — 허용 시 ``reason`` 은 빈 문자열
@@ -144,14 +186,22 @@ class FundGuard:
         if ticker in swing_held:
             return False, f"스윙 시스템이 이미 보유 중인 종목: {ticker}"
 
-        capital_limit = int(total_value * cfg.capital_ratio)
-        per_stock_limit = int(capital_limit * cfg.max_position_per_stock)
+        # 4) 동적 capital_limit 계산 (SoT, 2026-05-23) — S-1/S-2 반영
+        capital_limit, debug_info = self.compute_capital_limit(
+            total_value, external_risk_active=external_risk_active
+        )
+        # per_stock_limit: cfg.max_concurrent_positions 등분 (4 하드코딩 회피)
+        per_stock_limit = (
+            capital_limit // cfg.max_concurrent_positions
+            if cfg.max_concurrent_positions > 0 else 0
+        )
 
-        # 4) 1종목 비중 한도 (DB 조회 불필요)
+        # 5) 1종목 비중 한도 (DB 조회 불필요)
         if amount > per_stock_limit:
             return False, (
                 f"1종목 비중 초과: 주문 {amount:,}원 > 한도 {per_stock_limit:,}원 "
-                f"(총자산 {total_value:,}원 × {cfg.capital_ratio:.0%} × {cfg.max_position_per_stock:.0%})"
+                f"(capital_limit {capital_limit:,}원 ÷ {cfg.max_concurrent_positions}종목 | "
+                f"{debug_info.get('mode', '?')})"
             )
 
         # 5~7) DB 조회 통합 — 단일 connection + 단일 트랜잭션 스냅샷 (TOCTOU 방지)
@@ -196,6 +246,81 @@ class FundGuard:
 
         return True, ""
 
+    # ===== Single Source of Truth: 동적 자본 한도 계산 (2026-05-23) =====
+
+    def compute_capital_limit(
+        self,
+        total_value: int,
+        *,
+        external_risk_active: bool = False,
+    ) -> tuple[int, dict]:
+        """동적 종가베팅 capital_limit 계산 — fund_guard + entry_executor 공통 진입점.
+
+        흐름 (Plan 알고리즘 정합):
+            1. base_pool = total × capital_ratio (10%)
+            2. absorb_swing_idle=False 또는 (external_risk_active AND disable_absorb_on_crisis)
+               → base_pool 반환 (흡수 비활성)
+            3. swing_pool = total × swing_capital_ratio (90%)
+            4. swing_used = get_swing_used_value(source)
+               SwingDBUnavailable → swing_pool 폴백 (swing_idle=0, 보수)
+            5. swing_idle = max(0, swing_pool - swing_used)
+            6. cap_amount = total × closing_bet_pool_cap (50%)
+            7. return min(base_pool + swing_idle, cap_amount)
+
+        Args:
+            total_value: KIS 총 평가금액 (원)
+            external_risk_active: CRISIS/DANGER 시 True
+
+        Returns:
+            ``(capital_limit, debug_info)``
+            debug_info keys: mode / base_pool / swing_pool / swing_used / swing_idle / cap_amount
+        """
+        cfg = self.config
+        base_pool = int(total_value * cfg.capital_ratio)
+
+        # 흡수 비활성 분기
+        if not cfg.absorb_swing_idle:
+            return base_pool, {"mode": "base_only(absorb_off)", "base_pool": base_pool}
+        if external_risk_active and cfg.disable_absorb_on_crisis:
+            return base_pool, {
+                "mode": "base_only(crisis)",
+                "base_pool": base_pool,
+                "external_risk": True,
+            }
+
+        # 스윙 풀 + 유휴자본
+        swing_pool = int(total_value * cfg.swing_capital_ratio)
+        try:
+            swing_used = self._get_swing_used_value()
+        except Exception as e:
+            # DB 파일 없음 / 쿼리 실패 → swing_pool 폴백 (idle=0, 보수)
+            logger.warning(
+                f"[fund_guard] swing_used 조회 실패 ({e}) → swing_pool 폴백 (idle=0)"
+            )
+            swing_used = swing_pool  # idle=0 강제
+
+        swing_idle = max(0, swing_pool - swing_used)
+        cap_amount = int(total_value * cfg.closing_bet_pool_cap)
+        dynamic_pool = base_pool + swing_idle
+        capital_limit = min(dynamic_pool, cap_amount)
+
+        debug_info = {
+            "mode": "absorb_swing_idle",
+            "base_pool": base_pool,
+            "swing_pool": swing_pool,
+            "swing_used": swing_used,
+            "swing_idle": swing_idle,
+            "cap_amount": cap_amount,
+            "dynamic_pool": dynamic_pool,
+            "capped": dynamic_pool > cap_amount,
+        }
+        logger.info(
+            f"[fund_guard] capital_limit={capital_limit:,}원 — "
+            f"base={base_pool:,}/idle={swing_idle:,}/cap={cap_amount:,} "
+            f"(used={swing_used:,}원/pool={swing_pool:,}원, capped={debug_info['capped']})"
+        )
+        return capital_limit, debug_info
+
     # ===== 내부 헬퍼 (override 가능) =====
 
     def _get_total_value(self) -> int:
@@ -205,6 +330,19 @@ class FundGuard:
         from closing_bet_system.infra.kis_client import get_total_account_value
 
         return get_total_account_value()
+
+    def _get_swing_used_value(self) -> int:
+        """스윙 사용 자본 조회 (provider 주입 가능, 2026-05-23 동적 자본 분리).
+
+        Raises:
+            SwingDBUnavailable: 스윙 DB 파일 없음 또는 쿼리 실패. compute_capital_limit
+                에서 swing_pool 폴백 처리.
+        """
+        if self._swing_used_provider is not None:
+            return self._swing_used_provider(self.config.swing_used_source)
+        # lazy import
+        from closing_bet_system.infra.swing_db_reader import get_swing_used_value
+        return get_swing_used_value(source=self.config.swing_used_source)
 
     def _get_swing_holdings(self) -> set[str]:
         if self._swing_holdings_provider is not None:

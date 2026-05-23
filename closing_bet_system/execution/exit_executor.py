@@ -195,6 +195,7 @@ class ExitExecutor:
                 logger.error(f"[exit_executor] emergency_stop 처리 실패: {msg}")
                 result.errors.append(msg)
 
+        self._log_swing_capital_return(result, cycle="emergency_stop")
         await asyncio.to_thread(
             self.exit_notifier.send_emergency_stop_result, result, self.settings.dry_run,
         )
@@ -237,6 +238,7 @@ class ExitExecutor:
                 logger.error(f"[exit_executor] morning_exit 처리 실패: {msg}")
                 result.errors.append(msg)
 
+        self._log_swing_capital_return(result, cycle="morning_exit")
         await asyncio.to_thread(
             self.exit_notifier.send_morning_exit_result, result, self.settings.dry_run,
         )
@@ -278,10 +280,34 @@ class ExitExecutor:
                 logger.error(f"[exit_executor] force_close 처리 실패: {msg}")
                 result.errors.append(msg)
 
+        self._log_swing_capital_return(result, cycle="force_close")
         await asyncio.to_thread(
             self.exit_notifier.send_force_close_result, result, self.settings.dry_run,
         )
         return result
+
+    # ===== 스윙 자본 환원 로그 (2026-05-23 동적 자본 분리) =====
+
+    def _log_swing_capital_return(self, result: ExitResult, *, cycle: str) -> None:
+        """매도 cycle 종료 시 KIS 예수금 환원 영향 로그.
+
+        실제 환원은 KIS 자동(매도 체결 시 예수금 증가). 본 로그는 운영 추적용.
+        다음 영업일 09:25 스윙 매수 시 환원분 자연 인식.
+        """
+        if result.filled <= 0:
+            return
+        # 체결된 주문의 매도금액 합산 (executed_price × executed_shares)
+        total_returned = 0
+        for o in result.orders:
+            fs = o.fill_status
+            if fs and getattr(fs, "executed_price", 0) and getattr(fs, "executed_shares", 0) > 0:
+                total_returned += int(fs.executed_price * fs.executed_shares)
+        flag = "(DRY-RUN, 실 환원 없음)" if self.settings.dry_run else "(KIS 예수금 자동 반영)"
+        logger.info(
+            f"[exit_executor] 스윙 자본 환원 — {cycle} 체결 {result.filled}건 "
+            f"매도금액 합산 약 {total_returned:,}원 {flag} "
+            f"→ 다음 영업일 09:25 스윙 매수 시 자연 인식 (동적 자본 분리)"
+        )
 
     # ===== 내부 매도 처리 =====
 

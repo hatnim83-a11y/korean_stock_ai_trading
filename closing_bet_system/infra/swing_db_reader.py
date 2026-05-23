@@ -84,6 +84,96 @@ def get_swing_holding_codes() -> set[str]:
         conn.close()
 
 
+class SwingDBUnavailable(Exception):
+    """스윙 DB 파일이 없거나 read-only 연결 실패 — fund_guard에서 폴백 처리."""
+
+
+def get_swing_used_value(source: str = "cost_basis") -> int:
+    """스윙이 현재 사용 중인 자본(원) 합계 — 동적 자본 분리(2026-05-23)용.
+
+    Args:
+        source:
+            - ``"cost_basis"`` (기본, 안전): ``SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0))``
+                평가 손익 미반영, 매수 원가 기반. 안정적.
+            - ``"evaluation"``: ``position_state`` JOIN으로 평가액 계산.
+                ``current_price`` 폴백 ``buy_price``. 시장가 변동 반영.
+
+    Returns:
+        스윙 보유 종목 자본 합계 (원, int).
+        - 빈 portfolio → ``0``
+        - portfolio에 status='holding' 종목 평가/원가 합
+
+    Raises:
+        SwingDBUnavailable: 스윙 DB 파일이 없거나 연결 실패 — 호출자(fund_guard)가
+            `swing_pool` 폴백(swing_idle=0)으로 처리할 책임.
+    """
+    conn = _open_readonly()
+    if conn is None:
+        raise SwingDBUnavailable("스윙 DB 파일 없음 또는 read-only 연결 실패")
+    try:
+        cur = conn.cursor()
+        if source == "cost_basis":
+            # COALESCE 박제 (W-4 반영)
+            cur.execute(
+                """
+                SELECT SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0)) AS used_value
+                FROM portfolio
+                WHERE status = 'holding'
+                """
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        elif source == "evaluation":
+            # position_state JOIN — current_price 우선, NULL이면 buy_price 폴백
+            # position_state 테이블 없을 가능성 (v8+ 도입) → try/except
+            try:
+                cur.execute(
+                    """
+                    SELECT SUM(
+                        COALESCE(p.quantity, 0) *
+                        COALESCE(ps.current_price, p.buy_price, 0)
+                    ) AS used_value
+                    FROM portfolio p
+                    LEFT JOIN position_state ps ON p.stock_code = ps.stock_code
+                    WHERE p.status = 'holding'
+                    """
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row and row[0] is not None else 0
+            except sqlite3.OperationalError as e:
+                # position_state 테이블 미존재 → cost_basis 폴백
+                logger.warning(
+                    f"[종가베팅] evaluation 모드 실패 ({e}) → cost_basis 폴백"
+                )
+                cur.execute(
+                    """
+                    SELECT SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0)) AS used_value
+                    FROM portfolio
+                    WHERE status = 'holding'
+                    """
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row and row[0] is not None else 0
+        else:
+            logger.warning(
+                f"[종가베팅] swing_used_source={source!r} 미지원 → cost_basis 폴백"
+            )
+            cur.execute(
+                """
+                SELECT SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0)) AS used_value
+                FROM portfolio
+                WHERE status = 'holding'
+                """
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.Error as e:
+        logger.error(f"[종가베팅] get_swing_used_value 조회 실패: {e}")
+        raise SwingDBUnavailable(f"스윙 DB 쿼리 실패: {e}")
+    finally:
+        conn.close()
+
+
 def get_swing_today_buy_count() -> int:
     """스윙이 오늘 매수한 종목 수 (KST 기준).
 

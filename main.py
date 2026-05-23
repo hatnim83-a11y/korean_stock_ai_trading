@@ -1336,9 +1336,18 @@ class TradingSystem:
 
         if new_ai_stocks:
             # 가용현금 기반 슬롯 배분 (수익 재투자 반영)
-            # 종목당 상한: 총자산 ÷ MAX_POSITIONS (동적 — 수익 누적 반영, 몰빵 방지)
-            max_per_stock = int(total_capital) // settings.MAX_POSITIONS
+            # 종목당 상한: (총자산 × SWING_CAPITAL_RATIO) ÷ MAX_POSITIONS
+            # 2026-05-23 동적 자본 분리: 스윙 90% (잔여 10% + idle은 종가베팅 풀)
+            # 환경변수 SWING_CAPITAL_RATIO 또는 기본 0.9 (롤백 시 1.0)
+            swing_capital_ratio = float(os.getenv("SWING_CAPITAL_RATIO", "0.9"))
+            swing_capital_pool = int(total_capital * swing_capital_ratio)
+            max_per_stock = swing_capital_pool // settings.MAX_POSITIONS
             per_slot_capital = min(available_cash // available_slots, max_per_stock)
+            logger.info(
+                f"   💰 스윙 자본 풀: 총자산 {int(total_capital):,}원 × "
+                f"{swing_capital_ratio:.0%} = {swing_capital_pool:,}원 / "
+                f"{settings.MAX_POSITIONS}슬롯 → 종목당 상한 {max_per_stock:,.0f}원"
+            )
 
             # v17 분할 진입: 1차 진입은 TRANCHE_FIRST_RATIO(기본 50%)만 사용.
             # 나머지는 모니터에서 +5% 도달 시 2차 진입(불타기)으로 활용 (보유 종료까지 대기).

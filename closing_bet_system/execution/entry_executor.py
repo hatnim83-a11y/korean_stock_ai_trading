@@ -184,6 +184,7 @@ class EntryExecutor:
 
         # Phase 0.5: MarketGuard
         ratio_mult = 1.0
+        external_risk_active = False  # 2026-05-23: CAUTION/DANGER 시 swing_idle 흡수 비활성
         if self.settings.market_guard_enabled:
             status, info = await asyncio.to_thread(self.market_guard.check)
             result.market_guard_status = status.value
@@ -195,9 +196,11 @@ class EntryExecutor:
                 return result
             if status in (MarketStatus.CAUTION, MarketStatus.DANGER):
                 ratio_mult = self.settings.caution_ratio_multiplier
+                external_risk_active = True  # Plan planner 심각 2: 시장 위험 신호 시 흡수 차단
                 logger.warning(
                     f"[entry_executor] phase1 진입 비율 축소 ×{ratio_mult} — "
-                    f"MarketGuard {status.value}"
+                    f"MarketGuard {status.value} (external_risk_active=True, "
+                    f"swing_idle 흡수 비활성)"
                 )
 
         # Phase 1: 후보 select
@@ -215,7 +218,9 @@ class EntryExecutor:
         # Phase 2: 후보 루프
         for cand in candidates:
             try:
-                order = await self._process_phase1_candidate(cand, ratio_mult)
+                order = await self._process_phase1_candidate(
+                    cand, ratio_mult, external_risk_active=external_risk_active
+                )
                 result.orders.append(order)
                 if order.rejection_reason == "fund_guard":
                     result.fund_guard_rejected += 1
@@ -295,8 +300,16 @@ class EntryExecutor:
         self,
         cand: dict,
         ratio_mult: float,
+        *,
+        external_risk_active: bool = False,
     ) -> CandidateOrder:
-        """단일 종목 phase1 처리."""
+        """단일 종목 phase1 처리.
+
+        Args:
+            cand: candidates 테이블 dict
+            ratio_mult: MarketGuard 축소 비율 (CAUTION/DANGER ×0.5)
+            external_risk_active: 시장 위험 신호 (2026-05-23) — swing_idle 흡수 비활성 신호
+        """
         ticker = cand["ticker"]
         name = cand.get("name", "")
         candidate_id = cand["candidate_id"]
@@ -333,11 +346,12 @@ class EntryExecutor:
             order.rejection_reason = "price_cap"
             return order
 
-        # 2. 금액 계산 (phase1 = 50%, MarketGuard 축소 반영)
+        # 2. 금액 계산 (phase1 = 50%, MarketGuard 축소 반영, 2026-05-23 동적 capital_limit)
         amount = self._compute_order_amount(
             ratio=self.settings.base_position_ratio()
             * self.settings.phase1_ratio
             * ratio_mult,
+            external_risk_active=external_risk_active,
         )
         quantity = max(amount // target_price, 0)
         if quantity <= 0:
@@ -345,10 +359,12 @@ class EntryExecutor:
             return order
         order.quantity = quantity
 
-        # 3. fund_guard
+        # 3. fund_guard (external_risk_active 동기 전달 — SoT 일관성)
         order_amount_int = int(target_price * quantity + 0.5)
         allowed, reason = await asyncio.to_thread(
-            self.fund_guard.allow_order, ticker, order_amount_int
+            lambda: self.fund_guard.allow_order(
+                ticker, order_amount_int, external_risk_active=external_risk_active
+            )
         )
         if not allowed:
             await asyncio.to_thread(
@@ -393,8 +409,13 @@ class EntryExecutor:
         return order
 
     def _select_phase1_candidates(self, trade_date: str) -> list[dict]:
-        """오늘 recommended + score >= threshold 후보 (DESC by total_score)."""
+        """오늘 recommended + score >= threshold 후보 top N (DESC by total_score).
+
+        2026-05-23: 동적 자본 분리 — top N (cfg.max_concurrent_positions, 기본 4) 명시 LIMIT.
+        score 동점 시 candidate_id ASC (선등록 우선, 안정 정렬).
+        """
         threshold = self.settings.score_threshold
+        top_n = self.fund_guard.config.max_concurrent_positions
         with self.candidate_logger.db.get_cursor() as cursor:
             cursor.execute(
                 """
@@ -404,8 +425,9 @@ class EntryExecutor:
                   AND candidate_status='recommended'
                   AND total_score >= ?
                 ORDER BY total_score DESC, candidate_id ASC
+                LIMIT ?
                 """,
-                (trade_date, threshold),
+                (trade_date, threshold, top_n),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -570,18 +592,36 @@ class EntryExecutor:
 
     # ===== Shared helpers =====
 
-    def _compute_order_amount(self, *, ratio: float) -> int:
-        """주문 금액 = 총자산 × capital_ratio × max_position_per_stock × ratio.
+    def _compute_order_amount(
+        self,
+        *,
+        ratio: float,
+        external_risk_active: bool = False,
+    ) -> int:
+        """주문 금액 = (capital_limit ÷ max_concurrent_positions) × ratio.
 
-        FundGuard 의 capital_ratio / max_position_per_stock 를 그대로 사용.
-        ratio = position_ratio × phase 비율 (× market_guard 축소).
+        2026-05-23 동적 자본 분리: FundGuard.compute_capital_limit() SoT 호출 (S-2).
+        capital_limit 자체가 동적 (10% + swing_idle, cap=50%).
+        per_stock_limit = capital_limit ÷ cfg.max_concurrent_positions (4 하드코딩 X, S-1).
+
+        Args:
+            ratio: position_ratio × phase 비율 × market_guard 축소
+            external_risk_active: CRISIS/DANGER 시 True (Plan planner 심각 2)
+
+        Returns:
+            주문 금액 (원, int). total_value <= 0 시 0.
         """
         cfg = self.fund_guard.config
         total_value = self.fund_guard._get_total_value()
         if total_value <= 0:
             return 0
-        base = total_value * cfg.capital_ratio * cfg.max_position_per_stock
-        return int(base * ratio)
+        capital_limit, _ = self.fund_guard.compute_capital_limit(
+            total_value, external_risk_active=external_risk_active
+        )
+        if cfg.max_concurrent_positions <= 0:
+            return 0
+        per_stock = capital_limit // cfg.max_concurrent_positions
+        return int(per_stock * ratio)
 
     async def _poll_fill(self, order_id: str) -> Optional[FillStatus]:
         """fill_checker 폴링. deadline 도달 시 마지막 상태 반환."""

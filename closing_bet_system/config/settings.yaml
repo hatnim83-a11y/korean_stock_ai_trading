@@ -1,13 +1,19 @@
 # 종가베팅 시스템 설정
 # Phase별로 점진적 활성화. 변경 시 docs/improvements/change_log.md 갱신.
 
-# ─── 자금 운용 (PRD 3-2 + Strategy-Coder P0-1) ────────────────────────────
+# ─── 자금 운용 (PRD 3-2 + Strategy-Coder P0-1 + 동적 분리 2026-05-23) ──────
 fund:
-  capital_ratio: 0.10              # 종가베팅 전용 자금 비중 (전체의 10~15% 시작)
-  max_position_per_stock: 0.25     # 1종목 최대 비중 (종가베팅 자금 기준)
+  capital_ratio: 0.10              # 종가베팅 전용 자금 비중 (기본 10%)
+  max_position_per_stock: 0.25     # 1종목 최대 비중 (absorb_swing_idle 활성 시 unused)
   max_concurrent_positions: 4      # 동시 보유 최대 종목 수
-  max_daily_entries: 2             # 1일 최대 진입 종목 수
+  max_daily_entries: 4             # 1일 최대 진입 종목 수 (top 4 강제 정합, 2026-05-23 2→4)
   weekly_loss_limit: -0.05         # 주간 손실 한도 (-5% 도달 시 매매 중지)
+  # ─── 동적 자본 분리 (2026-05-23 도입) ───
+  absorb_swing_idle: true          # 스윙 유휴자본 흡수 토글 (false 시 base 10%만 사용)
+  swing_capital_ratio: 0.9         # 스윙 풀 비율 (총자본 × 0.9) — main.py SWING_CAPITAL_RATIO env와 동기화 유지
+  closing_bet_pool_cap: 0.5        # 종가베팅 풀 최대 cap (총자본 × 0.5)
+  swing_used_source: "cost_basis"  # 'cost_basis'(SUM qty×buy_price) | 'evaluation'(position_state JOIN)
+  disable_absorb_on_crisis: true   # external_risk_active 시 absorb 비활성 (CRISIS 흡수 역설 방어)
 
 # ─── 점수 임계값 (PRD 6-1 + P2-6) ─────────────────────────────────────────
 # 점수 체계: PRD 6-1 단순 카운트, 만점 11점 (Layer1 4 + Layer2 4 + Layer3 3)
@@ -157,8 +163,8 @@ kis:
 #   4. 1주 모니터링 (옵션 C 3점 비교 + weekly_loss_limit)
 # 가격 임계값(vwap_premium 등)은 EntryExecutorSettings dataclass 박제 — 백테스트 정합.
 entry_executor:
-  enabled: true                            # 5/15 dry_run 부분 활성화 (run_entry_pipeline 진입 코드 흐름 검증)
-  dry_run: false                            # KIS 호출 직전 분기 (False면 실 발주) — 5/22까지 true 유지
+  enabled: true                            # 5/15 dry_run 부분 활성화 → 5/23 실발주 전환 완료
+  dry_run: false                           # 5/23 실발주 활성화 완료. 롤백: true + restart
   score_threshold: 2                       # 진입 임계: total_score ≥ 2 (5/14 사용자 결정)
   position_ratio: 0.7                      # PRD 기본 한도 × 0.7 (5/14 사용자 결정)
   phase1_ratio: 0.5                        # 1차(정규장) 50% / 2차(동시호가) 50%
@@ -178,8 +184,8 @@ entry_executor:
 #   4. 1주 모니터링 (시뮬 정합성 + weekly_loss_limit)
 # PRD 10-1 박제값(exit.*)은 ExitExecutorSettings frozen dataclass 박제 — 백테스트 정합.
 morning_exit:
-  enabled: true                            # 5/16 dry_run 부분 활성화 (run_emergency_stop_check / run_morning_exit / run_morning_force_close 진입 코드 흐름 검증)
-  dry_run: false                            # KIS 호출 직전 분기 (False면 실 매도) — ~5/22 1주 관찰 후 단위 2-5f 활성화 검토
+  enabled: true                            # 5/16 dry_run 부분 활성화 → 5/23 실매도 전환 완료
+  dry_run: false                           # 5/23 실매도 활성화 완료. 롤백: true + restart
   emergency_stop_enabled: true             # 09:01 emergency_stop 분기 활성 (false면 09:30 morning_exit에 위임)
   use_sell_lock: true                      # 메인 봇 sell_lock 재사용 + owner 네임스페이스 'closing_bet:*'
   polling_interval_sec: 5                  # fill_checker 폴링 간격
