@@ -237,6 +237,114 @@ def test_DC_12_invalid_swing_used_source():
     assert cfg.swing_used_source == "cost_basis"  # 폴백
 
 
+# ===== DC-13: 실 portfolio 스키마(shares 컬럼) 통합 스모크 =====
+
+
+def test_DC_13_real_schema_smoke():
+    """get_swing_used_value() SQL이 실제 스윙 portfolio 스키마(shares 컬럼)와 정합.
+
+    회귀 차단: 5/26 운영 환경에서 `no such column: quantity` 오류 발견 (스키마 잘못 가정).
+    이 테스트는 임시 sqlite 파일에 실 schema로 portfolio 만들어 SUM 동작 검증.
+    """
+    import os
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    from closing_bet_system.infra import swing_db_reader
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        tmp_path = f.name
+    try:
+        # 실 스키마 그대로 (database.py:create_portfolio_table 기반 핵심 컬럼)
+        conn = sqlite3.connect(tmp_path)
+        conn.execute(
+            """
+            CREATE TABLE portfolio (
+                stock_code TEXT, stock_name TEXT,
+                shares INTEGER, buy_price REAL, current_price REAL,
+                status TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO portfolio VALUES ('068270', '셀트리온', 6, 184600, 195200, 'holding')"
+        )
+        conn.execute(
+            "INSERT INTO portfolio VALUES ('005930', '삼성전자', 10, 75000, 76000, 'holding')"
+        )
+        conn.execute(
+            # 매도 완료된 종목 (제외 확인)
+            "INSERT INTO portfolio VALUES ('000660', 'SK하이닉스', 5, 180000, 0, 'sold')"
+        )
+        conn.commit()
+        conn.close()
+
+        # monkeypatch _resolve_swing_db_path
+        original = swing_db_reader._resolve_swing_db_path
+        swing_db_reader._resolve_swing_db_path = lambda: Path(tmp_path)
+        try:
+            # cost_basis: 6*184600 + 10*75000 = 1,107,600 + 750,000 = 1,857,600
+            v_cost = swing_db_reader.get_swing_used_value(source="cost_basis")
+            assert v_cost == 1_857_600, f"cost_basis: expected 1,857,600, got {v_cost}"
+
+            # evaluation: position_state 미존재 → cost_basis 폴백 (동일 결과)
+            v_eval = swing_db_reader.get_swing_used_value(source="evaluation")
+            assert v_eval == 1_857_600, f"evaluation fallback: expected 1,857,600, got {v_eval}"
+        finally:
+            swing_db_reader._resolve_swing_db_path = original
+    finally:
+        os.unlink(tmp_path)
+
+
+# ===== DC-14: position_state JOIN 정상 동작 (evaluation 모드 본래 의도) =====
+
+
+def test_DC_14_evaluation_mode_with_position_state():
+    """evaluation 모드: position_state.current_price 우선 사용."""
+    import os
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    from closing_bet_system.infra import swing_db_reader
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        tmp_path = f.name
+    try:
+        conn = sqlite3.connect(tmp_path)
+        conn.execute(
+            """
+            CREATE TABLE portfolio (
+                stock_code TEXT, stock_name TEXT,
+                shares INTEGER, buy_price REAL, current_price REAL,
+                status TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE TABLE position_state (stock_code TEXT PRIMARY KEY, current_price REAL)"
+        )
+        # 셀트리온: portfolio.buy_price=184600, position_state.current_price=200000 (수익)
+        conn.execute(
+            "INSERT INTO portfolio VALUES ('068270', '셀트리온', 6, 184600, 195200, 'holding')"
+        )
+        conn.execute("INSERT INTO position_state VALUES ('068270', 200000)")
+        conn.commit()
+        conn.close()
+
+        original = swing_db_reader._resolve_swing_db_path
+        swing_db_reader._resolve_swing_db_path = lambda: Path(tmp_path)
+        try:
+            # evaluation: 6 * 200000 (position_state) = 1,200,000
+            v = swing_db_reader.get_swing_used_value(source="evaluation")
+            assert v == 1_200_000, f"evaluation: expected 1,200,000, got {v}"
+        finally:
+            swing_db_reader._resolve_swing_db_path = original
+    finally:
+        os.unlink(tmp_path)
+
+
 # ===== Runner =====
 
 
@@ -256,6 +364,8 @@ if __name__ == "__main__":
         ("DC-10: external_risk 차단", test_DC_10_external_risk_disables_absorb),
         ("DC-11: cap 범위 검증", test_DC_11_cap_range_validation),
         ("DC-12: invalid source 폴백", test_DC_12_invalid_swing_used_source),
+        ("DC-13: 실 schema(shares) 스모크", test_DC_13_real_schema_smoke),
+        ("DC-14: evaluation+position_state", test_DC_14_evaluation_mode_with_position_state),
     ]
     passed = 0
     failed = []

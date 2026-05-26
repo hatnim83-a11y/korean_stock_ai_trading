@@ -93,7 +93,7 @@ def get_swing_used_value(source: str = "cost_basis") -> int:
 
     Args:
         source:
-            - ``"cost_basis"`` (기본, 안전): ``SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0))``
+            - ``"cost_basis"`` (기본, 안전): ``SUM(COALESCE(shares, 0) * COALESCE(buy_price, 0))``
                 평가 손익 미반영, 매수 원가 기반. 안정적.
             - ``"evaluation"``: ``position_state`` JOIN으로 평가액 계산.
                 ``current_price`` 폴백 ``buy_price``. 시장가 변동 반영.
@@ -116,7 +116,7 @@ def get_swing_used_value(source: str = "cost_basis") -> int:
             # COALESCE 박제 (W-4 반영)
             cur.execute(
                 """
-                SELECT SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0)) AS used_value
+                SELECT SUM(COALESCE(shares, 0) * COALESCE(buy_price, 0)) AS used_value
                 FROM portfolio
                 WHERE status = 'holding'
                 """
@@ -130,7 +130,7 @@ def get_swing_used_value(source: str = "cost_basis") -> int:
                 cur.execute(
                     """
                     SELECT SUM(
-                        COALESCE(p.quantity, 0) *
+                        COALESCE(p.shares, 0) *
                         COALESCE(ps.current_price, p.buy_price, 0)
                     ) AS used_value
                     FROM portfolio p
@@ -147,7 +147,7 @@ def get_swing_used_value(source: str = "cost_basis") -> int:
                 )
                 cur.execute(
                     """
-                    SELECT SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0)) AS used_value
+                    SELECT SUM(COALESCE(shares, 0) * COALESCE(buy_price, 0)) AS used_value
                     FROM portfolio
                     WHERE status = 'holding'
                     """
@@ -160,7 +160,7 @@ def get_swing_used_value(source: str = "cost_basis") -> int:
             )
             cur.execute(
                 """
-                SELECT SUM(COALESCE(quantity, 0) * COALESCE(buy_price, 0)) AS used_value
+                SELECT SUM(COALESCE(shares, 0) * COALESCE(buy_price, 0)) AS used_value
                 FROM portfolio
                 WHERE status = 'holding'
                 """
