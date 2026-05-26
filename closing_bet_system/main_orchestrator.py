@@ -84,12 +84,14 @@ ENTRY_PHASE2_MINUTE = 25
 
 # 단위 2-5d (2026-05-16) — ExitExecutor 자동매도 3개 잡
 # 09:01 emergency_stop (메인 봇 09:00 monitoring_start_early + midweek_sell_profit race 회피)
-# 09:30 morning_exit (PRD 10-1 4단계 매도 액션 매트릭스)
-# 10:30 force_close (미체결 잔량 시장가 전량 + 09:30 미체결 취소)
+# 09:02 morning_exit (2026-05-26 09:30→09:02: 스윙 09:05 매수 전 매도 자금 환원)
+# 10:30 force_close (미체결 잔량 시장가 전량 + 09:02 미체결 취소)
 EMERGENCY_STOP_SCHEDULE_HOUR = 9
 EMERGENCY_STOP_SCHEDULE_MINUTE = 1
 MORNING_EXIT_HOUR = 9
-MORNING_EXIT_MINUTE = 30
+MORNING_EXIT_MINUTE = 2  # 2026-05-26: 09:30 → 09:02. EARLY_BUY_ENABLED=True 시 스윙 매수가 09:05라
+                         # 종가베팅 매도 자금이 스윙 매수에 활용되려면 09:05 직전 매도 필요.
+                         # KIS ord_psbl_cash는 매도 체결 즉시 가산되므로 자금 흐름 정합.
 MORNING_FORCE_CLOSE_HOUR = 10
 MORNING_FORCE_CLOSE_MINUTE = 30
 

@@ -67,7 +67,7 @@ schedule:
   dart_evening_start: "15:35"      # 장 마감 후 DART 모니터링
   dart_evening_end: "16:00"
   us_market_check: "22:00"         # 미국장 모니터링
-  morning_exit_start: "09:30"      # P2-7: 익일 매도는 09:30 이후 시작 (스윙 09:00~09:25 매수와 충돌 회피)
+  morning_exit_start: "09:02"      # 2026-05-26: P2-7 09:30 → 09:02. EARLY_BUY_ENABLED=True 시 스윙 매수 09:05 직전 매도로 자금 환원 (KIS ord_psbl_cash 즉시 가산)
   morning_exit_force_close: "10:30"  # 강제 청산 시한
   emergency_stop_start: "09:01"    # 단위 2-5d (2026-05-16): 09:00 → 09:01 (메인 봇 monitoring_start_early + midweek_sell_profit race 회피)
   next_day_label: "10:00"          # KRX 확정 수급 수집 + 라벨링
@@ -176,7 +176,8 @@ entry_executor:
 
 # ─── ExitExecutor (단위 2-5c~f, Phase 2 자동매도) ─────────────────────────
 # 단위 2-4 자동매수 익일 09:01~10:30 PRD 10-1 시가 액션 매트릭스 5단계 자동매도.
-# trailing_stop은 단위 2-5g 별도 분리 (09:30~10:30 폴링 루프 필요).
+# trailing_stop은 단위 2-5g 별도 분리 (09:02~10:30 폴링 루프 필요).
+# 2026-05-26: morning_exit 09:30 → 09:02 (스윙 09:05 매수 직전 자금 환원)
 # 활성화 절차:
 #   1. 단위 2-5e dry_run 통합 단발 검증 (enabled=true / dry_run=true)
 #   2. 단위 2-4f entry_executor.dry_run=false 와 묶어서 단발 활성화 권장
@@ -186,7 +187,7 @@ entry_executor:
 morning_exit:
   enabled: true                            # 5/16 dry_run 부분 활성화 → 5/23 실매도 전환 완료
   dry_run: false                           # 5/23 실매도 활성화 완료. 롤백: true + restart
-  emergency_stop_enabled: true             # 09:01 emergency_stop 분기 활성 (false면 09:30 morning_exit에 위임)
+  emergency_stop_enabled: true             # 09:01 emergency_stop 분기 활성 (false면 09:02 morning_exit에 위임)
   use_sell_lock: true                      # 메인 봇 sell_lock 재사용 + owner 네임스페이스 'closing_bet:*'
   polling_interval_sec: 5                  # fill_checker 폴링 간격
   fill_check_deadline_sec: 60              # 시장가 매도는 빠름, 1분 cut
