@@ -118,7 +118,18 @@ class TradingScheduler:
     
     def setup_schedules(self) -> None:
         """기본 스케줄 등록"""
-        
+
+        # ===== 아침 매수 조기 진입 토글 (A3안) =====
+        # EARLY_BUY_ENABLED=True 시 7개 잡 시간 자동 재배치 (스크리닝/매수/모니터링/매도 잡)
+        # 09:00 monitoring_start_early + midweek_sell_profit (유지)
+        # 09:01 midweek_sell_loss / 09:02 stock_screening + hold_period_sell / 09:05 execute_buy / 09:06 monitoring_start
+        early_buy = settings.EARLY_BUY_ENABLED
+        screening_minute = 2 if early_buy else 5
+        buy_minute = 5 if early_buy else 25
+        monitoring_minute = 6 if early_buy else 26
+        hold_period_minute = 2 if early_buy else 15
+        midweek_loss_minute = 1 if early_buy else 10
+
         # 0. 테마 로테이션 체크 (KST 08:00) - 2주 단위
         self.scheduler.add_job(
             self._run_theme_check,
@@ -140,16 +151,16 @@ class TradingScheduler:
         # 2. 종목 스크리닝 (KST 09:05) - 장 시작 후 실시간 데이터 기반
         self.scheduler.add_job(
             self._run_stock_screening,
-            CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone=_KST_TZ),
+            CronTrigger(hour=9, minute=screening_minute, day_of_week='mon-fri', timezone=_KST_TZ),
             id='stock_screening',
-            name='종목 스크리닝 (09:05)',
+            name=f'종목 스크리닝 ({settings.screening_time_str})',
             replace_existing=True
         )
 
         # 3. 자동 매수 (KST 09:25) - 필터링 후 최종 매수
         self.scheduler.add_job(
             self._run_execute_buy,
-            CronTrigger(hour=9, minute=25, day_of_week='mon-fri', timezone=_KST_TZ),
+            CronTrigger(hour=9, minute=buy_minute, day_of_week='mon-fri', timezone=_KST_TZ),
             id='execute_buy',
             name='자동 매수',
             replace_existing=True
@@ -170,9 +181,9 @@ class TradingScheduler:
         # 옵션 D-1: KIS WebSocket 동적 SUBSCRIBE 미지원 → start_monitoring()이 stop+start 패턴으로 재시작
         self.scheduler.add_job(
             self._run_monitoring_start,
-            CronTrigger(hour=9, minute=26, day_of_week='mon-fri', timezone=_KST_TZ),
+            CronTrigger(hour=9, minute=monitoring_minute, day_of_week='mon-fri', timezone=_KST_TZ),
             id='monitoring_start',
-            name='모니터링 재시작 (09:26, 신규 매수분 포함)',
+            name=f'모니터링 재시작 ({settings.monitoring_time_str}, 신규 매수분 포함)',
             replace_existing=True
         )
 
@@ -224,7 +235,7 @@ class TradingScheduler:
         # 10. 주중 교체 손실 매도 (KST 09:10)
         self.scheduler.add_job(
             self._run_midweek_sell_loss,
-            CronTrigger(hour=9, minute=10, day_of_week='mon-fri', timezone=_KST_TZ),
+            CronTrigger(hour=9, minute=midweek_loss_minute, day_of_week='mon-fri', timezone=_KST_TZ),
             id='midweek_sell_loss',
             name='주중 교체 손실 매도',
             replace_existing=True
@@ -233,9 +244,9 @@ class TradingScheduler:
         # 10-1. 보유기간 만료 매도 (KST 09:15) - 09:25 매수 전 슬롯 확보
         self.scheduler.add_job(
             self._run_hold_period_sell,
-            CronTrigger(hour=9, minute=15, day_of_week='mon-fri', timezone=_KST_TZ),
+            CronTrigger(hour=9, minute=hold_period_minute, day_of_week='mon-fri', timezone=_KST_TZ),
             id='hold_period_sell',
-            name='보유기간 만료 매도 (09:15)',
+            name=f'보유기간 만료 매도 ({settings.hold_period_time_str})',
             replace_existing=True
         )
 
@@ -373,7 +384,7 @@ class TradingScheduler:
         """등록된 스케줄 출력 (KST 기준)"""
         jobs = self.scheduler.get_jobs()
 
-        logger.info("\n📅 등록된 스케줄 (KST 기준):")
+        logger.info(f"\n📅 등록된 스케줄 (KST 기준) — EARLY_BUY_ENABLED={settings.EARLY_BUY_ENABLED}")
         for job in jobs:
             next_run = ""
             if hasattr(job, 'next_run_time') and job.next_run_time:
@@ -421,7 +432,7 @@ class TradingScheduler:
     async def _run_stock_screening(self) -> None:
         """09:05 - 종목 스크리닝 (장 시작 후)"""
         logger.info("=" * 60)
-        logger.info("🔍 종목 스크리닝 시작 (09:05)")
+        logger.info(f"🔍 종목 스크리닝 시작 ({settings.screening_time_str})")
         logger.info("   └─ 장 시작 후 실시간 데이터로 스크리닝")
         logger.info("   └─ 수급/기술/재무/유동성 필터 적용")
         logger.info("=" * 60)
@@ -440,7 +451,7 @@ class TradingScheduler:
     async def _run_execute_buy(self) -> None:
         """09:25 - 자동 매수 실행 (관찰 후)"""
         logger.info("=" * 60)
-        logger.info("💰 자동 매수 실행 (09:25)")
+        logger.info(f"💰 자동 매수 실행 ({settings.buy_time_str})")
         logger.info("   └─ 장 초반 필터링 완료 후 최종 매수")
         logger.info("=" * 60)
         

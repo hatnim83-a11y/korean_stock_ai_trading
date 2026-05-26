@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, computed_field
 from typing import Optional
 
 
@@ -739,7 +739,72 @@ class Settings(BaseSettings):
         default=50.0,
         description="최소 체결 강도 (%, 50=중립. 3월 분석 후 45→50 강화)"
     )
-    
+
+    # ===== 아침 매수 조기 진입 (A3안, EARLY_BUY) =====
+    # 분봉 시뮬: 09:05 진입 +1.91% vs 09:25 -2.81% (격차 +4.72%p). GS리테일(5/8) +18.75% vs -5% 손절.
+    # v17 분할진입(1차 50%)이 1차 진입 리스크 분산 → 공격적 진입 정당화.
+    # 마스터 토글 1개 + 보조 4개로 시간 변경 + observer 미생성 + 거래량 OFF + Market Guard 단축 자동 연동.
+    EARLY_BUY_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "아침 매수 09:05 조기 진입 마스터 토글. "
+            "True=스케줄 09:00/01/02/02/05/06 재배치 + observer 미생성 + 거래량 필터 OFF + Market Guard 지연 단축. "
+            "False=09:25 legacy 100%. ⚠️ default=False (안전). 1주 dry-run 후 활성화 권장."
+        )
+    )
+    EARLY_BUY_OBSERVATION_MINUTES: int = Field(
+        default=0,
+        description="EARLY_BUY_ENABLED=True 시 사용할 관찰 시간 (0=관찰 task 미생성 + Phase 0 즉시 통과)"
+    )
+    EARLY_BUY_DISABLE_VOLUME_FILTER: bool = Field(
+        default=True,
+        description=(
+            "09:05 매수 시 거래량 필터 비활성. "
+            "5분 데이터에서 expected_volume = avg × (5/390) = 1.28% 라 90%+ 탈락 위험."
+        )
+    )
+    EARLY_BUY_DISABLE_STRENGTH_FILTER: bool = Field(
+        default=False,
+        description=(
+            "09:05 매수 시 체결강도 필터 비활성. "
+            "default=False (체결강도는 5분치도 의미 있어 보존 — strategy-planner 권고)."
+        )
+    )
+    EARLY_BUY_MARKET_GUARD_DELAY_MINUTES: int = Field(
+        default=15,
+        description=(
+            "EARLY_BUY_ENABLED=True + Market Guard DANGER 시 지연(분). "
+            "기존 35분(legacy) → 09:05+15=09:20 재체크로 단축, A3안 의미 보존."
+        )
+    )
+
+    # ===== 시간 문자열 property (메시지/로그 변수화용) =====
+    # EARLY_BUY_ENABLED 에 따라 09:05/09:25 자동 결정. 호출 측에서 settings.buy_time_str 등 사용.
+    @computed_field
+    @property
+    def buy_time_str(self) -> str:
+        return "09:05" if self.EARLY_BUY_ENABLED else "09:25"
+
+    @computed_field
+    @property
+    def screening_time_str(self) -> str:
+        return "09:02" if self.EARLY_BUY_ENABLED else "09:05"
+
+    @computed_field
+    @property
+    def monitoring_time_str(self) -> str:
+        return "09:06" if self.EARLY_BUY_ENABLED else "09:26"
+
+    @computed_field
+    @property
+    def hold_period_time_str(self) -> str:
+        return "09:02" if self.EARLY_BUY_ENABLED else "09:15"
+
+    @computed_field
+    @property
+    def midweek_loss_time_str(self) -> str:
+        return "09:01" if self.EARLY_BUY_ENABLED else "09:10"
+
     # ===== 실시간 관찰 설정 (Observation Loop) =====
     OBSERVATION_INTERVAL_SECONDS: int = Field(
         default=180,

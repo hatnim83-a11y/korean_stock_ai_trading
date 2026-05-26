@@ -158,6 +158,10 @@ class TradingSystem:
         self.today_trades: list[dict] = []       # 오늘 거래 내역
         self.observation_result = None              # 실시간 관찰 결과
         self._observer_task = None                  # 관찰 비동기 태스크
+        # CRITICAL: Screening↔Buy 동기화 Event (A3안 09:05 매수 race 방지)
+        # 초기 set 상태 → 첫 매수 호출 즉시 통과. run_stock_screening 진입 시 clear, 종료 시 set.
+        self._screening_done = asyncio.Event()
+        self._screening_done.set()
         self._listener_task = None                  # 텔레그램 명령어 리스너 태스크
         self._last_theme_rotation_date: Optional[date] = None  # 7일 고정 로테이션
         self.trading_paused = False  # 텔레그램 /pause로 매매 일시정지
@@ -452,7 +456,7 @@ class TradingSystem:
                                         t["url"] = upjong_url
                                         logger.info(f"   ✓ [{t_name}] 업종 검색으로 url 보충")
                                     else:
-                                        logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 (09:05 스크리닝에서 재시도)")
+                                        logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 ({settings.screening_time_str} 스크리닝에서 재시도)")
                     except Exception as e:
                         logger.error(f"   종목 URL/종목수 보충 실패: {e}")
 
@@ -663,7 +667,7 @@ class TradingSystem:
                                 supplemented += 1
                                 logger.info(f"   ✓ [{t_name}] 업종 검색으로 url 보충")
                             else:
-                                logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 (09:05 스크리닝에서 재시도)")
+                                logger.warning(f"   ✗ [{t_name}] 모든 URL 검색 실패 ({settings.screening_time_str} 스크리닝에서 재시도)")
                     logger.info(f"   URL 보충: {supplemented}/{len(themes)}개 테마")
                 except Exception as e:
                     logger.error(f"   종목 URL 보충 실패: {e}")
@@ -724,7 +728,7 @@ class TradingSystem:
 
             elapsed = (now_kst() - start_time).total_seconds()
             logger.info(f"\n✅ 테마 분석 완료 ({elapsed:.1f}초)")
-            logger.info("   └─ 09:05 장 시작 후 종목 스크리닝 예정")
+            logger.info(f"   └─ {settings.screening_time_str} 장 시작 후 종목 스크리닝 예정")
 
             # 이전 테마와 비교하여 상세 보고
             prev_names = {t.get("theme", t.get("name", "")) for t in self._previous_themes}
@@ -827,7 +831,7 @@ class TradingSystem:
                     msg += f"  {i}. {name} ({score:.1f}점){pr_str}{liq_warn}\n"
 
             msg += f"\n📅 다음 재평가: {next_review.strftime('%m/%d')} (화) ({days_until_tuesday}일 후)\n"
-            msg += f"⏰ 09:05 장 시작 후 종목 스크리닝 예정"
+            msg += f"⏰ {settings.screening_time_str} 장 시작 후 종목 스크리닝 예정"
 
             self.notifier.send_message(msg)
 
@@ -856,11 +860,20 @@ class TradingSystem:
         """
         if self.trading_paused:
             logger.info("⏸️ 매매 일시정지 중 — 종목 스크리닝 스킵")
-            self.notifier.send_message("⏸️ 09:05 스크리닝 스킵 (일시정지 중)")
+            self.notifier.send_message(f"⏸️ {settings.screening_time_str} 스크리닝 스킵 (일시정지 중)")
             return {"success": True, "paused": True}
 
+        # CRITICAL: A3안 09:05 매수와 동기화 — screening 진입 시 Event clear, 종료 시 set (finally)
+        self._screening_done.clear()
+        try:
+            return await self._run_stock_screening_impl()
+        finally:
+            self._screening_done.set()
+
+    async def _run_stock_screening_impl(self) -> dict:
+        """run_stock_screening 본문 — Event 보장을 위해 wrapper에서 try/finally로 호출"""
         logger.info("=" * 70)
-        logger.info("🔍 종목 스크리닝 시작 (09:05, 장 시작 후)")
+        logger.info(f"🔍 종목 스크리닝 시작 ({settings.screening_time_str}, 장 시작 후)")
         logger.info("=" * 70)
 
         start_time = now_kst()
@@ -895,7 +908,7 @@ class TradingSystem:
             if not candidates:
                 logger.warning("후보 종목이 없습니다")
                 self.notifier.send_message(
-                    f"⚠️ 09:05 스크리닝 완료 - 후보 종목 없음\n"
+                    f"⚠️ {settings.screening_time_str} 스크리닝 완료 - 후보 종목 없음\n"
                     f"- {len(themes)}개 테마에서 통과 종목 없음"
                 )
                 return {"success": False, "reason": "후보 종목 없음"}
@@ -915,7 +928,7 @@ class TradingSystem:
             if not verified:
                 logger.warning("AI 검증 통과 종목이 없습니다")
                 self.notifier.send_message(
-                    f"⚠️ 09:05 스크리닝 완료 - AI 검증 통과 0개\n\n"
+                    f"⚠️ {settings.screening_time_str} 스크리닝 완료 - AI 검증 통과 0개\n\n"
                     f"📊 필터 통과: {len(candidates)}개 종목\n"
                     f"🤖 AI 검증 통과: 0개\n"
                     f"─────────────────\n"
@@ -958,7 +971,7 @@ class TradingSystem:
 
             logger.info(f"\n✅ 종목 스크리닝 완료 ({elapsed:.1f}초)")
             logger.info(f"   매수 후보: {len(self.today_candidates)}개")
-            logger.info("   └─ 09:25 필터링 후 최종 매수 실행")
+            logger.info(f"   └─ {settings.buy_time_str} 필터링 후 최종 매수 실행")
 
             # 후보 목록 출력
             logger.info("\n📋 매수 대상 종목:")
@@ -984,20 +997,25 @@ class TradingSystem:
                 stock_text = "\n".join(stock_list)
 
                 self.notifier.send_message(
-                    f"🔍 09:05 스크리닝 완료\n\n"
+                    f"🔍 {settings.screening_time_str} 스크리닝 완료\n\n"
                     f"📊 매수 후보: {len(self.today_candidates)}개\n"
                     f"─────────────────\n"
                     f"{stock_text}\n"
                     f"─────────────────\n"
-                    f"⏰ 09:25 필터링 후 매수 예정"
+                    f"⏰ {settings.buy_time_str} 필터링 후 매수 예정"
                 )
 
             # 주중 교체: 손실 종목 재평가 (탈락 테마 손실 종목을 스크리닝으로 평가)
             if self._midweek_loss_queue and self._midweek_dropped_theme:
                 await self._rescore_midweek_loss_stocks()
 
-            # 실시간 관찰 시작 (09:05 ~ 09:23)
-            if settings.ENABLE_MORNING_FILTER and self.today_candidates:
+            # 실시간 관찰 시작 (09:05 ~ 09:23, EARLY_BUY 모드는 관찰 미생성)
+            # A3안: 09:05 매수 시 관찰 시간 자체가 없으므로 observer task 생성 안 함.
+            if (
+                settings.ENABLE_MORNING_FILTER
+                and not settings.EARLY_BUY_ENABLED
+                and self.today_candidates
+            ):
                 observer = CandidateObserver(self.today_candidates, self.notifier)
                 self._observer_task = asyncio.create_task(
                     self._run_observation(observer)
@@ -1063,7 +1081,7 @@ class TradingSystem:
                     drop_list.append(stock)
                     logger.info(
                         f"   ❌ {stock['stock_name']} — 재평가 탈락 "
-                        f"({score:.1f} < {threshold}) → 09:10 매도"
+                        f"({score:.1f} < {threshold}) → {settings.midweek_loss_time_str} 매도"
                     )
 
         except Exception as e:
@@ -1079,7 +1097,7 @@ class TradingSystem:
                 f"🔄 주중 교체 — 손실 종목 재평가 결과\n\n"
                 f"✅ 유지: {len(keep_list)}개 (기존 손절/트레일링 적용)\n"
                 + "\n".join(f"  - {s['stock_name']} ({s['profit_rate']:+.1%})" for s in keep_list)
-                + (f"\n\n❌ 09:10 매도 예정: {len(drop_list)}개\n"
+                + (f"\n\n❌ {settings.midweek_loss_time_str} 매도 예정: {len(drop_list)}개\n"
                    + "\n".join(f"  - {s['stock_name']} ({s['profit_rate']:+.1%})" for s in drop_list)
                    if drop_list else "")
             )
@@ -1106,7 +1124,7 @@ class TradingSystem:
         """
         if self.trading_paused:
             logger.info("⏸️ 매매 일시정지 중 — 매수 스킵")
-            self.notifier.send_message("⏸️ 09:25 매수 스킵 (일시정지 중)")
+            self.notifier.send_message(f"⏸️ {settings.buy_time_str} 매수 스킵 (일시정지 중)")
             return {"success": True, "paused": True}
 
         # Phase 0.5: 시장 위기 방어 (Market Guard)
@@ -1127,7 +1145,12 @@ class TradingSystem:
 
             elif market_status == MarketStatus.DANGER:
                 if settings.MARKET_GUARD_DELAY_ENABLED:
-                    delay_min = settings.MARKET_GUARD_DELAY_MINUTES
+                    # A3안: EARLY_BUY 모드는 35분 → 15분으로 단축 (09:05+15=09:20 재체크, A3 의미 보존)
+                    delay_min = (
+                        settings.EARLY_BUY_MARKET_GUARD_DELAY_MINUTES
+                        if settings.EARLY_BUY_ENABLED
+                        else settings.MARKET_GUARD_DELAY_MINUTES
+                    )
                     msg = f"⚠️ 시장 급락 감지 — {delay_min}분 후 재체크\nKOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%"
                     logger.warning(msg)
                     self.notifier.send_message(msg)
@@ -1165,7 +1188,7 @@ class TradingSystem:
                 logger.info(f"[MarketGuard] 시장 정상 — KOSPI {kr:+.2f}% / KOSDAQ {kd:+.2f}%")
 
         logger.info("=" * 70)
-        logger.info("💰 빈 슬롯 매수 실행 (09:25)")
+        logger.info(f"💰 빈 슬롯 매수 실행 ({settings.buy_time_str})")
         logger.info("=" * 70)
 
         # 매수 요약용 상태 초기화 (이전 날 데이터 누출 방지)
@@ -1178,11 +1201,28 @@ class TradingSystem:
         self._theme_relaxation_applied = False
         self._theme_relaxation_count = 0
 
-        # Phase 0: 관찰 완료 대기
+        # CRITICAL Phase 0-pre: Screening↔Buy 동기화 (A3안 09:05 매수 race 방지)
+        # 스크리닝 진행 중이면 _screening_done.set() 까지 대기 (최대 180초). 초과 시 alert + 진행.
+        if not self._screening_done.is_set():
+            logger.info("⏳ 종목 스크리닝 완료 대기 중...")
+            try:
+                await asyncio.wait_for(self._screening_done.wait(), timeout=180)
+                logger.info("   ✅ 스크리닝 완료 — 매수 진행")
+            except asyncio.TimeoutError:
+                err_msg = f"🚨 {settings.buy_time_str} 매수: 스크리닝 180초 timeout — 가용 데이터로 진행"
+                logger.error(err_msg)
+                self.notifier.send_message(err_msg)
+
+        # Phase 0: 관찰 완료 대기 (EARLY_BUY 모드는 observer 미생성이라 즉시 통과)
         if self._observer_task and not self._observer_task.done():
             logger.info("⏳ 관찰 완료 대기 중...")
+            timeout_min = (
+                settings.EARLY_BUY_OBSERVATION_MINUTES
+                if settings.EARLY_BUY_ENABLED
+                else settings.MORNING_OBSERVATION_MINUTES
+            )
             try:
-                await asyncio.wait_for(self._observer_task, timeout=settings.MORNING_OBSERVATION_MINUTES * 60)
+                await asyncio.wait_for(self._observer_task, timeout=timeout_min * 60)
             except asyncio.TimeoutError:
                 logger.warning("관찰 타임아웃 - 가용 데이터로 진행")
 
@@ -1190,9 +1230,9 @@ class TradingSystem:
         if not self.today_ai_analysis:
             logger.warning("AI 분석 결과 없음 - 매수 스킵")
             self.notifier.send_message(
-                "⚠️ 09:25 매수 스킵\n\n"
-                "AI 분석 결과가 없습니다\n"
-                "09:05 스크리닝 결과를 확인하세요"
+                f"⚠️ {settings.buy_time_str} 매수 스킵\n\n"
+                f"AI 분석 결과가 없습니다\n"
+                f"{settings.screening_time_str} 스크리닝 결과를 확인하세요"
             )
             return {"success": False, "reason": "AI 분석 없음"}
 
@@ -2141,7 +2181,7 @@ class TradingSystem:
                 logger.info(f"      📈 {h['stock_name']} ({profit_rate:+.1%}) → 09:00 매도")
             else:
                 self._midweek_loss_queue.append(stock_info)
-                logger.info(f"      📉 {h['stock_name']} ({profit_rate:+.1%}) → 09:05 재평가")
+                logger.info(f"      📉 {h['stock_name']} ({profit_rate:+.1%}) → {settings.screening_time_str} 재평가")
 
         # 텔레그램 알림
         profit_lines = []
@@ -2149,7 +2189,7 @@ class TradingSystem:
             profit_lines.append(f"  📈 {s['stock_name']} ({s['profit_rate']:+.1%}) → 09:00 매도")
         loss_lines = []
         for s in self._midweek_loss_queue:
-            loss_lines.append(f"  📉 {s['stock_name']} ({s['profit_rate']:+.1%}) → 09:05 재평가")
+            loss_lines.append(f"  📉 {s['stock_name']} ({s['profit_rate']:+.1%}) → {settings.screening_time_str} 재평가")
 
         position_text = ""
         if profit_lines or loss_lines:
@@ -2160,7 +2200,7 @@ class TradingSystem:
             f"❌ 탈락: {dropped_name} (전일 {drop_target['yesterday_score']:.1f}점)\n"
             f"✅ 교체: {replacement['theme_name']} (전일 {best_candidate_score:.1f}점)"
             f"{position_text}\n\n"
-            f"빈 슬롯은 09:25에 {replacement['theme_name']} 종목으로 채움"
+            f"빈 슬롯은 {settings.buy_time_str}에 {replacement['theme_name']} 종목으로 채움"
         )
     
     # ===== trade_review 적재 헬퍼 (monitor 우회 매도용) =====
@@ -2232,7 +2272,7 @@ class TradingSystem:
         09:25 매수 전에 실행하여 빈 슬롯을 확보한다.
         DB에서 포트폴리오를 읽어 영업일 기준 보유기간 초과 종목을 매도.
         """
-        logger.info("⏰ 보유기간 만료 체크 (09:15)")
+        logger.info(f"⏰ 보유기간 만료 체크 ({settings.hold_period_time_str})")
 
         try:
             portfolio = self.db.get_portfolio("holding")
@@ -2410,13 +2450,13 @@ class TradingSystem:
                 # 텔레그램 알림
                 pnl_emoji = "🔺" if actual_profit_rate >= 0 else "🔻"
                 self.notifier.send_message(
-                    f"⏰ 보유기간 초과 매도 (09:15)\n\n"
+                    f"⏰ 보유기간 초과 매도 ({settings.hold_period_time_str})\n\n"
                     f"📊 {stock_name} ({stock_code})\n"
                     f"💰 매수가: {int(buy_price):,}원 → 매도가: {int(filled_price):,}원\n"
                     f"📊 수량: {quantity}주\n"
                     f"{pnl_emoji} 수익: {actual_profit_rate:+.2%} ({int(actual_profit_amount):+,}원)\n"
                     f"📅 보유: {target.get('hold_days', '?')}영업일 / 최대 {target.get('max_days', '?')}일\n\n"
-                    f"⚠️ 보유기간 만료 → 09:25 매수에서 슬롯 활용"
+                    f"⚠️ 보유기간 만료 → {settings.buy_time_str} 매수에서 슬롯 활용"
                 )
 
                 self.today_trades.append({
@@ -2578,7 +2618,7 @@ class TradingSystem:
             return
 
         logger.info("=" * 70)
-        logger.info("🔄 주중 교체 — 재평가 탈락 종목 매도 (09:10)")
+        logger.info(f"🔄 주중 교체 — 재평가 탈락 종목 매도 ({settings.midweek_loss_time_str})")
         logger.info("=" * 70)
 
         reason = "주중 테마 교체 (재평가 탈락)"

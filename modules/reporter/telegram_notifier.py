@@ -829,16 +829,16 @@ class TelegramNotifier:
         self._system_ref.trading_paused = True
         logger.info("⏸️ 매매 일시정지 활성화 (텔레그램 명령)")
         self._send_to_chat(chat_id,
-            "⏸️ 매매 일시정지 활성화\n\n"
-            "중단 항목:\n"
-            "  • 08:30 테마 분석\n"
-            "  • 09:05 종목 스크리닝\n"
-            "  • 09:25 자동 매수\n\n"
-            "유지 항목:\n"
-            "  • 보유 종목 모니터링 (손절/트레일링)\n"
-            "  • 17:05 일별 테마 수집\n"
-            "  • 일일 리포트/사후 분석\n\n"
-            "/resume 으로 매매 재개"
+            f"⏸️ 매매 일시정지 활성화\n\n"
+            f"중단 항목:\n"
+            f"  • 08:30 테마 분석\n"
+            f"  • {settings.screening_time_str} 종목 스크리닝\n"
+            f"  • {settings.buy_time_str} 자동 매수\n\n"
+            f"유지 항목:\n"
+            f"  • 보유 종목 모니터링 (손절/트레일링)\n"
+            f"  • 17:05 일별 테마 수집\n"
+            f"  • 일일 리포트/사후 분석\n\n"
+            f"/resume 으로 매매 재개"
         )
 
     def _handle_resume_command(self, chat_id: int) -> None:
