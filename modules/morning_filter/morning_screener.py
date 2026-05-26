@@ -85,8 +85,8 @@ class MorningScreener:
         self,
         enable_gap_filter: bool = True,
         enable_supply_filter: bool = True,
-        enable_volume_filter: bool = True,
-        enable_strength_filter: bool = True,
+        enable_volume_filter: Optional[bool] = None,
+        enable_strength_filter: Optional[bool] = None,
         enable_dynamic_gap: bool = True,
         observation_minutes: int = None
     ):
@@ -94,11 +94,20 @@ class MorningScreener:
         Args:
             enable_gap_filter: 갭 필터 활성화
             enable_supply_filter: 수급 필터 활성화
-            enable_volume_filter: 거래량 필터 활성화
-            enable_strength_filter: 체결 강도 필터 활성화
+            enable_volume_filter: 거래량 필터 활성화 (None=settings 토글, EARLY_BUY 시 OFF)
+            enable_strength_filter: 체결 강도 필터 활성화 (None=settings 토글, EARLY_BUY default 보존)
             enable_dynamic_gap: 동적 갭 기준 활성화 (시장 상황 반영)
             observation_minutes: 관찰 시간 (분)
         """
+        # A3안: EARLY_BUY_ENABLED + DISABLE_*_FILTER 토글에 따라 자동 결정
+        if enable_volume_filter is None:
+            enable_volume_filter = not (
+                settings.EARLY_BUY_ENABLED and settings.EARLY_BUY_DISABLE_VOLUME_FILTER
+            )
+        if enable_strength_filter is None:
+            enable_strength_filter = not (
+                settings.EARLY_BUY_ENABLED and settings.EARLY_BUY_DISABLE_STRENGTH_FILTER
+            )
         self.enable_gap_filter = enable_gap_filter
         self.enable_supply_filter = enable_supply_filter
         self.enable_volume_filter = enable_volume_filter
