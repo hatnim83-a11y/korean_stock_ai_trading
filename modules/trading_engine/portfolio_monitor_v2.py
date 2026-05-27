@@ -331,11 +331,20 @@ class PortfolioMonitorV2:
         buy_price: float,
         stop_loss_price: float,
         theme: str = "",
-        buy_date: Optional[datetime] = None
+        buy_date: Optional[datetime] = None,
+        # v17: 분할 진입 + 불타기 + ATR 필드 (2026-05-27 hotfix)
+        # DB→메모리 복원 누락으로 2차 진입 항상 차단되던 버그 fix
+        first_buy_price: Optional[float] = None,
+        avg_buy_price: Optional[float] = None,
+        tranche_count: int = 1,
+        second_tranche_executed: bool = False,
+        second_tranche_pending: bool = False,
+        atr_at_buy: float = 0.0,
+        atr_period: int = 14,
     ) -> None:
         """
-        포지션 추가
-        
+        포지션 추가 (v17: 분할 진입/불타기/ATR 필드 포함)
+
         Args:
             stock_code: 종목코드
             stock_name: 종목명
@@ -344,6 +353,13 @@ class PortfolioMonitorV2:
             stop_loss_price: 손절가
             theme: 테마
             buy_date: 매수일
+            first_buy_price: 1차 진입가 (None이면 buy_price 폴백)
+            avg_buy_price: 평균단가 (None이면 first_buy_price 폴백 — Position.__post_init__)
+            tranche_count: 진입 회차 (default 1)
+            second_tranche_executed: 2차 완료 플래그
+            second_tranche_pending: 2차 대기 상태 (1차 진입 후 신규 매수면 True)
+            atr_at_buy: ATR(14일) 박제값
+            atr_period: ATR 기간
         """
         position = Position(
             stock_code=stock_code,
@@ -355,11 +371,22 @@ class PortfolioMonitorV2:
             current_price=buy_price,
             highest_price=buy_price,
             theme=theme,
-            buy_date=buy_date or now_kst()
+            buy_date=buy_date or now_kst(),
+            # v17 필드
+            first_buy_price=first_buy_price if first_buy_price is not None else buy_price,
+            avg_buy_price=avg_buy_price if avg_buy_price is not None else (first_buy_price or buy_price),
+            tranche_count=tranche_count,
+            second_tranche_executed=second_tranche_executed,
+            second_tranche_pending=second_tranche_pending,
+            atr_at_buy=atr_at_buy,
+            atr_period=atr_period,
         )
-        
+
         self.positions[stock_code] = position
-        logger.info(f"포지션 추가: {stock_name} ({stock_code}) {shares}주 @ {buy_price:,}원")
+        logger.info(
+            f"포지션 추가: {stock_name} ({stock_code}) {shares}주 @ {buy_price:,}원 "
+            f"(tranche={tranche_count}, pending={second_tranche_pending}, atr={atr_at_buy})"
+        )
     
     def remove_position(self, stock_code: str) -> None:
         """포지션 제거 + position_state DB/JSON 동기 삭제
@@ -466,6 +493,9 @@ class PortfolioMonitorV2:
                     except ValueError:
                         buy_date = None
 
+                # v17: DB의 분할 진입/불타기/ATR 필드를 메모리 Position에 복원
+                # (2026-05-27 hotfix — 누락 시 second_tranche_pending=False로 default 되어
+                # _check_and_execute_pyramid_in 1단계 가드에서 즉시 차단됨)
                 self.add_position(
                     stock_code=item["stock_code"],
                     stock_name=item["stock_name"],
@@ -473,7 +503,14 @@ class PortfolioMonitorV2:
                     buy_price=item["buy_price"],
                     stop_loss_price=item["stop_loss"],
                     theme=item.get("theme", ""),
-                    buy_date=buy_date or now_kst()
+                    buy_date=buy_date or now_kst(),
+                    first_buy_price=item.get("first_buy_price") or item.get("buy_price"),
+                    avg_buy_price=item.get("avg_buy_price") or item.get("buy_price"),
+                    tranche_count=int(item.get("tranche_count") or 1),
+                    second_tranche_executed=bool(item.get("second_tranche_executed") or 0),
+                    second_tranche_pending=bool(item.get("second_tranche_pending") or 0),
+                    atr_at_buy=float(item.get("atr_at_buy") or 0.0),
+                    atr_period=int(item.get("atr_period") or 14),
                 )
 
             # monitor_state.json에서 트레일링 상태 복원
