@@ -233,6 +233,76 @@ def test_save_holding_position_explicit_v17():
         print("  [PASS] save_holding_position_explicit_v17")
 
 
+def test_add_position_v17_fields_restored():
+    """add_position v17 필드 복원 — 2026-05-27 critical hotfix 회귀 테스트.
+
+    load_positions_from_db → add_position 흐름에서 second_tranche_pending/atr_at_buy 등
+    v17 필드가 DB→메모리 복원 안 되어 2차 진입이 항상 차단되던 버그 fix 검증.
+    """
+    from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2
+
+    monitor = PortfolioMonitorV2(use_mock=True)
+
+    # DB에서 로드된 행을 시뮬레이션 (v17 필드 포함)
+    monitor.add_position(
+        stock_code="437730",
+        stock_name="삼현",
+        shares=9,
+        buy_price=61500,
+        stop_loss_price=57195,  # -7%
+        theme="AI반도체",
+        first_buy_price=61500,
+        avg_buy_price=61500,
+        tranche_count=1,
+        second_tranche_executed=False,
+        second_tranche_pending=True,  # ⚠️ DB에서 True 복원
+        atr_at_buy=4992.86,  # ⚠️ DB에서 박제값 복원
+        atr_period=14,
+    )
+
+    pos = monitor.positions["437730"]
+    # 복원 정확성 검증
+    assert pos.second_tranche_pending is True, f"pending 복원 실패: {pos.second_tranche_pending}"
+    assert pos.second_tranche_executed is False
+    assert pos.atr_at_buy == 4992.86, f"atr 복원 실패: {pos.atr_at_buy}"
+    assert pos.tranche_count == 1
+    assert pos.first_buy_price == 61500
+    assert pos.avg_buy_price == 61500
+
+    # +6.5% 도달 시뮬레이션 (삼현 케이스 재현)
+    pos.current_price = 65500
+    assert pos.profit_rate > 0.05, f"+5% 트리거 임계 미충족: {pos.profit_rate}"
+
+    # effective_trailing_pct ATR 적용 검증 (atr=4992.86, first=61500 → atr_pct = 2.0 × 4992.86 / 61500 = 16.2%)
+    eff_pct = pos.effective_trailing_pct(0.04)  # L1 고정 4%
+    assert eff_pct > 0.04, f"ATR 적용 실패: {eff_pct} (atr_pct는 16.2%여야 함)"
+    print("  [PASS] add_position_v17_fields_restored")
+
+
+def test_add_position_v17_defaults_safe():
+    """add_position v17 필드 미전달 시 안전한 default — 기존 코드 호환성."""
+    from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2
+
+    monitor = PortfolioMonitorV2(use_mock=True)
+    # v17 필드 미전달 (기존 호출 패턴)
+    monitor.add_position(
+        stock_code="000001",
+        stock_name="테스트",
+        shares=10,
+        buy_price=10000,
+        stop_loss_price=9300,
+    )
+
+    pos = monitor.positions["000001"]
+    assert pos.first_buy_price == 10000, "first_buy_price 폴백 실패"
+    assert pos.avg_buy_price == 10000, "avg_buy_price 폴백 실패"
+    assert pos.second_tranche_pending is False, "default False 실패"
+    assert pos.atr_at_buy == 0.0, "default 0 실패"
+    # ATR=0 → effective_trailing_pct는 고정값 유지
+    assert pos.effective_trailing_pct(0.04) == 0.04
+    print("  [PASS] add_position_v17_defaults_safe")
+
+
 def test_swing_pool_calculation_logic():
     """가드 B' 핵심 로직 — swing_pool 한도 계산 (2026-05-23 hotfix).
 
@@ -360,6 +430,8 @@ def main():
         test_db_v17_migration_idempotent,
         test_db_v17_backfill_existing_holdings,
         test_save_holding_position_explicit_v17,
+        test_add_position_v17_fields_restored,  # 2026-05-27 critical hotfix
+        test_add_position_v17_defaults_safe,    # 2026-05-27 critical hotfix
         test_swing_pool_calculation_logic,  # 2026-05-23 hotfix 가드 B'
         test_time_guard_logic,              # 2026-05-23 hotfix 가드 A
         test_update_portfolio_second_tranche,
