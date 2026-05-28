@@ -631,6 +631,12 @@ class PortfolioMonitorV2:
 
             # v17: 분할 진입 상태 복원 (avg_buy_price/tranche_count/executed/pending/atr)
             # 폴백: avg <= 0 → avg = first 강제 (catastrophic bug 방어 — Coder P2)
+            #
+            # 2026-05-28 hotfix (옵션 A): DB source 경로(`position_state` 테이블)에는
+            # v17 필드 미저장(DDL에 없음)이라 s.get(..., default) 호출이 항상 default 반환 →
+            # add_position이 portfolio 테이블에서 복원한 정상값을 덮어쓰는 회귀 위험.
+            # → DB source 경로에서는 v17 필드 키 존재 여부 체크 후 키 있을 때만 덮어쓰기.
+            # JSON 폴백 경로는 _dump_monitor_state가 v17 키 모두 dump하므로 그대로.
             saved_first = s.get("first_buy_price", 0) or 0
             if saved_first > 0:
                 pos.first_buy_price = saved_first
@@ -651,11 +657,16 @@ class PortfolioMonitorV2:
             else:
                 pos.avg_buy_price = saved_avg
 
-            pos.tranche_count = s.get("tranche_count", 1) or 1
-            pos.second_tranche_executed = bool(s.get("second_tranche_executed", False))
-            pos.second_tranche_pending = bool(s.get("second_tranche_pending", False))
-            saved_atr = s.get("atr_at_buy", 0) or 0
-            if saved_atr > 0:
+            # tranche_count / executed / pending / atr — DB source 경로에서는 키 존재 시에만 덮어쓰기
+            # (position_state 테이블에 v17 컬럼 없으면 add_position 복원값 보존)
+            if "tranche_count" in s and s.get("tranche_count"):
+                pos.tranche_count = s.get("tranche_count") or 1
+            if "second_tranche_executed" in s and s.get("second_tranche_executed") is not None:
+                pos.second_tranche_executed = bool(s.get("second_tranche_executed"))
+            if "second_tranche_pending" in s and s.get("second_tranche_pending") is not None:
+                pos.second_tranche_pending = bool(s.get("second_tranche_pending"))
+            saved_atr = s.get("atr_at_buy", None)
+            if saved_atr is not None and saved_atr > 0:
                 pos.atr_at_buy = saved_atr
 
             # current_price 복원 (WebSocket 수신 전 buy_price로 오발동 방지)
