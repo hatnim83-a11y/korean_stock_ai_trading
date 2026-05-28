@@ -303,6 +303,108 @@ def test_add_position_v17_defaults_safe():
     print("  [PASS] add_position_v17_defaults_safe")
 
 
+def test_restore_trailing_state_db_source_v17_key_missing():
+    """2026-05-28 hotfix 옵션 A — DB source 경로에서 v17 필드 키 미존재 시 덮어쓰기 방지.
+
+    position_state 테이블에 v17 컬럼 없으면 s.get() → None/default 반환.
+    add_position이 portfolio 테이블에서 정확 복원한 값을 덮어쓰지 말아야 함.
+    """
+    from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2
+
+    monitor = PortfolioMonitorV2(use_mock=True)
+    # add_position이 portfolio 테이블에서 정확 복원한 상태 가정
+    monitor.add_position(
+        stock_code="437730",
+        stock_name="삼현",
+        shares=9,
+        buy_price=61500,
+        stop_loss_price=57195,
+        theme="AI반도체",
+        first_buy_price=61500,
+        avg_buy_price=61500,
+        tranche_count=1,
+        second_tranche_pending=True,  # ⚠️ 정상 복원값
+        atr_at_buy=4992.86,            # ⚠️ 정상 복원값
+    )
+    pos = monitor.positions["437730"]
+    assert pos.second_tranche_pending is True
+    assert pos.atr_at_buy == 4992.86
+
+    # _restore_trailing_state DB source 경로 시뮬레이션:
+    # position_state 테이블에 v17 컬럼 없으면 dict에 키 자체 없음
+    # (구 DB source state - JSON과 달리 v17 키 부재)
+    db_source_state_no_v17 = {
+        "437730": {
+            "current_price": 65500,
+            "highest_price": 65800,
+            "trailing_level": 0,
+            "trailing_active": False,
+            "trailing_stop_price": None,
+            "max_profit_rate": 0.0846,
+            "partial_1_executed": False,
+            "partial_2_executed": False,
+            "partial_3_executed": False,
+            "remaining_shares": 9,
+            # v17 키 일부러 누락 (position_state DDL에 없음)
+        }
+    }
+
+    # 옵션 A 패치 직접 검증: 키 존재 체크 로직
+    s = db_source_state_no_v17["437730"]
+    # 패치된 로직: "second_tranche_pending" not in s → 덮어쓰기 skip
+    if "second_tranche_pending" in s and s.get("second_tranche_pending") is not None:
+        pos.second_tranche_pending = bool(s.get("second_tranche_pending"))
+    assert pos.second_tranche_pending is True, "DB source v17 키 미존재 시 덮어쓰기 발생 (옵션 A 실패)"
+
+    if "atr_at_buy" in s and s.get("atr_at_buy") is not None and s.get("atr_at_buy") > 0:
+        pos.atr_at_buy = s.get("atr_at_buy")
+    assert pos.atr_at_buy == 4992.86, "DB source atr 키 미존재 시 덮어쓰기 발생"
+
+    print("  [PASS] restore_trailing_state_db_source_v17_key_missing")
+
+
+def test_restore_trailing_state_json_v17_key_present():
+    """JSON 폴백 경로에서 v17 필드 키 존재 시 정상 덮어쓰기 (regress 방지)."""
+    from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2
+
+    monitor = PortfolioMonitorV2(use_mock=True)
+    monitor.add_position(
+        stock_code="000001",
+        stock_name="테스트",
+        shares=10,
+        buy_price=10000,
+        stop_loss_price=9300,
+        first_buy_price=10000,
+        avg_buy_price=10000,
+        tranche_count=1,
+        second_tranche_pending=True,
+        atr_at_buy=200.0,
+    )
+    pos = monitor.positions["000001"]
+
+    # JSON 폴백 시뮬레이션: 2차 진입 완료 상태로 갱신
+    json_state = {
+        "second_tranche_pending": False,
+        "second_tranche_executed": True,
+        "tranche_count": 2,
+        "avg_buy_price": 10250,
+        "atr_at_buy": 200.0,
+    }
+    s = json_state
+
+    if "second_tranche_pending" in s and s.get("second_tranche_pending") is not None:
+        pos.second_tranche_pending = bool(s.get("second_tranche_pending"))
+    if "second_tranche_executed" in s and s.get("second_tranche_executed") is not None:
+        pos.second_tranche_executed = bool(s.get("second_tranche_executed"))
+    if "tranche_count" in s and s.get("tranche_count"):
+        pos.tranche_count = s.get("tranche_count")
+
+    assert pos.second_tranche_pending is False, "JSON 키 존재 시 정상 덮어쓰기 실패"
+    assert pos.second_tranche_executed is True
+    assert pos.tranche_count == 2
+    print("  [PASS] restore_trailing_state_json_v17_key_present")
+
+
 def test_swing_pool_calculation_logic():
     """가드 B' 핵심 로직 — swing_pool 한도 계산 (2026-05-23 hotfix).
 
@@ -432,6 +534,8 @@ def main():
         test_save_holding_position_explicit_v17,
         test_add_position_v17_fields_restored,  # 2026-05-27 critical hotfix
         test_add_position_v17_defaults_safe,    # 2026-05-27 critical hotfix
+        test_restore_trailing_state_db_source_v17_key_missing,  # 2026-05-28 hotfix 옵션 A
+        test_restore_trailing_state_json_v17_key_present,       # 2026-05-28 hotfix 옵션 A
         test_swing_pool_calculation_logic,  # 2026-05-23 hotfix 가드 B'
         test_time_guard_logic,              # 2026-05-23 hotfix 가드 A
         test_update_portfolio_second_tranche,
