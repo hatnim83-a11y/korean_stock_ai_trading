@@ -94,6 +94,13 @@ def _make_executor(
         "" if fund_guard_allow else "테스트 거부",
     )
     fund_guard._get_total_value.return_value = total_value
+    # 2026-05-29: _compute_order_amount → fund_guard.compute_capital_limit 호출 mock
+    # capital_limit = total_value × 0.5 (cap), per_stock = capital_limit / max_concurrent
+    _mock_capital_limit = int(total_value * 0.5)
+    fund_guard.compute_capital_limit.return_value = (
+        _mock_capital_limit,
+        {"mode": "test_mock", "base_pool": total_value // 10},
+    )
 
     candidate_logger = CandidateLogger(db=db)
 
@@ -907,6 +914,110 @@ def test_EE_30_score_breakdown_descending_order():
         db.close()
 
 
+# ===== EE-31~33: 위기 시 score_threshold 동적 적용 (2026-05-29) =====
+
+
+def test_EE_31_normal_uses_score_threshold():
+    """EE-31: MarketGuard NORMAL → score_threshold(=2) 적용, score=2 후보 통과."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        db = _make_db(td)
+        _insert_candidate(db, ticker="005930", name="삼성전자", total_score=3)
+        _insert_candidate(db, ticker="000660", name="SK하이닉스", total_score=2)
+        _insert_candidate(db, ticker="035720", name="카카오", total_score=1)
+        settings = EntryExecutorSettings(
+            enabled=True, dry_run=True,
+            score_threshold=2, score_threshold_crisis=3,
+        )
+        ex = _make_executor(
+            db, settings=settings,
+            vwap_snap=VWAPSnapshot(ticker="x", vwap=70000.0, high=75500),
+            market_status=MarketStatus.NORMAL,
+        )
+        result = _run(ex.execute_phase1("2026-05-14"))
+        # NORMAL: threshold=2 적용 → score>=2 후보 2건
+        assert result.total_candidates == 2, f"got {result.total_candidates}"
+        tickers = {o.ticker for o in result.orders}
+        assert tickers == {"005930", "000660"}, f"got {tickers}"
+        print("✅ EE-31 NORMAL threshold=2 → score>=2 후보 2건")
+        db.close()
+
+
+def test_EE_32_crisis_uses_score_threshold_crisis():
+    """EE-32: MarketGuard DANGER → score_threshold_crisis(=3) 적용, score=2 후보 차단."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        db = _make_db(td)
+        _insert_candidate(db, ticker="005930", name="삼성전자", total_score=3)
+        _insert_candidate(db, ticker="000660", name="SK하이닉스", total_score=2)
+        _insert_candidate(db, ticker="035720", name="카카오", total_score=1)
+        settings = EntryExecutorSettings(
+            enabled=True, dry_run=True,
+            score_threshold=2, score_threshold_crisis=3,
+        )
+        ex = _make_executor(
+            db, settings=settings,
+            vwap_snap=VWAPSnapshot(ticker="x", vwap=70000.0, high=75500),
+            market_status=MarketStatus.DANGER,
+        )
+        result = _run(ex.execute_phase1("2026-05-14"))
+        # DANGER: threshold_crisis=3 적용 → score>=3 후보 1건만 (000660 score=2 차단)
+        assert result.total_candidates == 1, f"got {result.total_candidates}"
+        tickers = {o.ticker for o in result.orders}
+        assert tickers == {"005930"}, f"got {tickers}"
+        assert result.market_guard_status == "danger"
+        print("✅ EE-32 DANGER threshold_crisis=3 → score=2 차단 (1건만)")
+        db.close()
+
+
+def test_EE_33_caution_uses_score_threshold_crisis():
+    """EE-33: MarketGuard CAUTION 도 DANGER 와 동일하게 score_threshold_crisis 적용."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        db = _make_db(td)
+        _insert_candidate(db, ticker="005930", name="삼성전자", total_score=4)
+        _insert_candidate(db, ticker="000660", name="SK하이닉스", total_score=2)
+        settings = EntryExecutorSettings(
+            enabled=True, dry_run=True,
+            score_threshold=2, score_threshold_crisis=3,
+        )
+        ex = _make_executor(
+            db, settings=settings,
+            vwap_snap=VWAPSnapshot(ticker="x", vwap=70000.0, high=75500),
+            market_status=MarketStatus.CAUTION,
+        )
+        result = _run(ex.execute_phase1("2026-05-14"))
+        # CAUTION: threshold_crisis=3 적용 → score>=3 후보 1건만
+        assert result.total_candidates == 1, f"got {result.total_candidates}"
+        tickers = {o.ticker for o in result.orders}
+        assert tickers == {"005930"}, f"got {tickers}"
+        assert result.market_guard_status == "caution"
+        print("✅ EE-33 CAUTION 도 threshold_crisis=3 적용 (score=2 차단)")
+        db.close()
+
+
+def test_EE_34_default_threshold_crisis_equals_threshold():
+    """EE-34: score_threshold_crisis 기본값(2)일 때 NORMAL 과 DANGER 동일 동작 (롤백 안전)."""
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        db = _make_db(td)
+        _insert_candidate(db, ticker="005930", name="삼성전자", total_score=2)
+        settings = EntryExecutorSettings(
+            enabled=True, dry_run=True,
+            score_threshold=2,  # score_threshold_crisis 명시 X → default 2
+        )
+        ex = _make_executor(
+            db, settings=settings,
+            vwap_snap=VWAPSnapshot(ticker="x", vwap=70000.0, high=75500),
+            market_status=MarketStatus.DANGER,
+        )
+        result = _run(ex.execute_phase1("2026-05-14"))
+        # DANGER 이지만 threshold_crisis=2 (default) → score=2 후보 통과
+        assert result.total_candidates == 1, f"got {result.total_candidates}"
+        print("✅ EE-34 default threshold_crisis=2 → DANGER 에서도 score=2 통과 (롤백 안전)")
+        db.close()
+
+
 # ===== Runner =====
 
 
@@ -943,6 +1054,10 @@ def main():
         test_EE_28_score_threshold_lower_excludes,
         test_EE_29_phase1_filled_no_estimated_price,
         test_EE_30_score_breakdown_descending_order,
+        test_EE_31_normal_uses_score_threshold,
+        test_EE_32_crisis_uses_score_threshold_crisis,
+        test_EE_33_caution_uses_score_threshold_crisis,
+        test_EE_34_default_threshold_crisis_equals_threshold,
     ]
     print(f"\n=== EntryExecutor 단위 테스트 — {len(tests)}건 실행 ===\n")
     fails = []

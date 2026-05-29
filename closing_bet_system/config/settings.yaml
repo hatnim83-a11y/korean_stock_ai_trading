@@ -13,7 +13,9 @@ fund:
   swing_capital_ratio: 0.9         # 스윙 풀 비율 (총자본 × 0.9) — main.py SWING_CAPITAL_RATIO env와 동기화 유지
   closing_bet_pool_cap: 0.5        # 종가베팅 풀 최대 cap (총자본 × 0.5)
   swing_used_source: "cost_basis"  # 'cost_basis'(SUM qty×buy_price) | 'evaluation'(position_state JOIN)
-  disable_absorb_on_crisis: true   # external_risk_active 시 absorb 비활성 (CRISIS 흡수 역설 방어)
+  # ─── 위기 시 부분 흡수 (2026-05-29 도입, docs/improvements/20260529_closing_bet_capital_limit_crisis_policy.md) ───
+  disable_absorb_on_crisis: false  # 5/27 사건(phase1 4건 전원 price_cap) 대응 — false 로 풀어 위기 시에도 swing_idle 부분 흡수 허용
+  crisis_absorb_ratio: 0.5         # external_risk_active 시 swing_idle × 0.5 만 흡수 (보수성 유지)
 
 # ─── 점수 임계값 (PRD 6-1 + P2-6) ─────────────────────────────────────────
 # 점수 체계: PRD 6-1 단순 카운트, 만점 11점 (Layer1 4 + Layer2 4 + Layer3 3)
@@ -165,7 +167,8 @@ kis:
 entry_executor:
   enabled: true                            # 5/15 dry_run 부분 활성화 → 5/23 실발주 전환 완료
   dry_run: false                           # 5/23 실발주 활성화 완료. 롤백: true + restart
-  score_threshold: 2                       # 진입 임계: total_score ≥ 2 (5/14 사용자 결정)
+  score_threshold: 2                       # 진입 임계 NORMAL: total_score ≥ 2 (5/14 사용자 결정)
+  score_threshold_crisis: 3                # 진입 임계 CAUTION/DANGER: total_score ≥ 3 (2026-05-29 신규, 위기 시 선별 강화 — docs/improvements/20260529_closing_bet_capital_limit_crisis_policy.md)
   position_ratio: 0.7                      # PRD 기본 한도 × 0.7 (5/14 사용자 결정)
   phase1_ratio: 0.5                        # 1차(정규장) 50% / 2차(동시호가) 50%
   phase2_enabled: true                     # Step 0 ord_dvsn 폴백 시 false (15:25 동시호가 미발주)
