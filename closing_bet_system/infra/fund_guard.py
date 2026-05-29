@@ -77,6 +77,7 @@ class GuardConfig:
     closing_bet_pool_cap: float = 0.5           # 종가베팅 풀 최대 cap
     swing_used_source: str = "cost_basis"       # 'cost_basis' | 'evaluation'
     disable_absorb_on_crisis: bool = True       # CRISIS 시 absorb 비활성
+    crisis_absorb_ratio: float = 0.0            # 2026-05-29: 위기 시 부분 흡수 비율 (0.0=무흡수, 1.0=전체)
 
     @classmethod
     def from_settings(cls, settings: Optional[dict] = None) -> "GuardConfig":
@@ -95,6 +96,13 @@ class GuardConfig:
                 f"[fund_guard] swing_used_source={used_src!r} 미지원 → 'cost_basis' 폴백"
             )
             used_src = "cost_basis"
+        # 범위 검증 (2026-05-29): crisis_absorb_ratio 0.0~1.0
+        absorb_ratio = float(f.get("crisis_absorb_ratio", cls.crisis_absorb_ratio))
+        if not (0.0 <= absorb_ratio <= 1.0):
+            logger.warning(
+                f"[fund_guard] crisis_absorb_ratio={absorb_ratio} 범위 이탈 → 기본값 {cls.crisis_absorb_ratio} 사용"
+            )
+            absorb_ratio = cls.crisis_absorb_ratio
         return cls(
             capital_ratio=float(f.get("capital_ratio", cls.capital_ratio)),
             max_position_per_stock=float(
@@ -114,6 +122,7 @@ class GuardConfig:
             disable_absorb_on_crisis=bool(
                 f.get("disable_absorb_on_crisis", cls.disable_absorb_on_crisis)
             ),
+            crisis_absorb_ratio=absorb_ratio,
         )
 
 
@@ -162,7 +171,9 @@ class FundGuard:
                 를 ``int`` 로 올림 처리하여 전달해야 한다.
                 ``float`` 또는 음수는 차단된다.
             external_risk_active: MarketGuard CRISIS/DANGER 상태 (2026-05-23 추가).
-                True + ``cfg.disable_absorb_on_crisis`` → swing_idle 흡수 비활성.
+                True + ``disable_absorb_on_crisis=True`` → swing_idle 흡수 완전 비활성.
+                True + ``disable_absorb_on_crisis=False`` → swing_idle × ``crisis_absorb_ratio``
+                부분 흡수 (2026-05-29 추가).
 
         Returns:
             ``(allowed: bool, reason: str)`` — 허용 시 ``reason`` 은 빈 문자열
@@ -264,6 +275,8 @@ class FundGuard:
             4. swing_used = get_swing_used_value(source)
                SwingDBUnavailable → swing_pool 폴백 (swing_idle=0, 보수)
             5. swing_idle = max(0, swing_pool - swing_used)
+            5-b. (2026-05-29 추가) external_risk_active AND NOT disable_absorb_on_crisis
+                 → swing_idle = int(swing_idle × crisis_absorb_ratio) (부분 흡수)
             6. cap_amount = total × closing_bet_pool_cap (50%)
             7. return min(base_pool + swing_idle, cap_amount)
 
@@ -273,15 +286,26 @@ class FundGuard:
 
         Returns:
             ``(capital_limit, debug_info)``
-            debug_info keys: mode / base_pool / swing_pool / swing_used / swing_idle / cap_amount
+            debug_info keys (정상): mode / base_pool / swing_pool / swing_used /
+                swing_idle_raw / swing_idle / cap_amount / dynamic_pool / capped /
+                external_risk_active / crisis_absorb_ratio
+            debug_info keys (base_only): mode / base_pool [+ external_risk if crisis]
         """
         cfg = self.config
         base_pool = int(total_value * cfg.capital_ratio)
 
         # 흡수 비활성 분기
         if not cfg.absorb_swing_idle:
+            logger.debug(
+                f"[fund_guard] base_only(absorb_off) — capital_limit={base_pool:,}원 "
+                f"(absorb_swing_idle=False)"
+            )
             return base_pool, {"mode": "base_only(absorb_off)", "base_pool": base_pool}
         if external_risk_active and cfg.disable_absorb_on_crisis:
+            logger.debug(
+                f"[fund_guard] base_only(crisis) — capital_limit={base_pool:,}원 "
+                f"(external_risk_active=True, disable_absorb_on_crisis=True)"
+            )
             return base_pool, {
                 "mode": "base_only(crisis)",
                 "base_pool": base_pool,
@@ -299,25 +323,38 @@ class FundGuard:
             )
             swing_used = swing_pool  # idle=0 강제
 
-        swing_idle = max(0, swing_pool - swing_used)
+        swing_idle_raw = max(0, swing_pool - swing_used)
+        # 위기 시 부분 흡수 (2026-05-29): external_risk_active 시 swing_idle × crisis_absorb_ratio
+        # disable_absorb_on_crisis=true 분기는 위에서 이미 base만 반환했으므로 여기 도달 X
+        # disable_absorb_on_crisis=false + external_risk_active 시 부분 흡수 적용
+        if external_risk_active and cfg.crisis_absorb_ratio < 1.0:
+            swing_idle = int(swing_idle_raw * cfg.crisis_absorb_ratio)
+            absorb_mode = "absorb_swing_idle(crisis_partial)"
+        else:
+            swing_idle = swing_idle_raw
+            absorb_mode = "absorb_swing_idle"
         cap_amount = int(total_value * cfg.closing_bet_pool_cap)
         dynamic_pool = base_pool + swing_idle
         capital_limit = min(dynamic_pool, cap_amount)
 
         debug_info = {
-            "mode": "absorb_swing_idle",
+            "mode": absorb_mode,
             "base_pool": base_pool,
             "swing_pool": swing_pool,
             "swing_used": swing_used,
+            "swing_idle_raw": swing_idle_raw,
             "swing_idle": swing_idle,
             "cap_amount": cap_amount,
             "dynamic_pool": dynamic_pool,
             "capped": dynamic_pool > cap_amount,
+            "external_risk_active": external_risk_active,
+            "crisis_absorb_ratio": cfg.crisis_absorb_ratio,
         }
         logger.info(
             f"[fund_guard] capital_limit={capital_limit:,}원 — "
-            f"base={base_pool:,}/idle={swing_idle:,}/cap={cap_amount:,} "
-            f"(used={swing_used:,}원/pool={swing_pool:,}원, capped={debug_info['capped']})"
+            f"base={base_pool:,}/idle={swing_idle:,}(raw={swing_idle_raw:,})/cap={cap_amount:,} "
+            f"(used={swing_used:,}원/pool={swing_pool:,}원, capped={debug_info['capped']}, "
+            f"mode={absorb_mode})"
         )
         return capital_limit, debug_info
 

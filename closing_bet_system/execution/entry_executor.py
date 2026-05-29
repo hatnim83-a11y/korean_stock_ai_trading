@@ -60,6 +60,7 @@ class EntryExecutorSettings:
     enabled: bool = False
     dry_run: bool = True
     score_threshold: int = 2
+    score_threshold_crisis: int = 2          # 2026-05-29: CAUTION/DANGER 시 적용 (default=2 무변화)
     position_ratio: float = 0.70           # PRD 기본 자금 한도 × 0.70 (사용자 결정)
     phase1_ratio: float = 0.50              # phase1 50% / phase2 50%
     phase2_enabled: bool = True
@@ -203,9 +204,11 @@ class EntryExecutor:
                     f"swing_idle 흡수 비활성)"
                 )
 
-        # Phase 1: 후보 select
+        # Phase 1: 후보 select (2026-05-29: external_risk_active 시 score_threshold_crisis 적용)
         candidates = await asyncio.to_thread(
-            self._select_phase1_candidates, trade_date
+            self._select_phase1_candidates,
+            trade_date,
+            external_risk_active=external_risk_active,
         )
         result.total_candidates = len(candidates)
         if not candidates:
@@ -408,13 +411,20 @@ class EntryExecutor:
             )
         return order
 
-    def _select_phase1_candidates(self, trade_date: str) -> list[dict]:
+    def _select_phase1_candidates(
+        self, trade_date: str, *, external_risk_active: bool = False
+    ) -> list[dict]:
         """오늘 recommended + score >= threshold 후보 top N (DESC by total_score).
 
         2026-05-23: 동적 자본 분리 — top N (cfg.max_concurrent_positions, 기본 4) 명시 LIMIT.
+        2026-05-29: external_risk_active=True 시 score_threshold_crisis 적용 (선별성 강화).
         score 동점 시 candidate_id ASC (선등록 우선, 안정 정렬).
         """
-        threshold = self.settings.score_threshold
+        threshold = (
+            self.settings.score_threshold_crisis
+            if external_risk_active
+            else self.settings.score_threshold
+        )
         top_n = self.fund_guard.config.max_concurrent_positions
         with self.candidate_logger.db.get_cursor() as cursor:
             cursor.execute(

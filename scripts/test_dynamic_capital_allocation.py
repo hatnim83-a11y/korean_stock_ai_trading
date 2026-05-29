@@ -35,6 +35,7 @@ def _make_cfg(**overrides) -> GuardConfig:
         closing_bet_pool_cap=0.5,
         swing_used_source="cost_basis",
         disable_absorb_on_crisis=True,
+        crisis_absorb_ratio=0.0,  # 2026-05-29: 기본 0.0 (롤백 안전)
     )
     base.update(overrides)
     return GuardConfig(**base)
@@ -195,6 +196,7 @@ def test_DC_9_settings_keys_missing():
     assert cfg.closing_bet_pool_cap == 0.5
     assert cfg.swing_used_source == "cost_basis"
     assert cfg.disable_absorb_on_crisis is True
+    assert cfg.crisis_absorb_ratio == 0.0  # 2026-05-29: 기본 0.0 (롤백 안전)
 
 
 # ===== DC-10: external_risk_active=True → absorb 비활성 =====
@@ -300,6 +302,91 @@ def test_DC_13_real_schema_smoke():
 # ===== DC-14: position_state JOIN 정상 동작 (evaluation 모드 본래 의도) =====
 
 
+# ===== DC-15: 위기 시 부분 흡수 (2026-05-29) — crisis_absorb_ratio=0.5 =====
+
+
+def test_DC_15_crisis_partial_absorb():
+    """external_risk_active=True + disable_absorb_on_crisis=False + crisis_absorb_ratio=0.5
+    → swing_idle × 0.5 만 흡수."""
+    cfg = _make_cfg(
+        disable_absorb_on_crisis=False,
+        crisis_absorb_ratio=0.5,
+    )
+    fg = _make_guard(cfg=cfg, swing_used=0, total_value=10_000_000)
+    limit, info = fg.compute_capital_limit(10_000_000, external_risk_active=True)
+    # base=1M, swing_pool=9M, swing_used=0, swing_idle_raw=9M
+    # crisis_absorb_ratio=0.5 → swing_idle=4.5M
+    # dynamic_pool=1M+4.5M=5.5M, cap=5M → capped 5M
+    assert limit == 5_000_000, f"expected 5M (capped), got {limit}"
+    assert info["swing_idle_raw"] == 9_000_000
+    assert info["swing_idle"] == 4_500_000
+    assert info["mode"] == "absorb_swing_idle(crisis_partial)"
+    assert info["external_risk_active"] is True
+    assert info["crisis_absorb_ratio"] == 0.5
+
+
+# ===== DC-16: 위기 시 부분 흡수 ratio=0.0 → 사실상 base만 =====
+
+
+def test_DC_16_crisis_zero_ratio():
+    """crisis_absorb_ratio=0.0 + external_risk_active=True
+    → swing_idle=0 → base_pool 만 (disable=true 분기와 동일 효과)."""
+    cfg = _make_cfg(
+        disable_absorb_on_crisis=False,
+        crisis_absorb_ratio=0.0,
+    )
+    fg = _make_guard(cfg=cfg, swing_used=0, total_value=10_000_000)
+    limit, info = fg.compute_capital_limit(10_000_000, external_risk_active=True)
+    # swing_idle_raw=9M, crisis_absorb_ratio=0.0 → swing_idle=0
+    # dynamic_pool=1M+0=1M
+    assert limit == 1_000_000, f"expected 1M (base only), got {limit}"
+    assert info["swing_idle"] == 0
+    assert info["swing_idle_raw"] == 9_000_000
+    assert info["mode"] == "absorb_swing_idle(crisis_partial)"
+
+
+# ===== DC-17: crisis_absorb_ratio 범위 검증 =====
+
+
+def test_DC_17_crisis_absorb_ratio_range_validation():
+    """crisis_absorb_ratio 범위 이탈 시 from_settings 폴백."""
+    invalid = {"fund": {"crisis_absorb_ratio": 1.5}}  # 1.0 초과
+    cfg = GuardConfig.from_settings(invalid)
+    assert cfg.crisis_absorb_ratio == 0.0, "1.5 초과 → 기본값 0.0 폴백"
+
+    invalid2 = {"fund": {"crisis_absorb_ratio": -0.1}}  # 음수
+    cfg2 = GuardConfig.from_settings(invalid2)
+    assert cfg2.crisis_absorb_ratio == 0.0, "음수 → 기본값 0.0 폴백"
+
+    # 유효 범위(0.0~1.0)는 통과
+    valid = {"fund": {"crisis_absorb_ratio": 0.5}}
+    cfg3 = GuardConfig.from_settings(valid)
+    assert cfg3.crisis_absorb_ratio == 0.5
+
+    edge_min = {"fund": {"crisis_absorb_ratio": 0.0}}
+    cfg4 = GuardConfig.from_settings(edge_min)
+    assert cfg4.crisis_absorb_ratio == 0.0
+
+    edge_max = {"fund": {"crisis_absorb_ratio": 1.0}}
+    cfg5 = GuardConfig.from_settings(edge_max)
+    assert cfg5.crisis_absorb_ratio == 1.0
+
+
+# ===== DC-18: DC-10 회귀 — disable_absorb_on_crisis=true 시 base만 (기존 동작 유지) =====
+
+
+def test_DC_18_disable_true_overrides_crisis_ratio():
+    """disable_absorb_on_crisis=True 시 crisis_absorb_ratio 무관하게 base만 반환 (회귀 차단)."""
+    cfg = _make_cfg(
+        disable_absorb_on_crisis=True,  # 기존 동작 (5/23 도입)
+        crisis_absorb_ratio=0.5,  # 신규 필드 설정해도 무시되어야 함
+    )
+    fg = _make_guard(cfg=cfg, swing_used=0, total_value=10_000_000)
+    limit, info = fg.compute_capital_limit(10_000_000, external_risk_active=True)
+    assert limit == 1_000_000, f"expected 1M (base only), got {limit}"
+    assert info["mode"] == "base_only(crisis)"  # disable=true 분기
+
+
 def test_DC_14_evaluation_mode_with_position_state():
     """evaluation 모드: position_state.current_price 우선 사용."""
     import os
@@ -366,6 +453,10 @@ if __name__ == "__main__":
         ("DC-12: invalid source 폴백", test_DC_12_invalid_swing_used_source),
         ("DC-13: 실 schema(shares) 스모크", test_DC_13_real_schema_smoke),
         ("DC-14: evaluation+position_state", test_DC_14_evaluation_mode_with_position_state),
+        ("DC-15: 위기 부분 흡수 ratio=0.5", test_DC_15_crisis_partial_absorb),
+        ("DC-16: 위기 부분 흡수 ratio=0.0", test_DC_16_crisis_zero_ratio),
+        ("DC-17: crisis_absorb_ratio 범위", test_DC_17_crisis_absorb_ratio_range_validation),
+        ("DC-18: disable=true 회귀 차단", test_DC_18_disable_true_overrides_crisis_ratio),
     ]
     passed = 0
     failed = []

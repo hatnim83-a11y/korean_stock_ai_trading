@@ -254,10 +254,17 @@ class MainOrchestrator:
             from modules.trading_engine.kis_order_api import KISOrderApi
 
             yaml_settings = _load_settings().get("entry_executor", {})
+            # 2026-05-29: score_threshold_crisis 신규 키 로드 (CAUTION/DANGER 시 적용)
+            #   default = score_threshold 값 (무변화 폴백, 미설정 시 NORMAL과 동일하게 동작)
+            _score_threshold = int(yaml_settings.get("score_threshold", 2))
+            _score_threshold_crisis = int(
+                yaml_settings.get("score_threshold_crisis", _score_threshold)
+            )
             ee_settings = EntryExecutorSettings(
                 enabled=bool(yaml_settings.get("enabled", False)),
                 dry_run=bool(yaml_settings.get("dry_run", True)),
-                score_threshold=int(yaml_settings.get("score_threshold", 2)),
+                score_threshold=_score_threshold,
+                score_threshold_crisis=_score_threshold_crisis,
                 position_ratio=float(yaml_settings.get("position_ratio", 0.7)),
                 phase1_ratio=float(yaml_settings.get("phase1_ratio", 0.5)),
                 phase2_enabled=bool(yaml_settings.get("phase2_enabled", True)),
