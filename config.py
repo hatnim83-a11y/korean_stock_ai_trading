@@ -361,6 +361,22 @@ class Settings(BaseSettings):
         default=0.5,
         description="1차 진입 비율 (50% — 종목당 자금 중 1차에 사용)"
     )
+    MANUAL_BUY_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "텔레그램 /buy 수동 매수 명령어 마스터 토글. "
+            "True=사용자가 /buy [종목코드]로 슬롯에 직접 진입 가능(분할진입 룰+시장가, "
+            "이후 기존 모니터링으로 자동 청산, 테마 로테이션 매도는 제외). "
+            "False=/buy 명령 비활성화(롤백)."
+        )
+    )
+    MANUAL_BUY_CUTOFF: str = Field(
+        default="15:10",
+        description=(
+            "수동 매수(/buy) 마감 시각 (HH:MM, KST). 이 시각 이후 /buy 거부 — "
+            "종가베팅 자본 보호 구간(15:10 pipeline 준비) 및 v17 2차 진입 시간 가드(15:15)와 정합."
+        )
+    )
     TRANCHE_SECOND_RATIO: float = Field(
         default=0.5,
         description="2차 진입(불타기) 비율 (50% — +5% 도달 시 추가 매수)"

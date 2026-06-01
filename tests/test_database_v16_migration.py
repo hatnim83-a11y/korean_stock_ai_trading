@@ -38,7 +38,8 @@ def test_v16_migration_creates_tables():
     """v16 마이그레이션 시 신규 테이블 3개 생성 확인."""
     db = _temp_db()
     try:
-        assert db._get_schema_version() == 16, "schema_version != 16"
+        # forward-compatible: v16 이후 마이그레이션(v17/v18…)이 추가돼도 통과
+        assert db._get_schema_version() >= 16, "schema_version < 16 (v16 미적용)"
 
         with db.get_cursor() as cursor:
             for tbl in ["daily_supply_snapshot", "foreign_top_ranking", "supply_score_observation"]:
@@ -92,7 +93,7 @@ def test_v16_migration_idempotent():
         v1 = db._get_schema_version()
         db.init_tables()  # 재실행
         v2 = db._get_schema_version()
-        assert v1 == v2 == 16, f"멱등성 위반: {v1} != {v2}"
+        assert v1 == v2 and v1 >= 16, f"멱등성 위반: {v1} != {v2}"
 
         print("  [PASS] v16_migration_idempotent")
     finally:

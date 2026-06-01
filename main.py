@@ -64,6 +64,7 @@ from modules.trading_engine import TradingEngine
 from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2, SellReason
 from modules.trading_engine.sell_lock import sell_lock
 from modules.trading_engine.diversity_filter import apply_diversity_filter
+from modules.trading_engine.capital_utils import compute_per_slot_capital
 from modules.rebalancer import run_daily_rebalancing
 from modules.reporter import (
     PerformanceCalculator,
@@ -1326,6 +1327,8 @@ class TradingSystem:
                 theme_to_category[t_name] = t_cat
 
         # 기존 보유 종목의 테마/섹터별 카운트
+        # 수동 매수(/buy) 종목은 theme=""로 저장되어 if h_theme 가드에서 자연 제외됨
+        # (테마 분산 한도와 무관 — is_manual 종목은 테마 슬롯을 점유하지 않음)
         theme_counts = {}
         sector_counts = {}
         for h in current_holdings:
@@ -1380,9 +1383,19 @@ class TradingSystem:
             # 2026-05-23 동적 자본 분리: 스윙 90% (잔여 10% + idle은 종가베팅 풀)
             # 환경변수 SWING_CAPITAL_RATIO 또는 기본 0.9 (롤백 시 1.0)
             swing_capital_ratio = float(os.getenv("SWING_CAPITAL_RATIO", "0.9"))
-            swing_capital_pool = int(total_capital * swing_capital_ratio)
-            max_per_stock = swing_capital_pool // settings.MAX_POSITIONS
-            per_slot_capital = min(available_cash // available_slots, max_per_stock)
+            # 슬롯당 배분 계산은 공용 헬퍼로 단일화 (수동 매수 /buy와 동일 계산 공유)
+            _sizing = compute_per_slot_capital(
+                total_capital=total_capital,
+                available_cash=available_cash,
+                available_slots=available_slots,
+                max_positions=settings.MAX_POSITIONS,
+                swing_capital_ratio=swing_capital_ratio,
+                tranche_enabled=settings.TRANCHE_ENTRY_ENABLED,
+                tranche_first_ratio=settings.TRANCHE_FIRST_RATIO,
+            )
+            swing_capital_pool = _sizing["swing_capital_pool"]
+            max_per_stock = _sizing["max_per_stock"]
+            per_slot_capital = _sizing["per_slot_capital"]
             logger.info(
                 f"   💰 스윙 자본 풀: 총자산 {int(total_capital):,}원 × "
                 f"{swing_capital_ratio:.0%} = {swing_capital_pool:,}원 / "
@@ -1391,13 +1404,10 @@ class TradingSystem:
 
             # v17 분할 진입: 1차 진입은 TRANCHE_FIRST_RATIO(기본 50%)만 사용.
             # 나머지는 모니터에서 +5% 도달 시 2차 진입(불타기)으로 활용 (보유 종료까지 대기).
-            if settings.TRANCHE_ENTRY_ENABLED:
-                tranche_ratio = settings.TRANCHE_FIRST_RATIO
-                per_slot_capital_full = per_slot_capital
-                per_slot_capital = int(per_slot_capital * tranche_ratio)
+            if _sizing["tranche_applied"]:
                 logger.info(
-                    f"   🔀 분할 진입 활성: 1차 {tranche_ratio*100:.0f}% 사용 "
-                    f"({per_slot_capital_full:,.0f}원 → {per_slot_capital:,.0f}원/종목, "
+                    f"   🔀 분할 진입 활성: 1차 {settings.TRANCHE_FIRST_RATIO*100:.0f}% 사용 "
+                    f"({_sizing['per_slot_capital_full']:,.0f}원 → {per_slot_capital:,.0f}원/종목, "
                     f"2차 trigger=+{settings.PYRAMID_TRIGGER_PCT*100:.0f}% first 기준)"
                 )
 
@@ -2161,6 +2171,10 @@ class TradingSystem:
         # 탈락 테마 보유 종목 분류 (수익/손실)
         holdings = self.db.get_portfolio(status='holding')
         for h in holdings:
+            # 수동 매수(/buy) 종목은 테마 로테이션 매도에서 제외 (테마 전략과 무관)
+            if h.get("is_manual"):
+                logger.info(f"      ⏭️ {h.get('stock_name')} — 수동 매수 종목, 교체 매도 제외")
+                continue
             h_theme = h.get("theme", "")
             if h_theme != dropped_name:
                 continue

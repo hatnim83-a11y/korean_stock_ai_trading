@@ -31,6 +31,16 @@
 - **release 정책**: 매도 함수 종료 시 release하지 **않음** → 15:30 `stop_monitoring()`에서 `clear_all()` 일괄 해제 (race window 봉쇄). 같은 거래일 내 한 종목에 두 매도 잡이 발화하지 않으므로 누수 위험 없음
 - **무력화**: `PARTIAL_PROFIT_EARLY_MONITORING_ENABLED=False` + systemctl restart → acquire 호출 자체가 분기되어 NO-OP, 09:26 legacy 시작
 
+## 텔레그램 수동 매수 (/buy — 2026-06-01 도입, DB v18)
+- **명령어**: `/buy [종목코드]` → 30초 TTL `/confirm` 확인 (기존 /sell 패턴 재사용). 수량은 **자동 슬롯 사이징**(종목만 지정)
+- **진입**: `compute_per_slot_capital()` 공용 헬퍼(자동 매수와 동일 계산) + v17 분할진입 1차(TRANCHE_ENTRY_ENABLED 시 ×0.5) + **시장가**. 손절가는 **고정률** `filled_price×(1+DEFAULT_STOP_LOSS=-5%)` (자동 매수의 ATR 기반과 다름 — 모니터 트레일링은 atr_at_buy 박제로 동일 적용)
+- **청산**: 기존 모니터링(트레일링/분할익절/손절/보유기간) 그대로 적용. **단 테마 로테이션 매도(midweek 교체)에서는 제외** — `portfolio.is_manual=1` 가드 (`_check_midweek_replacement` 루프 `if h.get("is_manual"): continue`). 보유기간 매도(run_hold_period_sells)는 수동 종목도 적용
+- **모니터 편입**: `execute_buy()`(web/dashboard_service.py)는 DB 저장만 → 텔레그램 `/confirm`이 `start_monitoring()` 재호출(stop+start로 WebSocket 재구독 + `load_positions_from_db`가 v17 필드 전체 복원 → 5/27 삼현 케이스 방지). add_position 직접 호출 안 함
+- **가드**: MANUAL_BUY_ENABLED 토글 / 09:00~MANUAL_BUY_CUTOFF(15:10, 종가베팅 보호) / 슬롯 만석·중복 보유·2차 대기·당일 매도·sell_lock 점유 거부 / BuyLock try-finally / KIS 실패 시 DB 미저장
+- **식별 컬럼**: `portfolio.is_manual BOOLEAN DEFAULT 0` (DB v18). theme="수동" 마커는 미사용(로테이션 오발동 위험)
+- **롤백**: `MANUAL_BUY_ENABLED=false` + restart. is_manual=1 포지션은 로테이션 skip 보호 유지
+- **상세**: `docs/work-plans/completed/20260601_telegram-manual-buy/`
+
 ## 분할 진입 + 불타기 + ATR 트레일링 (v17 — 2026-05-20 코드, 2026-05 활성화)
 
 ### 핵심 정책 분기 (절대 헷갈리지 말 것)

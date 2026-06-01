@@ -76,13 +76,24 @@ class TelegramNotifier:
         self._pending_sell: Optional[dict] = None   # {"stock_code", "quantity", "stock_name"}
         self._pending_sell_all: bool = False
         self._pending_sell_expires: float = 0
+        # 수동 매수(/buy) pending 상태 (매도와 별도 관리, 상호배제)
+        self._pending_buy: Optional[dict] = None   # {"stock_code", "stock_name"}
+        self._pending_buy_expires: float = 0
         self._confirm_timeout_sec = 30
 
         if self._enabled:
             logger.info("텔레그램 알림 초기화 완료")
         else:
             logger.warning("텔레그램 설정 없음 (알림 비활성화)")
-    
+
+    def _clear_pending(self) -> None:
+        """매수/매도 pending 상태 전체 초기화 (새 명령 진입 시 상호배제 보장)."""
+        self._pending_sell = None
+        self._pending_sell_all = False
+        self._pending_sell_expires = 0
+        self._pending_buy = None
+        self._pending_buy_expires = 0
+
     # ===== 메시지 전송 =====
     
     def send_message(
@@ -776,6 +787,9 @@ class TelegramNotifier:
                         elif cmd == "/status":
                             logger.info(f"📱 /status 명령어 수신 (chat_id={chat_id})")
                             self._handle_status_command(chat_id)
+                        elif cmd == "/buy":
+                            logger.info(f"📱 /buy 명령어 수신 (chat_id={chat_id})")
+                            await self._handle_buy_command(chat_id, raw_text)
                         elif cmd == "/sell" and raw_text.lower() != "/sellall":
                             logger.info(f"📱 /sell 명령어 수신 (chat_id={chat_id})")
                             await self._handle_sell_command(chat_id, raw_text)
@@ -792,10 +806,11 @@ class TelegramNotifier:
                             self._send_to_chat(chat_id,
                                 "📋 사용 가능한 명령어\n\n"
                                 "/portfolio - 보유 종목 실시간 수익률\n"
+                                "/buy [종목코드] - 수동 매수 (자동 슬롯 배분)\n"
                                 "/sell [종목코드] [수량] - 개별 종목 매도\n"
                                 "/sellall - 전 종목 시장가 매도\n"
-                                "/confirm - 매도 확인 (30초 내)\n"
-                                "/cancel - 매도 취소\n"
+                                "/confirm - 매수/매도 확인 (30초 내)\n"
+                                "/cancel - 매수/매도 취소\n"
                                 "/pause - 매매 일시정지\n"
                                 "/resume - 매매 재개\n"
                                 "/status - 시스템 상태 확인\n"
@@ -933,13 +948,13 @@ class TelegramNotifier:
             self._send_to_chat(chat_id, f"보유 수량({total_shares}주)보다 많습니다.")
             return
 
-        # pending 저장 (30초 TTL)
+        # pending 저장 (30초 TTL). 이전 매수/매도 pending 초기화 (상호배제)
+        self._clear_pending()
         self._pending_sell = {
             "stock_code": stock_code,
             "quantity": quantity,
             "stock_name": stock_name,
         }
-        self._pending_sell_all = False
         self._pending_sell_expires = time.monotonic() + self._confirm_timeout_sec
 
         qty_text = f"{quantity}주" if quantity < total_shares else f"전량({total_shares}주)"
@@ -969,8 +984,8 @@ class TelegramNotifier:
             self._send_to_chat(chat_id, "보유 종목이 없습니다.")
             return
 
-        # pending 저장 (30초 TTL)
-        self._pending_sell = None
+        # pending 저장 (30초 TTL). 이전 매수/매도 pending 초기화 (상호배제)
+        self._clear_pending()
         self._pending_sell_all = True
         self._pending_sell_expires = time.monotonic() + self._confirm_timeout_sec
 
@@ -986,12 +1001,185 @@ class TelegramNotifier:
             f"/cancel 로 취소"
         )
 
-    async def _handle_confirm_command(self, chat_id: int) -> None:
-        """/confirm 명령어 처리"""
-        has_pending = self._pending_sell is not None or self._pending_sell_all
+    def _is_valid_buy_time(self) -> tuple[bool, str]:
+        """수동 매수 가능 시간 검증. Returns (ok, reason)."""
+        from config import is_trading_day, now_kst
+        from datetime import time as dt_time
+        if not is_trading_day():
+            return False, "휴장일입니다 (거래일 아님)"
+        t = now_kst().time()
+        if t < dt_time(9, 0):
+            return False, "장 시작 전입니다 (09:00 이후 가능)"
+        try:
+            hh, mm = str(settings.MANUAL_BUY_CUTOFF).split(":")
+            cutoff = dt_time(int(hh), int(mm))
+        except Exception:
+            cutoff = dt_time(15, 10)
+        if t > cutoff:
+            return False, f"{settings.MANUAL_BUY_CUTOFF} 이후 매수 불가 (종가베팅 자본 보호 구간)"
+        return True, ""
 
-        if not has_pending:
-            self._send_to_chat(chat_id, "대기 중인 매도 주문이 없습니다.\n/sell 또는 /sellall 을 먼저 입력하세요.")
+    async def _handle_buy_command(self, chat_id: int, text: str) -> None:
+        """/buy [종목코드] 명령어 처리 — 자동 슬롯 사이징 수동 매수."""
+        import re
+        import os as _os
+
+        if not getattr(settings, "MANUAL_BUY_ENABLED", True):
+            self._send_to_chat(chat_id, "수동 매수(/buy)가 비활성화되어 있습니다.")
+            return
+
+        parts = text.strip().split()
+        if len(parts) < 2:
+            self._send_to_chat(chat_id, "사용법: /buy [종목코드]\n예: /buy 005930\n(수량은 자동 슬롯 배분)")
+            return
+
+        stock_code = parts[1]
+        if not re.match(r'^\d{6}$', stock_code):
+            self._send_to_chat(chat_id, "종목코드는 6자리 숫자여야 합니다.\n예: /buy 005930")
+            return
+
+        ok, why = self._is_valid_buy_time()
+        if not ok:
+            self._send_to_chat(chat_id, f"매수 불가: {why}")
+            return
+
+        # DB 조회: 보유 / 당일 매도 / 슬롯
+        try:
+            from database import Database
+            from config import now_kst
+            db = Database()
+            db.connect()
+            try:
+                holdings = db.get_portfolio(status="holding")
+                today_trades = db.get_trades(now_kst().date())
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"/buy DB 조회 오류: {e}")
+            self._send_to_chat(chat_id, "DB 조회 오류가 발생했습니다.")
+            return
+
+        existing = next((h for h in holdings if h["stock_code"] == stock_code), None)
+        if existing:
+            if existing.get("second_tranche_pending"):
+                self._send_to_chat(chat_id, f"{existing.get('stock_name', stock_code)} 이미 보유 중 (2차 진입 대기 — 모니터 자동 처리)")
+            else:
+                self._send_to_chat(chat_id, f"{existing.get('stock_name', stock_code)} 이미 보유 중입니다.")
+            return
+
+        sold_today = any(t.get("stock_code") == stock_code and t.get("action") == "sell" for t in today_trades)
+        if sold_today:
+            self._send_to_chat(chat_id, f"{stock_code} 는 오늘 매도한 종목입니다. 당일 재매수는 차단됩니다.")
+            return
+
+        held_count = len(holdings)
+        if held_count >= settings.MAX_POSITIONS:
+            self._send_to_chat(chat_id, f"슬롯 만석 ({held_count}/{settings.MAX_POSITIONS}) — 매수 불가")
+            return
+
+        try:
+            from modules.trading_engine.sell_lock import sell_lock
+            if sell_lock.is_locked(stock_code):
+                self._send_to_chat(chat_id, f"{stock_code} 매도 처리 중 — 매수 보류")
+                return
+        except Exception:
+            pass
+
+        # 종목명/현재가 + 예상 수량/금액/손절가 (확인 메시지용)
+        stock_name = stock_code
+        est_text = ""
+        try:
+            from web.dashboard_service import _get_kis_api, _get_order_api, get_cached_price
+            from modules.trading_engine.capital_utils import compute_per_slot_capital
+            kis = _get_kis_api()
+            stock_name = (await asyncio.to_thread(kis.get_stock_name, stock_code)) or stock_code
+            order_api = _get_order_api()
+            available_cash = await asyncio.to_thread(order_api.get_orderable_cash)
+            balance = await asyncio.to_thread(order_api.get_balance)
+            if available_cash <= 0:
+                available_cash = balance.get("cash", 0)
+            total_capital = balance.get("total_value", 0)
+            if total_capital <= 0:
+                total_capital = max(settings.TOTAL_CAPITAL, available_cash)
+            swing_ratio = float(_os.getenv("SWING_CAPITAL_RATIO", "0.9"))
+            sizing = compute_per_slot_capital(
+                total_capital=total_capital, available_cash=available_cash,
+                available_slots=settings.MAX_POSITIONS - held_count,
+                max_positions=settings.MAX_POSITIONS, swing_capital_ratio=swing_ratio,
+                tranche_enabled=settings.TRANCHE_ENTRY_ENABLED,
+                tranche_first_ratio=settings.TRANCHE_FIRST_RATIO,
+            )
+            per_slot = sizing["per_slot_capital"]
+            price_info = await asyncio.to_thread(get_cached_price, kis, stock_code)
+            cur = (price_info or {}).get("price", 0) or 0
+            if cur > 0:
+                est_qty = int(per_slot // cur)
+                if est_qty <= 0:
+                    self._send_to_chat(chat_id, f"배분액({per_slot:,}원)이 1주가({cur:,}원)보다 작습니다 — 매수 불가")
+                    return
+                est_stop = int(cur * (1 + settings.DEFAULT_STOP_LOSS))
+                tranche_note = " (분할진입 1차)" if sizing["tranche_applied"] else ""
+                est_text = (
+                    f"\n예상: {est_qty}주 × ~{cur:,}원 ≈ {est_qty * cur:,}원{tranche_note}"
+                    f"\n예상 손절가: ~{est_stop:,}원 ({settings.DEFAULT_STOP_LOSS * 100:+.0f}%)"
+                )
+        except Exception as e:
+            logger.warning(f"/buy 예상치 계산 실패(확인 계속): {e}")
+
+        # pending 저장 (30초 TTL). 이전 매수/매도 pending 초기화 (상호배제)
+        self._clear_pending()
+        self._pending_buy = {"stock_code": stock_code, "stock_name": stock_name}
+        self._pending_buy_expires = time.monotonic() + self._confirm_timeout_sec
+        self._send_to_chat(chat_id,
+            f"🔔 매수 확인 요청\n\n"
+            f"{stock_name}({stock_code}) 시장가 매수 (자동 슬롯 배분){est_text}\n\n"
+            f"{self._confirm_timeout_sec}초 내 /confirm 입력 시 실행\n"
+            f"/cancel 로 취소"
+        )
+
+    async def _handle_confirm_command(self, chat_id: int) -> None:
+        """/confirm 명령어 처리 (매수/매도 공용)"""
+        has_sell = self._pending_sell is not None or self._pending_sell_all
+        has_buy = self._pending_buy is not None
+
+        if not has_sell and not has_buy:
+            self._send_to_chat(chat_id, "대기 중인 주문이 없습니다.\n/sell, /sellall 또는 /buy 를 먼저 입력하세요.")
+            return
+
+        # 매수 확인 분기 (상호배제 — 매도와 동시 활성 불가)
+        if has_buy:
+            if time.monotonic() > self._pending_buy_expires:
+                self._clear_pending()
+                self._send_to_chat(chat_id, "⏰ 확인 시간이 만료되었습니다.\n다시 /buy 를 입력해주세요.")
+                return
+            buy_info = self._pending_buy
+            self._pending_buy = None
+            self._pending_buy_expires = 0
+            try:
+                from web.dashboard_service import execute_buy
+                self._send_to_chat(chat_id, f"⏳ {buy_info['stock_name']} 매수 실행 중...")
+                result = await execute_buy(buy_info["stock_code"], reason="텔레그램 수동 매수")
+                if result.get("success"):
+                    # 모니터 편입: stop+start 재시작으로 WebSocket 재구독 + v17 필드 복원
+                    if self._system_ref and hasattr(self._system_ref, "start_monitoring"):
+                        try:
+                            await self._system_ref.start_monitoring()
+                        except Exception as e:
+                            logger.error(f"/buy 후 모니터 재시작 오류: {e}", exc_info=True)
+                            self._send_to_chat(chat_id, f"⚠️ 매수는 완료됐으나 모니터 재시작 실패: {e}\n수동 점검 필요")
+                    self._send_to_chat(chat_id,
+                        f"✅ 매수 완료\n\n"
+                        f"{result['stock_name']}({result['stock_code']}) {result['quantity']}주\n"
+                        f"체결가: {result['filled_price']:,}원\n"
+                        f"매수금액: {result['invested']:,}원\n"
+                        f"손절가: {result['stop_loss_price']:,}원"
+                    )
+                else:
+                    self._send_to_chat(chat_id, f"❌ 매수 실패: {result.get('message', '알 수 없는 오류')}")
+            except Exception as e:
+                logger.error(f"/confirm 매수 처리 오류: {e}", exc_info=True)
+                self._send_to_chat(chat_id, f"⚠️ 매수 처리 중 오류 발생: {e}")
+                self._clear_pending()
             return
 
         if time.monotonic() > self._pending_sell_expires:
@@ -1060,16 +1248,17 @@ class TelegramNotifier:
             self._pending_sell_all = False
 
     def _handle_cancel_command(self, chat_id: int) -> None:
-        """/cancel 명령어 처리"""
-        had_pending = self._pending_sell is not None or self._pending_sell_all
-        self._pending_sell = None
-        self._pending_sell_all = False
-        self._pending_sell_expires = 0
+        """/cancel 명령어 처리 (매수/매도 공용)"""
+        had_buy = self._pending_buy is not None
+        had_sell = self._pending_sell is not None or self._pending_sell_all
+        self._clear_pending()
 
-        if had_pending:
+        if had_buy:
+            self._send_to_chat(chat_id, "🚫 매수 주문이 취소되었습니다.")
+        elif had_sell:
             self._send_to_chat(chat_id, "🚫 매도 주문이 취소되었습니다.")
         else:
-            self._send_to_chat(chat_id, "대기 중인 매도 주문이 없습니다.")
+            self._send_to_chat(chat_id, "대기 중인 주문이 없습니다.")
 
     async def _handle_portfolio_command(self, chat_id: int) -> None:
         """

@@ -548,6 +548,160 @@ async def execute_sell(stock_code: str, quantity: Optional[int] = None, reason: 
     return result
 
 
+async def execute_buy(stock_code: str, reason: str = "텔레그램 수동 매수") -> dict:
+    """텔레그램 수동 매수(/buy) 실행 (execute_sell 대칭).
+
+    자동 슬롯 사이징(compute_per_slot_capital, 자동 매수와 동일 계산) + v17 분할 진입 1차 +
+    시장가로 매수하고 is_manual=1 holding으로 저장한다. 모니터 편입(트레일링/손절/분할익절/
+    보유기간)은 호출 측(텔레그램 핸들러)이 start_monitoring() 재호출로 처리한다 —
+    load_positions_from_db가 v17 필드 전체로 add_position을 재구성하므로 add_position 직접
+    호출 시 v17 필드 누락(5/27 삼현 케이스)을 구조적으로 방지하고 WebSocket도 재구독된다.
+
+    KIS 주문 성공 시에만 DB에 저장한다(실패 시 미저장).
+
+    Returns:
+        dict: success / message. 성공 시 stock_code, stock_name, quantity,
+              filled_price, stop_loss_price, invested 포함.
+    """
+    from modules.trading_engine.capital_utils import compute_per_slot_capital
+    from modules.trading_engine.buy_lock import buy_lock
+    from modules.trading_engine.sell_lock import sell_lock
+    from modules.atr_calculator import compute_atr
+
+    stock_code = validate_stock_code(stock_code)
+    order_api = _get_order_api()
+    kis = _get_kis_api()
+    db = _get_db()
+
+    # 1) 슬롯/중복 재확인 (확인 대기 30초 사이 상태 변동 방어)
+    holdings = db.get_portfolio(status="holding")
+    held_count = len(holdings)
+    if any(h["stock_code"] == stock_code for h in holdings):
+        return {"success": False, "message": f"{stock_code} 이미 보유 중"}
+    available_slots = settings.MAX_POSITIONS - held_count
+    if available_slots <= 0:
+        return {"success": False, "message": f"슬롯 만석 ({held_count}/{settings.MAX_POSITIONS})"}
+
+    # 2) 동시성: 매도 처리 중이면 거부, 매수 락 획득 (발주 후 finally 해제)
+    if sell_lock.is_locked(stock_code):
+        return {"success": False, "message": f"{stock_code} 매도 처리 중 — 매수 보류"}
+    if not buy_lock.acquire(stock_code, "manual_buy"):
+        return {"success": False, "message": f"{stock_code} 다른 매수 처리 중 — 보류"}
+
+    try:
+        # 3) 현금/총자산 (main.py execute_buy_orders와 동일 폴백)
+        available_cash = await asyncio.to_thread(order_api.get_orderable_cash)
+        balance = await asyncio.to_thread(order_api.get_balance)
+        if available_cash <= 0:
+            available_cash = balance.get("cash", 0)
+        total_capital = balance.get("total_value", 0)
+        if total_capital <= 0:
+            total_capital = max(settings.TOTAL_CAPITAL, available_cash)
+        if available_cash < 100_000:
+            return {"success": False, "message": f"현금 부족 ({available_cash:,}원)"}
+
+        swing_capital_ratio = float(os.getenv("SWING_CAPITAL_RATIO", "0.9"))
+        sizing = compute_per_slot_capital(
+            total_capital=total_capital,
+            available_cash=available_cash,
+            available_slots=available_slots,
+            max_positions=settings.MAX_POSITIONS,
+            swing_capital_ratio=swing_capital_ratio,
+            tranche_enabled=settings.TRANCHE_ENTRY_ENABLED,
+            tranche_first_ratio=settings.TRANCHE_FIRST_RATIO,
+        )
+        per_slot_capital = sizing["per_slot_capital"]
+
+        # 4) 현재가 → 수량
+        price_info = await asyncio.to_thread(get_cached_price, kis, stock_code)
+        current_price = (price_info or {}).get("price", 0) or 0
+        if current_price <= 0:
+            return {"success": False, "message": f"{stock_code} 현재가 조회 실패"}
+        quantity = int(per_slot_capital // current_price)
+        if quantity <= 0:
+            return {"success": False, "message": f"배분액({per_slot_capital:,}원) < 1주가({current_price:,}원)"}
+
+        stock_name = (await asyncio.to_thread(kis.get_stock_name, stock_code)) or stock_code
+
+        # 5) ATR 박제 (compute_atr는 동기 HTTP — to_thread로 이벤트루프 블로킹 방지)
+        try:
+            atr_value = await asyncio.to_thread(compute_atr, stock_code, 14)
+        except Exception as e:
+            logger.warning(f"[execute_buy] {stock_code} ATR 계산 실패: {e} → 0.0 폴백")
+            atr_value = 0.0
+
+        # 6) 시장가 매수
+        result = await asyncio.to_thread(order_api.buy_market_order, stock_code, quantity)
+        if not result.get("success"):
+            return {"success": False, "message": f"매수 주문 실패: {result.get('message', '')}"}
+
+        # 7) 체결가 확보 (execute_sell 패턴: result→get_order_status→현재가 폴백)
+        filled_price = result.get("price", 0) or 0
+        if filled_price <= 0 and result.get("order_id"):
+            try:
+                await asyncio.sleep(1)
+                orders = await asyncio.to_thread(order_api.get_order_status, result["order_id"])
+                if orders and orders[0].get("filled_price", 0) > 0:
+                    filled_price = orders[0]["filled_price"]
+            except Exception:
+                pass
+        if filled_price <= 0:
+            filled_price = current_price  # 최종 폴백: 주문 직전 현재가 (0 박제 방지)
+            logger.warning(f"[execute_buy] {stock_code} 체결가 확보 실패 — 현재가 {current_price:,}원으로 박제")
+
+        stop_loss_price = int(filled_price * (1 + settings.DEFAULT_STOP_LOSS))
+
+        # 8) DB 저장 (is_manual=1 + v17 필드). 모니터 편입은 호출 측 start_monitoring().
+        #    second_tranche_pending 미전달 → save_holding_position이 TRANCHE_ENTRY_ENABLED로 결정
+        today = now_kst().date()
+        db.save_holding_position({
+            "date": today,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "theme": "",  # 수동 종목은 테마 없음 (로테이션 매도는 is_manual로 제외)
+            "shares": quantity,
+            "buy_price": filled_price,
+            "stop_loss": stop_loss_price,
+            "first_buy_price": filled_price,
+            "avg_buy_price": filled_price,
+            "tranche_count": 1,
+            "atr_at_buy": atr_value if atr_value > 0 else None,
+            "atr_period": 14,
+            "is_manual": True,
+        })
+        db.save_trade({
+            "date": today,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "action": "buy",
+            "shares": quantity,
+            "price": filled_price,
+            "amount": filled_price * quantity,
+            "reason": reason,
+            "buy_price": filled_price,
+            "filled_price": filled_price if filled_price > 0 else None,
+            "order_id": result.get("order_id"),
+        })
+        logger.info(
+            f"[execute_buy] {stock_name}({stock_code}) {quantity}주 @ {filled_price:,}원 "
+            f"수동 매수 체결 (손절 {stop_loss_price:,}원, atr={atr_value})"
+        )
+        return {
+            "success": True,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "quantity": quantity,
+            "filled_price": filled_price,
+            "stop_loss_price": stop_loss_price,
+            "invested": filled_price * quantity,
+        }
+    finally:
+        try:
+            buy_lock.release(stock_code)
+        except Exception:
+            pass
+
+
 async def execute_sell_all(reason: str = "수동 매도") -> dict:
     """전 종목 시장가 매도"""
     db = _get_db()

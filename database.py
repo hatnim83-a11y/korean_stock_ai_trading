@@ -178,6 +178,7 @@ class Database:
             (15, "portfolio buy_message 컬럼 추가", self._migrate_v15),
             (16, "외국인/기관 수급 신호 도입 (daily_supply_snapshot, foreign_top_ranking, supply_score_observation + portfolio/trade_reviews 보강)", self._migrate_v16),
             (17, "분할 진입(Tranche Entry) + 불타기(Pyramid-In) + ATR 트레일링 도입", self._migrate_v17),
+            (18, "portfolio is_manual 컬럼 추가 (텔레그램 수동 매수)", self._migrate_v18),
         ]
 
         pending = [(v, desc, fn) for v, desc, fn in migrations if v > current]
@@ -666,6 +667,26 @@ class Database:
                 "WHERE status='holding' AND second_tranche_pending IS NULL"
             )
             # atr_at_buy는 NULL 유지 (호출 측에서 0.0 폴백 → 트레일링 고정값 사용)
+
+    def _migrate_v18(self) -> None:
+        """텔레그램 수동 매수(/buy) 종목 식별용 is_manual 컬럼 추가.
+
+        목적: 사용자가 직접 지정한 수동 매수 종목을 테마 로테이션 매도(화요일 재선정 +
+        midweek 교체)에서 제외하기 위함. theme="수동" 마커 방식은 화요일 재선정의
+        `h_theme not in selected_themes` 패턴에 걸려 매주 자동 청산되므로 기각하고,
+        독립 BOOLEAN 컬럼으로 모든 경로에서 안전하게 식별한다.
+
+        - is_manual: 1=수동 매수(로테이션 매도 제외), 0=자동 매수(기본).
+          ⚠️ DEFAULT 0 — 기존 holding 및 자동 매수 종목은 기존 룰 그대로 적용.
+          보유기간 만료 매도(run_hold_period_sells)는 is_manual 무관하게 적용된다.
+        """
+        with self.get_cursor() as cursor:
+            if not self._has_column("portfolio", "is_manual"):
+                cursor.execute("ALTER TABLE portfolio ADD COLUMN is_manual BOOLEAN DEFAULT 0")
+            # 기존 행 백필 (NULL → 0): 기존 종목은 전부 자동 매수로 간주
+            cursor.execute(
+                "UPDATE portfolio SET is_manual = 0 WHERE is_manual IS NULL"
+            )
 
     def init_tables(self) -> None:
         """
@@ -1159,6 +1180,8 @@ class Database:
         atr_at_buy = position.get('atr_at_buy')  # NULL 허용
         atr_period = position.get('atr_period', 14)
         tranche_count = position.get('tranche_count', 1)
+        # is_manual: 텔레그램 수동 매수(/buy) 종목 여부. 테마 로테이션 매도 제외용.
+        is_manual = 1 if position.get('is_manual') else 0
         # second_tranche_pending: 명시 전달이 우선. 미전달 시 설정 토글 따라 결정.
         if 'second_tranche_pending' in position:
             second_tranche_pending = 1 if position['second_tranche_pending'] else 0
@@ -1184,9 +1207,9 @@ class Database:
                     original_shares, buy_date,
                     first_buy_price, avg_buy_price,
                     tranche_count, second_tranche_executed, second_tranche_pending,
-                    atr_at_buy, atr_period
+                    atr_at_buy, atr_period, is_manual
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'holding', ?, ?,
-                          ?, ?, ?, 0, ?, ?, ?)
+                          ?, ?, ?, 0, ?, ?, ?, ?)
             """, (
                 position.get('date'),
                 stock_code,
@@ -1207,11 +1230,13 @@ class Database:
                 second_tranche_pending,
                 atr_at_buy,
                 atr_period,
+                is_manual,
             ))
 
         logger.info(
             f"포지션 저장: {position['stock_name']} (holding, tranche={tranche_count}, "
-            f"first={first_buy_price}, avg={avg_buy_price}, atr={atr_at_buy}, pending={second_tranche_pending})"
+            f"first={first_buy_price}, avg={avg_buy_price}, atr={atr_at_buy}, "
+            f"pending={second_tranche_pending}, manual={is_manual})"
         )
 
     def update_portfolio_second_tranche(
