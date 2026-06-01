@@ -79,7 +79,24 @@ class TradingScheduler:
     
     def __init__(self):
         """스케줄러 초기화"""
-        self.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+        # misfire 방어 (2026-06-01 버그픽스):
+        # APScheduler 기본 misfire_grace_time=1초 → 매월 1일 등 09:02 동시 발화(스크리닝/매도/
+        # 리마인더 + 모니터 tick) 시 이벤트루프 부하로 스크리닝 잡이 1.68초 지연되어 폐기됨 →
+        # 매수 단계가 빈 AI 분석으로 스킵되는 장애 발생.
+        # grace=60초: 관측된 지연(1.68초) 대비 35배 마진으로 이벤트루프 혼잡을 흡수하면서,
+        #   잡 최소 간격(EARLY_BUY 모드 09:00/09:01/09:02 = 1분)·매도→매수 의존 간격(3분)·
+        #   종가베팅 pipeline→entry 간격(8분)을 침범하지 않아 순서 역전 위험이 없음.
+        #   (300초로 넓히면 매도 잡이 다음 슬롯/매수 잡을 추월해 슬롯 확보 전 매수가 발생할 수 있음)
+        # coalesce=True: 프로세스 장기 정지 후 재기동 시 누락분을 최신 1회로 합쳐 중복 실행 방지.
+        # max_instances=1: 동일 잡 중복 실행 차단 (일일 cron이라 무해, 안전망).
+        self.scheduler = AsyncIOScheduler(
+            timezone="Asia/Seoul",
+            job_defaults={
+                'misfire_grace_time': 60,
+                'coalesce': True,
+                'max_instances': 1,
+            },
+        )
         self.is_running = False
         
         # 작업 콜백
