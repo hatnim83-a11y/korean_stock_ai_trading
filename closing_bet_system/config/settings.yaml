@@ -7,7 +7,7 @@ fund:
   max_position_per_stock: 0.25     # 1종목 최대 비중 (absorb_swing_idle 활성 시 unused)
   max_concurrent_positions: 4      # 동시 보유 최대 종목 수
   max_daily_entries: 4             # 1일 최대 진입 종목 수 (top 4 강제 정합, 2026-05-23 2→4)
-  weekly_loss_limit: -0.05         # 주간 손실 한도 (-5% 도달 시 매매 중지)
+  weekly_loss_limit: -0.10         # 2026-06-01 완화 (-0.05→-0.10): 5/26 손실 -8.25%는 단순 % 합산 과대측정(가중 실제 -3.64%, 계좌 임팩트 -0.07%) → 한도 -5%로 6/1 진입 차단 발생. 계좌 9.3M 기준 -10% = 손실액 -930k 수준 한도, 실손실 보호 유지
   # ─── 동적 자본 분리 (2026-05-23 도입) ───
   absorb_swing_idle: true          # 스윙 유휴자본 흡수 토글 (false 시 base 10%만 사용)
   swing_capital_ratio: 0.9         # 스윙 풀 비율 (총자본 × 0.9) — main.py SWING_CAPITAL_RATIO env와 동기화 유지
