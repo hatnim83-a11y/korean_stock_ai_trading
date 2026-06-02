@@ -714,8 +714,8 @@ class Settings(BaseSettings):
     
     # 시초가 갭 필터
     MAX_GAP_UP_PERCENT: float = Field(
-        default=3.0,
-        description="허용 최대 갭상승률 (%) - 초과시 제외"
+        default=3.5,
+        description="허용 최대 갭상승률 (%) - 초과시 제외 (2026-06-02 분석: 3.0~3.5% 구간 과차단 회수, 3.0→3.5)"
     )
     MAX_GAP_DOWN_PERCENT: float = Field(
         default=2.0,
@@ -724,6 +724,10 @@ class Settings(BaseSettings):
     ENABLE_DYNAMIC_GAP: bool = Field(
         default=True,
         description="동적 갭 기준 활성화 (시장 상황에 따라 자동 조정)"
+    )
+    GAP_REGIME_PER_MARKET: bool = Field(
+        default=False,
+        description="갭 regime 판정을 종목 소속시장(코스피/코스닥) 개별 지수로 (2026-06-02 분석). False=두 지수 평균(기존)"
     )
     
     # 당일 수급 필터
