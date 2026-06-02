@@ -98,6 +98,40 @@ class DynamicGapCalculator:
             except Exception as e:
                 logger.warning(f"KIS API 로딩 실패: {e}")
         return self._kis_api
+
+    def _classify_status(self, change: float) -> Tuple[str, str]:
+        """
+        단일 등락률 → (market_status, volatility) 분류.
+        get_market_condition(평균 기반)과 get_dynamic_gap_for_market(종목 소속시장 기반)이 공유.
+        """
+        if change >= 1.0:
+            status = "bullish"
+        elif change <= -1.0:
+            status = "bearish"
+        else:
+            status = "neutral"
+
+        if abs(change) >= 2.0:
+            volatility = "high"
+        elif abs(change) <= 0.5:
+            volatility = "low"
+        else:
+            volatility = "normal"
+
+        return status, volatility
+
+    def _band_from_status(self, status: str, volatility: str) -> Tuple[float, float]:
+        """market_status/volatility → (max_gap_up, max_gap_down) 밴드 계산 (단일 진실 공급원)."""
+        rule = self.rules.get(status, self.rules["neutral"])
+        max_gap_up = max(1.0, self.base_gap_up + rule["gap_up_adjust"])
+        max_gap_down = max(1.0, self.base_gap_down + rule["gap_down_adjust"])
+
+        # 고변동성 시장: 추가 완화
+        if volatility == "high":
+            max_gap_up += 0.5
+            max_gap_down += 0.5
+
+        return max_gap_up, max_gap_down
     
     def get_market_condition(self, use_cache: bool = True) -> MarketCondition:
         """
@@ -130,24 +164,10 @@ class DynamicGapCalculator:
         except Exception as e:
             logger.warning(f"시장 지수 조회 실패: {e}")
         
-        # 시장 상태 판단
+        # 시장 상태 판단 (두 지수 평균)
         avg_change = (kospi_change + kosdaq_change) / 2
-        
-        if avg_change >= 1.0:
-            status = "bullish"
-        elif avg_change <= -1.0:
-            status = "bearish"
-        else:
-            status = "neutral"
-        
-        # 변동성 판단
-        if abs(avg_change) >= 2.0:
-            volatility = "high"
-        elif abs(avg_change) <= 0.5:
-            volatility = "low"
-        else:
-            volatility = "normal"
-        
+        status, volatility = self._classify_status(avg_change)
+
         condition = MarketCondition(
             kospi_change=kospi_change,
             kosdaq_change=kosdaq_change,
@@ -189,23 +209,59 @@ class DynamicGapCalculator:
             market_condition = self.get_market_condition()
         
         status = market_condition.market_status
-        rule = self.rules.get(status, self.rules["neutral"])
-        
-        # 갭 기준 계산
-        max_gap_up = max(1.0, self.base_gap_up + rule["gap_up_adjust"])
-        max_gap_down = max(1.0, self.base_gap_down + rule["gap_down_adjust"])
-        
-        # 고변동성 시장: 추가 완화
-        if market_condition.volatility == "high":
-            max_gap_up += 0.5
-            max_gap_down += 0.5
-        
+        max_gap_up, max_gap_down = self._band_from_status(status, market_condition.volatility)
         reason = self._get_reason(status, market_condition)
-        
+
         logger.info(
             f"📊 동적 갭 기준: 상승 ±{max_gap_up}%, 하락 ±{max_gap_down}% ({reason})"
         )
-        
+
+        return DynamicGapConfig(
+            max_gap_up=max_gap_up,
+            max_gap_down=max_gap_down,
+            reason=reason
+        )
+
+    def get_dynamic_gap_for_market(
+        self,
+        market: str,
+        market_condition: MarketCondition = None
+    ) -> DynamicGapConfig:
+        """
+        종목 소속시장(kospi/kosdaq)의 개별 지수 등락률로 갭 기준 계산.
+
+        분열장(예: 코스피 강세 + 코스닥 약세)에서 두 지수 평균 regime의 왜곡을 제거.
+        GAP_REGIME_PER_MARKET=True 일 때 morning_screener가 사용.
+
+        Args:
+            market: "kospi" 또는 "kosdaq" (classify_market() 반환값)
+            market_condition: 시장 상태 (없으면 조회) — kospi_change/kosdaq_change 개별 사용
+
+        Returns:
+            DynamicGapConfig
+        """
+        if not self.enable_dynamic:
+            return DynamicGapConfig(
+                max_gap_up=self.base_gap_up,
+                max_gap_down=self.base_gap_down,
+                reason="동적 조정 비활성화"
+            )
+
+        if market_condition is None:
+            market_condition = self.get_market_condition()
+
+        # 종목 소속시장의 등락률만 사용
+        if market == "kosdaq":
+            change = market_condition.kosdaq_change
+            label = "KOSDAQ"
+        else:  # kospi (기본/폴백)
+            change = market_condition.kospi_change
+            label = "KOSPI"
+
+        status, volatility = self._classify_status(change)
+        max_gap_up, max_gap_down = self._band_from_status(status, volatility)
+        reason = f"{label} {change:+.1f}% → {status} (종목소속시장 regime)"
+
         return DynamicGapConfig(
             max_gap_up=max_gap_up,
             max_gap_down=max_gap_down,
@@ -252,6 +308,25 @@ class DynamicGapCalculator:
 
 
 # ===== 간편 함수 =====
+
+def classify_market(market_name: str) -> str:
+    """
+    KIS 대표시장한글명(rprs_mrkt_kor_name) → "kospi" / "kosdaq" 분류.
+
+    KIS 반환 예: "KOSPI", "KOSDAQ", "KOSDAQ GLOBAL", "코스닥", "KONEX" 등.
+    불명/빈 문자열은 "kospi"로 폴백(코스피 밴드 = 기존 동작에 가까운 보수적 기본).
+
+    Args:
+        market_name: KIS rprs_mrkt_kor_name 문자열
+
+    Returns:
+        "kospi" 또는 "kosdaq"
+    """
+    m = (market_name or "").upper()
+    if "KOSDAQ" in m or "코스닥" in m:
+        return "kosdaq"
+    return "kospi"
+
 
 def get_market_adjusted_gap() -> Tuple[float, float]:
     """

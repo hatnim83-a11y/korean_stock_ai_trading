@@ -481,6 +481,7 @@ def _save_ai_verify_logs(verified: list[dict]) -> None:
                 try:
                     details_json = json.dumps({
                         "recommend": recommend,
+                        "ai_sentiment": sentiment,  # AI 점수(0~10) — score 컬럼과 동일값, 분석 시 details에서도 즉시 확인 가능하도록 명시
                         "confidence": v.get("ai_confidence"),
                         "target_return": v.get("ai_target_return"),
                     }, ensure_ascii=False)

@@ -437,9 +437,10 @@ class KISApi:
                 'volume': 10000000,
                 'high': 75500,
                 'low': 74500,
-                'open': 74800
+                'open': 74800,
+                'market': 'KOSPI'  # 대표시장한글명 (KOSPI/KOSDAQ 등)
             }
-            
+
             조회 실패 시 None
             
         Example:
@@ -496,6 +497,7 @@ class KISApi:
                 "per": _safe_float(output.get("per")),  # PER
                 "pbr": _safe_float(output.get("pbr")),  # PBR
                 "market_cap": _safe_int(output.get("hts_avls")) * 100000000,  # 시가총액
+                "market": output.get("rprs_mrkt_kor_name", ""),  # 대표시장한글명 (KOSPI/KOSDAQ 등) - 갭 regime 종목 소속시장 분류용
             }
             
             logger.debug(f"[{stock_code}] 현재가 조회: {result['price']:,}원")

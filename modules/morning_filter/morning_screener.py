@@ -41,13 +41,13 @@ try:
     from .supply_filter import SupplyFilter
     from .volume_filter import VolumeFilter
     from .realtime_monitor import StrengthFilter
-    from .dynamic_gap import DynamicGapCalculator
+    from .dynamic_gap import DynamicGapCalculator, classify_market
 except ImportError:
     from gap_filter import GapFilter
     from supply_filter import SupplyFilter
     from volume_filter import VolumeFilter
     from realtime_monitor import StrengthFilter
-    from dynamic_gap import DynamicGapCalculator
+    from dynamic_gap import DynamicGapCalculator, classify_market
 
 
 @dataclass
@@ -176,6 +176,7 @@ class MorningScreener:
                     stock["prev_close"] = price_data.get("prev_close", 0)
                     stock["current_volume"] = price_data.get("volume", 0)
                     stock["change_rate"] = price_data.get("change_rate", 0)
+                    stock["market"] = price_data.get("market", "")  # 소속시장(KOSPI/KOSDAQ) - per-market 갭 regime용
                 
                 # 수급 조회
                 supply_data = self.kis_api.get_investor_trading(stock_code)
@@ -239,17 +240,50 @@ class MorningScreener:
             logger.info("\n📊 Step 1: 시초가 갭 필터")
             
             # 동적 갭 기준 계산
-            if self.enable_dynamic_gap and self.dynamic_gap_calculator:
-                gap_config = self.dynamic_gap_calculator.get_dynamic_gap()
-                self.gap_filter = GapFilter(
-                    max_gap_up=gap_config.max_gap_up,
-                    max_gap_down=gap_config.max_gap_down
+            per_market = bool(
+                getattr(settings, "GAP_REGIME_PER_MARKET", False)
+                and self.enable_dynamic_gap
+                and self.dynamic_gap_calculator is not None
+            )
+
+            if per_market:
+                # ② 종목 소속시장(코스피/코스닥) 개별 지수로 regime 판정 (분열장 왜곡 제거)
+                condition = self.dynamic_gap_calculator.get_market_condition()
+                kospi_cfg = self.dynamic_gap_calculator.get_dynamic_gap_for_market("kospi", condition)
+                kosdaq_cfg = self.dynamic_gap_calculator.get_dynamic_gap_for_market("kosdaq", condition)
+                kospi_filter = GapFilter(max_gap_up=kospi_cfg.max_gap_up, max_gap_down=kospi_cfg.max_gap_down)
+                kosdaq_filter = GapFilter(max_gap_up=kosdaq_cfg.max_gap_up, max_gap_down=kosdaq_cfg.max_gap_down)
+                logger.info(
+                    f"   종목소속 regime: 코스피 ±{kospi_cfg.max_gap_up:.1f}% ({kospi_cfg.reason}) | "
+                    f"코스닥 ±{kosdaq_cfg.max_gap_up:.1f}% ({kosdaq_cfg.reason})"
                 )
-                logger.info(f"   동적 기준 적용: ±{gap_config.max_gap_up:.1f}% ({gap_config.reason})")
-            elif not self.gap_filter:
-                self.gap_filter = GapFilter()
-            
-            passed, excluded = self.gap_filter.check_multiple(current_stocks)
+
+                passed, excluded = [], []
+                for stock in current_stocks:
+                    mkt = classify_market(stock.get("market", ""))
+                    gf = kosdaq_filter if mkt == "kosdaq" else kospi_filter
+                    result = gf.check(
+                        stock_code=stock.get("code", stock.get("stock_code", "")),
+                        prev_close=stock.get("prev_close", 0),
+                        open_price=stock.get("open_price", stock.get("current_price", 0)),
+                        stock_name=stock.get("name", stock.get("stock_name", "")),
+                    )
+                    stock["gap_result"] = result
+                    stock["gap_percent"] = result.gap_percent
+                    (passed if result.passed else excluded).append(stock)
+                logger.info(f"📊 갭 필터 결과(종목소속 regime): {len(passed)}개 통과, {len(excluded)}개 제외")
+            else:
+                if self.enable_dynamic_gap and self.dynamic_gap_calculator:
+                    gap_config = self.dynamic_gap_calculator.get_dynamic_gap()
+                    self.gap_filter = GapFilter(
+                        max_gap_up=gap_config.max_gap_up,
+                        max_gap_down=gap_config.max_gap_down
+                    )
+                    logger.info(f"   동적 기준 적용: ±{gap_config.max_gap_up:.1f}% ({gap_config.reason})")
+                elif not self.gap_filter:
+                    self.gap_filter = GapFilter()
+
+                passed, excluded = self.gap_filter.check_multiple(current_stocks)
             gap_excluded = len(excluded)
             for s in excluded:
                 gap_r = s.get('gap_result')
