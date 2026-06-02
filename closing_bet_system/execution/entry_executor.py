@@ -69,7 +69,10 @@ class EntryExecutorSettings:
     fallback_to_next_candidate: bool = True  # PRD 9-2 정합
 
     # 가격 상한 (PRD 9-2/9-3 박제, 백테스트 정합)
-    vwap_premium: float = 0.005
+    # 2026-06-02 완화: 0.005 → 0.02 — 6/2 두산로보틱스(+19% 폭등) 케이스에서 vwap+0.5%
+    # 지정가가 호가창과 매칭 실패 → 5분 deadline executed=0/1 미체결. vwap+2%로 호가 추격성 강화.
+    # 시장가 직접 전환은 슬리피지 리스크 큼, vwap+2% 절충안.
+    vwap_premium: float = 0.02
     estimated_price_premium: float = 0.002
     estimated_price_reject_pct: float = 0.005
     ask_bid_ratio_min: float = 0.8
