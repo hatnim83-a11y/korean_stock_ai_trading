@@ -29,7 +29,7 @@ score:
   layer3_weight: 1.0
   score_max_full: 11               # 모든 Layer 활성화 시 만점
   score_max_phase1: 7              # Phase 1 초기(Layer1=0) 사실상 만점
-  min_alert: 7                     # 7점 이상 알림 후보 (Layer1 활성화 후 기준)
+  min_alert: 4                     # 2026-06-02 완화 (7→4): Layer1=0이라 사실상 만점 7점인데 min_alert=7은 만점 도달 후보만 알림 → 6/2 21건 모두 score≤4로 알림 0건 ("매수 시그널 없음" 체감). 4점(중상위)부터 알림으로 가시성 회복. 단 자동 진입은 별도 entry_executor.score_threshold(2/3) 적용
   min_entry: 8                     # 8점 이상 진입 가능 (Layer1 활성화 후 기준)
   max_position_score: 9            # 9점 이상 + 시장 양호 시 최대 비중
 
