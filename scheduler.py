@@ -34,6 +34,7 @@ import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 
 from pathlib import Path
@@ -116,7 +117,8 @@ class TradingScheduler:
         self.on_midweek_sell_profit: Optional[Callable] = None  # 09:00 주중 교체 수익 매도
         self.on_midweek_sell_loss: Optional[Callable] = None    # 09:10 주중 교체 손실 매도
         self.on_hold_period_sell: Optional[Callable] = None     # 09:15 보유기간 만료 매도
-        
+        self.on_healthcheck_ping: Optional[Callable] = None     # interval off-VM dead-man's-switch ping (비매매·24h)
+
         # 이벤트 리스너
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
@@ -350,6 +352,9 @@ class TradingScheduler:
             replace_existing=True
         )
 
+        # (P0-A) Off-VM dead-man's-switch ping (2026-06-05 incident)
+        self._setup_healthcheck_job()
+
         # 16. 종가베팅 시스템 잡 (Phase 1 알림형, 2026-05-04 도입)
         # - PRD 16-3 시간표: 15:10 pipeline / 15:35 summary / 10:00 T+1 라벨링
         # - Phase 1 = placeholder universe (빈 리스트) → 잡 등록되지만 무동작 (Phase 2 collector 도입 시 활성화)
@@ -358,6 +363,32 @@ class TradingScheduler:
 
         logger.info("스케줄 등록 완료")
         self._print_schedules()
+
+    def _setup_healthcheck_job(self) -> None:
+        """Off-VM dead-man's-switch ping 잡 등록 (2026-06-05 incident P0-A).
+
+        - opt-in: HEALTHCHECK_ENABLED=True + URL 설정 시에만 등록
+        - IntervalTrigger(분 주기), 비매매·24h (휴장일 스킵 안 함 — 무신호 오경보 방지)
+        - 등록 실패가 메인 스케줄에 영향 주지 않도록 격리
+        """
+        try:
+            if not settings.HEALTHCHECK_ENABLED:
+                return
+            url = settings.HEALTHCHECK_PING_URL
+            if not url or not url.strip():
+                logger.warning("HEALTHCHECK_ENABLED=True 이나 HEALTHCHECK_PING_URL 미설정 → ping 잡 미등록")
+                return
+            interval_min = max(1, int(settings.HEALTHCHECK_PING_INTERVAL_MIN))
+            self.scheduler.add_job(
+                self._run_healthcheck_ping,
+                IntervalTrigger(minutes=interval_min, timezone=_KST_TZ),
+                id='healthcheck_ping',
+                name=f'Off-VM 헬스체크 ping ({interval_min}분 주기)',
+                replace_existing=True
+            )
+            logger.info(f"🩺 Off-VM 헬스체크 ping 등록 ({interval_min}분 주기)")
+        except Exception as e:
+            logger.error(f"⚠️ 헬스체크 ping 잡 등록 실패 (메인 시스템은 정상 진행): {e}")
 
     def _setup_closing_bet_jobs(self) -> None:
         """종가베팅 시스템 잡 등록 (Phase 1: 알림형 / placeholder providers).
@@ -409,6 +440,18 @@ class TradingScheduler:
             logger.info(f"   - {job.name}: {job.trigger}{next_run}")
     
     # ===== 작업 실행 =====
+
+    # 주의: @_skip_on_holiday 미적용 — dead-man's-switch는 휴장일/주말/장외에도 ping 해야
+    # 외부 서비스가 "정상"으로 판단한다. 데코레이터를 붙이면 휴장일 ping 중단 → 오경보.
+    async def _run_healthcheck_ping(self) -> None:
+        """interval - off-VM dead-man's-switch ping (비매매, 24시간)."""
+        try:
+            if self.on_healthcheck_ping:
+                await self.on_healthcheck_ping()
+            # 콜백 미등록 시 조용히 패스 (잡 자체가 ENABLED일 때만 등록되므로 정상 경로 아님)
+        except Exception as e:
+            # ping 잡은 트레이딩에 영향 주면 안 됨 — 예외 격리, 에러알림 미발송(스팸 방지)
+            logger.warning(f"healthcheck ping 잡 예외(무시): {e}")
 
     @_skip_on_holiday
     async def _run_theme_check(self) -> None:

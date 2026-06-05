@@ -15,6 +15,15 @@
 - systemd 외 프로세스가 있으면 먼저 kill 후 서비스 시작
 - PID 파일(`trading_system.pid`) 잔여 시 삭제 후 시작
 
+### Off-VM 헬스체크 (dead-man's-switch — 2026-06-05 incident P0-A)
+- **목적**: VM freeze/네트워크 단절 시 봇이 텔레그램조차 못 보내는 공백 보완 → 외부 서비스가 **무신호**를 감지·경보
+- **동작**: `HEALTHCHECK_ENABLED=true` + `HEALTHCHECK_PING_URL` 설정 시 `scheduler._setup_healthcheck_job()`가 IntervalTrigger(기본 5분) 잡 등록 → `send_healthcheck_ping`(httpx.AsyncClient, 예외 전부 흡수)
+- **기본 비활성**(opt-in). 휴장일/장외에도 ping(데코레이터 미적용 — 멈추면 외부가 다운으로 오판). ping 실패는 트레이딩 무영향(warning 로그만, 텔레그램 스팸 없음)
+- **설정 키(.env)**: `HEALTHCHECK_ENABLED`/`HEALTHCHECK_PING_URL`/`HEALTHCHECK_PING_INTERVAL_MIN`/`HEALTHCHECK_PING_TIMEOUT_SEC`
+- **롤백**: `HEALTHCHECK_ENABLED=false` + restart → 잡 미등록 NO-OP
+- **GCP 콘솔 이중화 가이드**: `docs/runbooks/gcp_process_down_alert.md` / **인시던트**: `docs/incidents/20260605_vm_freeze_host_fault.md`
+- **후속(다음 단위)**: 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보(P0-B)
+
 ## 계정 관리
 - `.env` 파일에 활성/대기 계정 구분 (주석 처리로 전환)
 - KIS API 토큰: 앱키당 1분에 1회 발급 제한 — `kis_api.py`와 `kis_order_api.py`가 `_shared_token`으로 공유

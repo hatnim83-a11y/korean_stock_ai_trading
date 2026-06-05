@@ -65,6 +65,7 @@ from modules.trading_engine.portfolio_monitor_v2 import PortfolioMonitorV2, Sell
 from modules.trading_engine.sell_lock import sell_lock
 from modules.trading_engine.diversity_filter import apply_diversity_filter
 from modules.trading_engine.capital_utils import compute_per_slot_capital
+from modules.system_guard import send_healthcheck_ping
 from modules.rebalancer import run_daily_rebalancing
 from modules.reporter import (
     PerformanceCalculator,
@@ -377,6 +378,19 @@ class TradingSystem:
         self.scheduler.on_midweek_sell_profit = self._execute_midweek_profit_sells  # 09:00 주중 교체 수익 매도
         self.scheduler.on_midweek_sell_loss = self._execute_midweek_loss_sells      # 09:10 주중 교체 손실 매도
         self.scheduler.on_hold_period_sell = self.run_hold_period_sells              # 09:15 보유기간 만료 매도
+        self.scheduler.on_healthcheck_ping = self.run_healthcheck_ping              # interval off-VM dead-man's-switch ping
+
+    # ===== Off-VM dead-man's-switch ping (2026-06-05 incident P0-A) =====
+
+    async def run_healthcheck_ping(self) -> None:
+        """외부 헬스체크 ping 1회 발신. 실패해도 트레이딩에 영향 없음(경고 로그만)."""
+        url = settings.HEALTHCHECK_PING_URL
+        if not url or not url.strip():
+            return
+        ok = await send_healthcheck_ping(url, settings.HEALTHCHECK_PING_TIMEOUT_SEC)
+        if not ok:
+            # 외부 무신호는 off-VM 서비스가 감지·경보하므로 여기선 텔레그램 스팸 안 함
+            logger.warning("off-VM 헬스체크 ping 실패 (네트워크/외부서비스 점검 필요)")
 
     # ===== 08:30 테마 분석 (장 시작 전) =====
 

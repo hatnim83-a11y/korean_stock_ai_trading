@@ -942,7 +942,26 @@ class Settings(BaseSettings):
         default="15:30",
         description="일일 리포트 생성 시간"
     )
-    
+
+    # ===== Off-VM Dead-man's-switch (2026-06-05 incident P0-A) =====
+    # 봇이 외부 헬스체크(healthchecks.io 스타일)에 주기 ping → 봇/VM 다운 시 외부에서 무신호 감지·경보
+    HEALTHCHECK_ENABLED: bool = Field(
+        default=False,
+        description="외부 헬스체크 ping 활성화 (opt-in). True+URL 설정 시 interval 잡 등록"
+    )
+    HEALTHCHECK_PING_URL: str = Field(
+        default="",
+        description="헬스체크 ping URL (예: https://hc-ping.com/<uuid>). 시크릿 취급 — .env 관리"
+    )
+    HEALTHCHECK_PING_INTERVAL_MIN: int = Field(
+        default=5,
+        description="ping 주기(분). 외부 서비스 grace는 interval+여유로 설정 권장"
+    )
+    HEALTHCHECK_PING_TIMEOUT_SEC: int = Field(
+        default=5,
+        description="ping HTTP 타임아웃(초). 트레이딩 무간섭 위해 짧게 유지"
+    )
+
     class Config:
         """Pydantic 설정"""
         # .env 파일 경로 설정
