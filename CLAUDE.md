@@ -22,7 +22,14 @@
 - **설정 키(.env)**: `HEALTHCHECK_ENABLED`/`HEALTHCHECK_PING_URL`/`HEALTHCHECK_PING_INTERVAL_MIN`/`HEALTHCHECK_PING_TIMEOUT_SEC`
 - **롤백**: `HEALTHCHECK_ENABLED=false` + restart → 잡 미등록 NO-OP
 - **GCP 콘솔 이중화 가이드**: `docs/runbooks/gcp_process_down_alert.md` / **인시던트**: `docs/incidents/20260605_vm_freeze_host_fault.md`
-- **후속(다음 단위)**: 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보(P0-B)
+
+### 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보 (P0-B — 2026-06-05)
+- **B1 (누락 경보)**: scheduler `EVENT_JOB_MISSED` 리스너(`_on_job_missed`)가 핵심 잡(`CANDIDATE_CORE_JOB_IDS` ∩ 등록잡 = `core_job_ids`) misfire 폐기 시 텔레그램 경보. 6/5 freeze의 "missed by" 잡들을 잡는다
+- **B2 (재시작 경보)**: 기동 시 `_run_startup_recovery_check()`(main.py, `_resume_monitoring_if_needed` 앞) — 거래일 09:00~15:30 KST 새 프로세스 시작이면 "장중 비정상 재시작" 경보. `/tmp/trading_b2_restart_alert` 30분 cooldown(재시작 루프 스팸 차단)
+- **안전장치**: B1 리스너에 `is_trading_day()` 가드(MISSED는 잡 `_skip_on_holiday`보다 먼저 발화) / `(job_id, scheduled_run_time)` dedup / 이벤트루프 `loop.is_running()` 가드 후 create_task / `alert_job_missed`·리스너 모두 예외 소거(스케줄러·트레이딩 무영향)
+- **토글**: `JOB_RECOVERY_ALERT_ENABLED`(기본 True, 순수 경보). False+restart → 리스너 미등록 + B2 미발화 NO-OP
+- **한계**: 텔레그램 의존이라 장애 중엔 못 갈 수 있음(전송 실패는 logger.error 잔존, off-VM P0-A가 보완). 전송 실패 재시도 큐는 후속(P0-B-2)
+- **상세**: `docs/work-plans/completed/20260605_vm-resilience-missed-job-alert/`
 
 ## 계정 관리
 - `.env` 파일에 활성/대기 계정 구분 (주석 처리로 전환)

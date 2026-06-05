@@ -962,6 +962,12 @@ class Settings(BaseSettings):
         description="ping HTTP 타임아웃(초). 트레이딩 무간섭 위해 짧게 유지"
     )
 
+    # ===== 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보 (2026-06-05 incident P0-B) =====
+    JOB_RECOVERY_ALERT_ENABLED: bool = Field(
+        default=True,
+        description="EVENT_JOB_MISSED 핵심 잡 누락 경보 + 장중 비정상 재시작 경보 (순수 관측/알림, 트레이딩 무개입)"
+    )
+
     class Config:
         """Pydantic 설정"""
         # .env 파일 경로 설정

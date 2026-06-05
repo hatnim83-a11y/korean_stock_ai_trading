@@ -87,7 +87,8 @@ GCP 호스트 측 장애로 VM이 **Jun 5 08:00~09:17 KST 약 77분간 정지(st
 ## 7. 후속 액션 아이템
 - [x] (P0-A) 외부 dead-man's-switch healthcheck ping 구현 (2026-06-05, opt-in, code-tester 통과) — `docs/work-plans/completed/20260605_vm-resilience-healthcheck-ping/`
 - [ ] (P0-A 운영) healthchecks.io URL 발급 + .env 설정 + GCP uptime/alert 콘솔 구성 (`docs/runbooks/gcp_process_down_alert.md`)
-- [ ] (P0-B) 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보 (다음 단위)
+- [x] (P0-B) 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보 구현 (2026-06-05, EVENT_JOB_MISSED + 기동 체크, DB 없음, code-tester 통과) — `docs/work-plans/completed/20260605_vm-resilience-missed-job-alert/`
+- [ ] (P0-B-2 후속) B1 텔레그램 전송 실패 시 재시도 큐(네트워크 복구 후 재통보)
 - [ ] (P1) 기동 시 포지션 재조정·모니터링 재무장 검증
 - [ ] (P2) 네트워크 호출 타임아웃 / telegram 백오프 / 통제된 커널 재부팅
 - [ ] Jun 5 테마수집 결손이 다음 화요일 선정에 미치는 영향 점검(데이터 1포인트 결손 보정 필요 여부)

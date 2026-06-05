@@ -35,7 +35,7 @@ import sys
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -46,6 +46,14 @@ from database import Database
 
 # CronTrigger용 KST timezone 문자열
 _KST_TZ = "Asia/Seoul"
+
+# P0-B: 누락 시 경보할 핵심(매매 직결) 잡 후보. setup_schedules 후 실제 등록 잡과 교집합으로 확정.
+# (monitoring_start_early는 PARTIAL_PROFIT_EARLY_MONITORING_ENABLED off 시 미등록 → 교집합에서 자동 제외)
+CANDIDATE_CORE_JOB_IDS = frozenset({
+    'theme_check', 'theme_analysis', 'stock_screening', 'execute_buy',
+    'monitoring_start_early', 'monitoring_start', 'monitoring_stop',
+    'hold_period_sell', 'midweek_sell_profit', 'midweek_sell_loss',
+})
 
 
 def _skip_on_holiday(func):
@@ -118,11 +126,18 @@ class TradingScheduler:
         self.on_midweek_sell_loss: Optional[Callable] = None    # 09:10 주중 교체 손실 매도
         self.on_hold_period_sell: Optional[Callable] = None     # 09:15 보유기간 만료 매도
         self.on_healthcheck_ping: Optional[Callable] = None     # interval off-VM dead-man's-switch ping (비매매·24h)
+        self.on_job_missed_alert: Optional[Callable] = None     # P0-B: 핵심 잡 misfire 누락 경보 콜백 (async)
 
         # 이벤트 리스너
         self.scheduler.add_listener(self._on_job_executed, EVENT_JOB_EXECUTED)
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
-        
+
+        # P0-B: 핵심 잡 누락(misfire) 경보 리스너 (기본 ON, 토글 off 시 미등록)
+        self._missed_dedup: set = set()
+        self.core_job_ids: set = set(CANDIDATE_CORE_JOB_IDS)  # setup_schedules 후 등록 잡과 교집합으로 좁힘
+        if getattr(settings, 'JOB_RECOVERY_ALERT_ENABLED', True):
+            self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
+
         logger.info("트레이딩 스케줄러 초기화 (V2: 하이브리드 전략)")
     
     def _on_job_executed(self, event):
@@ -132,7 +147,37 @@ class TradingScheduler:
     def _on_job_error(self, event):
         """작업 에러 이벤트"""
         logger.error(f"작업 에러: {event.job_id} - {event.exception}")
-    
+
+    def _on_job_missed(self, event):
+        """P0-B: 핵심 잡 누락(misfire) 이벤트 → 텔레그램 경보 스케줄.
+
+        2026-06-05 freeze 때 08:00~09:06 잡이 misfire 폐기됐으나 운영자 무감지였던 공백 대응.
+        주의:
+        - MISSED는 잡 실행 *전*에 발화 → 잡의 @_skip_on_holiday를 우회하므로 여기서 is_trading_day() 직접 가드
+        - 리스너는 APScheduler가 BaseException 격리하나, 무음 실패 방지 위해 try/except + logger.error
+        - 코루틴 콜백은 이벤트루프에 안전 스케줄 (동기 잡 추가 대비 loop.is_running 방어)
+        """
+        try:
+            if not is_trading_day():
+                return
+            if event.job_id not in self.core_job_ids:
+                return
+            key = (event.job_id, getattr(event, 'scheduled_run_time', None))
+            if key in self._missed_dedup:
+                return
+            if len(self._missed_dedup) > 200:
+                self._missed_dedup.clear()
+            self._missed_dedup.add(key)
+            logger.error(f"⚠️ 핵심 잡 누락(misfire): {event.job_id} 예정={getattr(event, 'scheduled_run_time', '?')}")
+            if self.on_job_missed_alert:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.on_job_missed_alert(event.job_id, getattr(event, 'scheduled_run_time', None)))
+                else:
+                    logger.error("이벤트루프 미실행 — 누락 경보 스케줄 불가")
+        except Exception as e:
+            logger.error(f"_on_job_missed 예외(무시): {e}")
+
     # ===== 스케줄 등록 =====
     
     def setup_schedules(self) -> None:
@@ -360,6 +405,11 @@ class TradingScheduler:
         # - Phase 1 = placeholder universe (빈 리스트) → 잡 등록되지만 무동작 (Phase 2 collector 도입 시 활성화)
         # - 통합 실패 시 메인 시스템 영향 없도록 try/except 격리
         self._setup_closing_bet_jobs()
+
+        # P0-B: 실제 등록된 잡과 교집합으로 핵심 잡 목록 확정 (토글/EARLY_BUY 변동 무관)
+        registered = {j.id for j in self.scheduler.get_jobs()}
+        self.core_job_ids = set(CANDIDATE_CORE_JOB_IDS) & registered
+        logger.info(f"누락 경보 대상 핵심 잡 {len(self.core_job_ids)}개: {sorted(self.core_job_ids)}")
 
         logger.info("스케줄 등록 완료")
         self._print_schedules()

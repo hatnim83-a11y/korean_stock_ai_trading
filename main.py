@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 PID_FILE = Path(__file__).parent / "trading_system.pid"
 
 from logger import logger
-from config import settings, now_kst, is_trading_day, count_trading_days, is_makeup_reselection_day
+from config import settings, now_kst, is_trading_day, count_trading_days, is_makeup_reselection_day, KST
 from database import Database
 from scheduler import TradingScheduler
 
@@ -283,6 +283,9 @@ class TradingSystem:
         logger.info("📅 스케줄에 따라 자동 실행됩니다.")
         logger.info("   종료하려면 Ctrl+C를 누르세요.\n")
 
+        # P0-B: 장중 비정상 재시작 감지 → 경보 (모니터링 재개보다 먼저, 경보 선통보)
+        await self._run_startup_recovery_check()
+
         # 장 중 재시작 시 모니터링 자동 재개
         await self._resume_monitoring_if_needed()
 
@@ -379,6 +382,7 @@ class TradingSystem:
         self.scheduler.on_midweek_sell_loss = self._execute_midweek_loss_sells      # 09:10 주중 교체 손실 매도
         self.scheduler.on_hold_period_sell = self.run_hold_period_sells              # 09:15 보유기간 만료 매도
         self.scheduler.on_healthcheck_ping = self.run_healthcheck_ping              # interval off-VM dead-man's-switch ping
+        self.scheduler.on_job_missed_alert = self.alert_job_missed                  # P0-B: 핵심 잡 misfire 누락 경보
 
     # ===== Off-VM dead-man's-switch ping (2026-06-05 incident P0-A) =====
 
@@ -391,6 +395,76 @@ class TradingSystem:
         if not ok:
             # 외부 무신호는 off-VM 서비스가 감지·경보하므로 여기선 텔레그램 스팸 안 함
             logger.warning("off-VM 헬스체크 ping 실패 (네트워크/외부서비스 점검 필요)")
+
+    # ===== 누락 핵심 잡 탐지 + 장중 비정상 재시작 경보 (2026-06-05 incident P0-B) =====
+
+    async def alert_job_missed(self, job_id: str, scheduled_time) -> None:
+        """핵심 잡 misfire 누락 시 텔레그램 경보. 전송 실패해도 트레이딩 무영향."""
+        try:
+            ts = ""
+            try:
+                ts = scheduled_time.astimezone(KST).strftime("%H:%M") if scheduled_time else "?"
+            except Exception:
+                ts = str(scheduled_time)
+            text = (
+                "⚠️ *핵심 잡 누락(misfire) 감지*\n\n"
+                f"📋 잡: `{job_id}`\n"
+                f"⏰ 예정: {ts} (KST)\n"
+                f"🕒 감지: {now_kst().strftime('%H:%M')}\n\n"
+                "프로세스 정지/지연으로 매매 잡이 실행되지 않았을 수 있습니다.\n"
+                "포지션·모니터링 상태를 점검하세요."
+            )
+            await asyncio.to_thread(self.notifier.send_message, text)
+        except Exception as e:
+            logger.error(f"alert_job_missed 전송 실패: {e}")
+
+    async def _run_startup_recovery_check(self) -> None:
+        """기동 시 장중 비정상 재시작 감지 → 경보.
+
+        장중(09:00~15:30 KST) 거래일에 새 프로세스가 시작되면 = 비정상 재시작
+        (정상 운영은 systemctl 외 재시작 없음). 이 경우 09:00 이후 예정 매매 잡이
+        이 세션에서 실행 안 됐을 수 있으므로 운영자에게 점검 경보. 30분 cooldown(재시작 루프 스팸 방지).
+        """
+        try:
+            if not getattr(settings, 'JOB_RECOVERY_ALERT_ENABLED', True):
+                return
+            if not is_trading_day():
+                return
+            from datetime import time as dt_time
+            now = now_kst()
+            # 09:00 하한: monitoring_start_early 잡(09:00) 이후 재시작부터 경보
+            # (모니터 재개 기준 09:26보다 이르게 — freeze가 08~09시에도 발생하므로)
+            if not (dt_time(9, 0) <= now.time() <= dt_time(15, 30)):
+                return
+
+            # 재시작 루프 스팸 억제: /tmp 파일 30분 cooldown (VM 재부팅 시 파일 소실 = 첫 경보 발화는 정상)
+            cooldown_file = "/tmp/trading_b2_restart_alert"
+            try:
+                if os.path.exists(cooldown_file):
+                    last = os.path.getmtime(cooldown_file)
+                    if (now.timestamp() - last) < 1800:
+                        logger.warning("장중 비정상 재시작 경보 cooldown(30분) 내 — 발송 스킵")
+                        return
+            except Exception:
+                pass
+
+            note = "" if now.time() >= dt_time(9, 26) else "\n(09:26 이전 — 모니터링은 09:26에 자동 재개 예정)"
+            text = (
+                "🚨 *장중 비정상 재시작 감지*\n\n"
+                f"🕒 시각: {now.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
+                "장중에 시스템이 새로 시작됐습니다. 09:00 이후 예정된 매매 잡(스크리닝/매수/"
+                "보유기간매도/모니터링 등)이 이 세션에서 실행되지 않았을 수 있습니다.\n"
+                f"보유 포지션과 모니터링 상태를 점검하세요.{note}"
+            )
+            await asyncio.to_thread(self.notifier.send_message, text)
+            try:
+                with open(cooldown_file, "w") as f:
+                    f.write(str(now.timestamp()))
+            except Exception:
+                pass
+            logger.warning(f"장중 비정상 재시작 경보 발송 ({now.strftime('%H:%M')})")
+        except Exception as e:
+            logger.error(f"_run_startup_recovery_check 예외(무시): {e}")
 
     # ===== 08:30 테마 분석 (장 시작 전) =====
 
