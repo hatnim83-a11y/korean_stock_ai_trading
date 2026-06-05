@@ -313,7 +313,8 @@ def classify_market(market_name: str) -> str:
     """
     KIS 대표시장한글명(rprs_mrkt_kor_name) → "kospi" / "kosdaq" 분류.
 
-    KIS 반환 예: "KOSPI", "KOSDAQ", "KOSDAQ GLOBAL", "코스닥", "KONEX" 등.
+    KIS 반환 예: "KOSPI", "KOSPI200", "KOSDAQ", "KSQ150"(코스닥150), "KOSDAQ GLOBAL", "코스닥", "KONEX" 등.
+    ⚠️ 코스닥150 구성종목은 "KSQ150"(KSQ=코스닥 약어)로 반환되어 "KOSDAQ" 문자열이 없음 → "KSQ"도 코스닥으로 분류.
     불명/빈 문자열은 "kospi"로 폴백(코스피 밴드 = 기존 동작에 가까운 보수적 기본).
 
     Args:
@@ -323,7 +324,7 @@ def classify_market(market_name: str) -> str:
         "kospi" 또는 "kosdaq"
     """
     m = (market_name or "").upper()
-    if "KOSDAQ" in m or "코스닥" in m:
+    if "KOSDAQ" in m or "코스닥" in m or "KSQ" in m:
         return "kosdaq"
     return "kospi"
 
