@@ -5,8 +5,8 @@
 fund:
   capital_ratio: 0.10              # 종가베팅 전용 자금 비중 (기본 10%)
   max_position_per_stock: 0.25     # 1종목 최대 비중 (absorb_swing_idle 활성 시 unused)
-  max_concurrent_positions: 4      # 동시 보유 최대 종목 수
-  max_daily_entries: 4             # 1일 최대 진입 종목 수 (top 4 강제 정합, 2026-05-23 2→4)
+  max_concurrent_positions: 2      # 2026-06-04 축소 (4→2): 7영업일 phase1 top4 후보 단가 분포 분석 결과 64%가 200k+ 대형주 → quantity=0 price_cap 자동 거부. 종목당 한도를 199k→398k(DANGER)로 2배 확대해 매수 가능 비중 36→61% 회복. 분산 효과는 소폭 감소 (4→2)
+  max_daily_entries: 2             # 2026-06-04: max_concurrent_positions=2와 정합 동기화 (4→2)
   weekly_loss_limit: -0.10         # 2026-06-01 완화 (-0.05→-0.10): 5/26 손실 -8.25%는 단순 % 합산 과대측정(가중 실제 -3.64%, 계좌 임팩트 -0.07%) → 한도 -5%로 6/1 진입 차단 발생. 계좌 9.3M 기준 -10% = 손실액 -930k 수준 한도, 실손실 보호 유지
   # ─── 동적 자본 분리 (2026-05-23 도입) ───
   absorb_swing_idle: true          # 스윙 유휴자본 흡수 토글 (false 시 base 10%만 사용)
@@ -170,8 +170,8 @@ entry_executor:
   score_threshold: 2                       # 진입 임계 NORMAL: total_score ≥ 2 (5/14 사용자 결정)
   score_threshold_crisis: 3                # 진입 임계 CAUTION/DANGER: total_score ≥ 3 (2026-05-29 신규, 위기 시 선별 강화 — docs/improvements/20260529_closing_bet_capital_limit_crisis_policy.md)
   position_ratio: 0.7                      # PRD 기본 한도 × 0.7 (5/14 사용자 결정)
-  phase1_ratio: 0.5                        # 1차(정규장) 50% / 2차(동시호가) 50%
-  phase2_enabled: true                     # Step 0 ord_dvsn 폴백 시 false (15:25 동시호가 미발주)
+  phase1_ratio: 1.0                        # 2026-06-04: 0.5→1.0 (phase2 폐지). max_concurrent 4→2와 동시 적용으로 종목당 한도 199k→798k(DANGER)로 4배 확대. PRD 9-1 2분할 정합 위반이지만 진입률 1.5% 회복 우선
+  phase2_enabled: false                    # 2026-06-04: true→false (phase1_ratio=1.0이라 phase2 무의미). 롤백 시 phase1_ratio=0.5와 함께 원복
   polling_interval_sec: 5                  # fill_checker 폴링 간격 (Step 0 결과 따라 10초 완화 가능)
   fill_check_deadline_sec: 300             # 5분 cut (15:23 또는 15:30까지)
   fallback_to_next_candidate: true         # PRD 9-2 정합 (미체결 시 다음 후보)
