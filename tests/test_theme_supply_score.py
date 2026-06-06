@@ -55,7 +55,7 @@ def test_empty_stock_codes():
     """빈 리스트 → score=0.0, top_codes=[]."""
     db = _temp_db()
     try:
-        result = calculate_theme_supply_score_v2([], db, top_n=5, ref_bil=30.0, max_score=5.0)
+        result = calculate_theme_supply_score_v2([], db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["score"] == 0.0
         assert result["top_codes"] == []
         assert result["foreign_pos_ratio"] == 0.0
@@ -70,7 +70,7 @@ def test_no_snapshots_in_db():
     db = _temp_db()
     try:
         result = calculate_theme_supply_score_v2(["005930", "000660"], db,
-                                                  top_n=5, ref_bil=30.0, max_score=5.0)
+                                                  top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["score"] == 0.0
         assert result["top_codes"] == []
         print("✅ test_no_snapshots_in_db PASS")
@@ -93,7 +93,7 @@ def test_strong_positive_case():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["score"] == 5.0, f"expected 5.0, got {result['score']}"
         assert result["foreign_pos_ratio"] == 1.0
         assert len(result["top_codes"]) == 5
@@ -114,7 +114,7 @@ def test_negative_avg_returns_zero():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["score"] == 0.0
         assert result["foreign_pos_ratio"] == 0.0
         print(f"✅ test_negative_avg_returns_zero PASS (avg={result['avg_net_bil']}억)")
@@ -135,7 +135,7 @@ def test_boundary_exact_ref_bil():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
         assert abs(result["score"] - 5.0) < 0.01, f"expected ~5.0, got {result['score']}"
         print(f"✅ test_boundary_exact_ref_bil PASS (score={result['score']})")
     finally:
@@ -155,7 +155,7 @@ def test_top_n_selection():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=2, ref_bil=30.0, max_score=5.0)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=2, ref_bil=30.0, max_score=5.0, signed=False)
         # 평균 (100+80)/2 = 90억 → ratio=1.0 → score=5.0
         assert result["score"] == 5.0
         assert len(result["top_codes"]) == 2
@@ -188,7 +188,7 @@ def test_universe_top_signal_empty_db():
     """빈 DB → score=0.0, measured_date=None."""
     db = _temp_db()
     try:
-        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0)
+        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["score"] == 0.0
         assert result["measured_date"] is None
         assert result["top_codes"] == []
@@ -211,7 +211,7 @@ def test_universe_top_signal_normal():
             ("066970", "엘앤에프", 4e9, 1e9, 400000),
         ]
         _insert_snapshots(db, td, samples)
-        result = measure_universe_top_supply_signal(db, top_n=3, ref_bil=30.0, max_score=5.0)
+        result = measure_universe_top_supply_signal(db, top_n=3, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["measured_date"] == "2026-05-18"
         assert result["universe_size"] == 5
         assert len(result["top_codes"]) == 3
@@ -235,10 +235,179 @@ def test_universe_top_signal_top_n_cap():
             ("000660", "SK하이닉스", 6e9, 0, 150000),
         ]
         _insert_snapshots(db, td, samples)
-        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0)
+        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0, signed=False)
         assert result["universe_size"] == 2
         assert len(result["top_codes"]) == 2  # universe보다 많이 요청해도 universe 만큼만
         print(f"✅ test_universe_top_signal_top_n_cap PASS (size={result['universe_size']})")
+    finally:
+        db.close()
+
+
+# ===== 2026-06-06 신규: signed 양선형 매핑 + outlier_cap =====
+
+def test_signed_avg_zero_returns_half_max():
+    """signed=True, avg=0 → score = max_score/2 (중간값)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # 평균 정확히 0 (3억-3억=0)
+        samples = [
+            ("005930", "삼성전자", 3e8, 0, 50000),
+            ("000660", "SK하이닉스", -3e8, 0, 150000),
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930", "000660"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+        )
+        assert abs(result["score"] - 2.5) < 0.01, f"expected ~2.5, got {result['score']}"
+        print(f"✅ test_signed_avg_zero_returns_half_max PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+def test_signed_negative_returns_low_score():
+    """signed=True, avg=-5억(중간) → score = max/4 ≈ 1.25."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # 평균 -5억 (-5e8)
+        samples = [
+            ("005930", "삼성전자", -5e8, 0, 50000),
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+        )
+        # ratio = (-5+10)/(2*10) = 0.25 → score = 1.25
+        assert abs(result["score"] - 1.25) < 0.01, f"expected 1.25, got {result['score']}"
+        print(f"✅ test_signed_negative_returns_low_score PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+def test_signed_positive_returns_high_score():
+    """signed=True, avg=+5억 → score = 3*max/4 ≈ 3.75."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", 5e8, 0, 50000),
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+        )
+        # ratio = (5+10)/(2*10) = 0.75 → score = 3.75
+        assert abs(result["score"] - 3.75) < 0.01, f"expected 3.75, got {result['score']}"
+        print(f"✅ test_signed_positive_returns_high_score PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+def test_signed_below_neg_ref_clamps_to_zero():
+    """signed=True, avg <= -ref_bil → score = 0 (clamp)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", -15e8, 0, 50000),  # -15억, ref=10
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+        )
+        assert result["score"] == 0.0
+        print(f"✅ test_signed_below_neg_ref_clamps_to_zero PASS (avg={result['avg_net_bil']}억)")
+    finally:
+        db.close()
+
+
+def test_signed_above_ref_clamps_to_max():
+    """signed=True, avg >= ref_bil → score = max (clamp)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", 50e8, 0, 50000),  # +50억, ref=10
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+        )
+        assert result["score"] == 5.0
+        print(f"✅ test_signed_above_ref_clamps_to_max PASS (avg={result['avg_net_bil']}억)")
+    finally:
+        db.close()
+
+
+def test_outlier_cap_applied():
+    """outlier_cap_bil=100, avg=-50000억(실측 outlier) → cap=-100 → signed=True score=0."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # avg ≈ -55341억 같은 outlier (5/19~6/1 발견된 반도체 케이스)
+        samples = [
+            ("005930", "삼성전자", -50000e8, 0, 50000),  # -5조억(원)
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0,
+            signed=True, outlier_cap_bil=100.0,
+        )
+        # cap=-100억 → signed clamp max(-ref=-10, -100)=-10 → (-10+10)/(2×10)=0 → 0.0
+        assert result["score"] == 0.0
+        # avg_net_bil은 cap 적용 전 raw 값 노출
+        assert result["avg_net_bil"] < -1000
+        print(f"✅ test_outlier_cap_applied PASS (score={result['score']}, raw_avg={result['avg_net_bil']}억)")
+    finally:
+        db.close()
+
+
+def test_outlier_cap_disabled_zero():
+    """outlier_cap_bil=0 → cap 미적용."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", -50000e8, 0, 50000),
+        ]
+        _insert_snapshots(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, ref_bil=10.0, max_score=5.0,
+            signed=True, outlier_cap_bil=0.0,
+        )
+        # cap 미적용이지만 ref=10 clamp는 작동 → score=0 (clamp -10)
+        assert result["score"] == 0.0
+        print(f"✅ test_outlier_cap_disabled_zero PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+def test_universe_signal_signed_mapping():
+    """universe top signal도 signed 매핑 적용."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # 3종목 평균 -5억 (외인 약세 시장)
+        samples = [
+            ("005930", "삼성전자", -3e8, 0, 50000),
+            ("000660", "SK하이닉스", -5e8, 0, 150000),
+            ("035420", "NAVER", -7e8, 0, 200000),
+        ]
+        _insert_snapshots(db, td, samples)
+        result = measure_universe_top_supply_signal(
+            db, top_n=3, ref_bil=10.0, max_score=5.0, signed=True
+        )
+        # 평균 -5억 → signed (-5+10)/(20)=0.25 → 1.25
+        assert abs(result["score"] - 1.25) < 0.01
+        print(f"✅ test_universe_signal_signed_mapping PASS (score={result['score']})")
     finally:
         db.close()
 
@@ -255,6 +424,15 @@ def run_all():
         test_universe_top_signal_empty_db,
         test_universe_top_signal_normal,
         test_universe_top_signal_top_n_cap,
+        # 2026-06-06 신규 — signed 양선형 매핑 + outlier_cap
+        test_signed_avg_zero_returns_half_max,
+        test_signed_negative_returns_low_score,
+        test_signed_positive_returns_high_score,
+        test_signed_below_neg_ref_clamps_to_zero,
+        test_signed_above_ref_clamps_to_max,
+        test_outlier_cap_applied,
+        test_outlier_cap_disabled_zero,
+        test_universe_signal_signed_mapping,
     ]
     failures = 0
     for t in tests:

@@ -905,8 +905,16 @@ class Settings(BaseSettings):
         description="테마당 supply_score_v2 계산에 사용할 상위 N개 종목 (외인 5일 누적 절댓값 기준)"
     )
     SUPPLY_INTENSITY_REF_BIL: float = Field(
-        default=30.0,
-        description="supply_score_v2 정규화 기준액 (억원). 평균 외인 net이 이 값에 도달하면 SUPPLY_SCORE_MAX 만점. 30억=5점 매핑"
+        default=10.0,
+        description="supply_score_v2 정규화 기준액 (억원). SIGNED=True 시 ±이 값 범위로 양선형 매핑 (avg=0→max/2, avg=+ref→max, avg=-ref→0). 2026-06-06 Shadow Run 분포 분석 결과 30→10 하향 (실측 양수 외인 net 다수가 +5~+60억 범위)"
+    )
+    SUPPLY_SCORE_SIGNED: bool = Field(
+        default=True,
+        description="True면 음수 외인 net에도 점수 부여 (양선형 매핑, avg=0→max/2). False면 기존 동작 (음수→0, 양수만 비례). 2026-06-06 추가 — Shadow Run 분포 차별성 개선용"
+    )
+    SUPPLY_OUTLIER_CAP_BIL: float = Field(
+        default=100.0,
+        description="theme_avg_net_bil outlier cap (억원). 절댓값이 이 값을 넘으면 ±cap으로 잘라냄. 2026-06-06 발견된 대형주(삼성전자/SK하이닉스) -55000억대 이상치 방어 (별도 후속 단위에서 root cause 점검 예정)"
     )
     SUPPLY_STRENGTH_ENABLED: bool = Field(
         default=False,

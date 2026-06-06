@@ -108,17 +108,27 @@
   - 주의 3: 비화요일 08:30 stocks 누락 noise → `stocks_available` 필드 추가
 - [x] 실제 운영 DB로 통합 검증 — universe 113종목/조선 테마 score=5.0/강한 케이스 score=5.0/빈 리스트 score=0.0 정상
 
-### 검증 (Day 14 종료 시점)
-- [ ] 14영업일 데이터 ≥ 200건
-- [ ] 모멘텀 × supply_score Pearson 상관계수 r < 0.7
-- [ ] supply_score 분포 차별성 (0/3/5점 골고루)
-- [ ] supply_score 상위/하위 테마 사이 점수 차이 명확
-- [ ] **[2026-05-13 추가] universe 내부 외인 TOP 동적 SQL 시범 측정**: snapshot 기반 `SELECT stock_code FROM daily_supply_snapshot WHERE trade_date=? ORDER BY foreign_net_5d DESC LIMIT N` 매일 실행 + 결과를 KIS TOP30 신호와 분포·상관성 비교 (Pearson r, 매칭 종목 수, 가산 시 점수 차이). Phase 1-C foreign_top 가산 신호 선택에 사용
+### 검증 — 2026-06-06 1차 측정 (5/19~6/5 누적)
+- [x] 14영업일 데이터 ≥ 200건 — ✅ **351건 / 12 영업일** (5/22 부처님오신날, 6/3 현충일 휴장 + 5/30/5/31 주말 = 14 - 2)
+- [x] 모멘텀 × supply_score Pearson 상관계수 r < 0.7 — ✅ **r = 0.1037** (매우 독립적, 신호 직교성 확보)
+- [ ] supply_score 분포 차별성 (0/3/5점 골고루) — ❌ **FAIL** (0=91.7% / 5=5.7% / 사이 2.6% 양극화)
+- [x] supply_score 상위/하위 테마 사이 점수 차이 명확 — ✅ (0 vs 5 명확하지만 중간 부재)
+- [x] universe 내부 외인 TOP 동적 SQL 시범 측정 — ✅ supply_score_observation.breakdown_json.universe_top_signal 매일 누적 중
 
-### 운영 게이트 (Shadow Run 완료)
-- [ ] 모든 조건 PASS → Phase 1-C 진행
-- [ ] 한 조건이라도 FAIL → 점수 변환식 재설계 (`SUPPLY_INTENSITY_REF_BIL` 조정)
-- [ ] **사용자 의사결정**
+### 운영 게이트 — 변환식 재설계 결정 (2026-06-06)
+- [x] 한 조건 FAIL → 점수 변환식 재설계 진입 (`SUPPLY_INTENSITY_REF_BIL` 조정 + 양선형 매핑 도입)
+- [x] **사용자 의사결정**: "변환식 재설계 후 재측정"
+- [x] config.py 신규 토글: `SUPPLY_SCORE_SIGNED=True`(양선형) + `SUPPLY_OUTLIER_CAP_BIL=100.0`(이상치 방어) + `SUPPLY_INTENSITY_REF_BIL` 30 → **10** 하향
+- [x] scorer.py: `_compute_supply_score_from_avg()` 헬퍼 추출 + 두 함수에 signed/outlier 인자 전달
+- [x] 단위 테스트 18/18 PASS (기존 10 회귀 보존 + 신규 8 양선형/clamp/outlier_cap)
+- [x] code-tester 심각 0/주의 2/참고 2, "배포 가능" — 주의 2건 즉시 처리 (`or 5.0` → `if > 0 else 5.0` 명시화 + outlier_cap 조건 중복 제거)
+- [x] 실측 165건 시뮬레이션: 새 공식 분포 0(39.4%) / 2-3(44.2%) / 5(15.2%) — 양극화 대폭 개선
+- [ ] **systemctl restart trading_system** (사용자 진행 필요) → 5영업일 후 (~6/12) 분포 재평가
+
+### 검증 — 2차 측정 (~2026-06-12, 5영업일 누적 후 재시작 이후 데이터만)
+- [ ] 분포 차별성: 0/2-3/5 각 구간 모두 ≥ 10% (양극화 해소 기준)
+- [ ] Pearson r 유지 (< 0.7)
+- [ ] **사용자 확인 → Phase 1-C 진행**
 
 ### 문서 업데이트
 - [ ] Shadow Run 결과를 `memory/project_supply_signal_integration.md`에 기록

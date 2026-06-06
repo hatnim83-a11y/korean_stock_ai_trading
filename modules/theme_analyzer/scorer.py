@@ -226,29 +226,75 @@ def calculate_supply_score_from_amount(
 
 # ===== Phase 1-B½/1-C 수급 점수 v2 (DB 기반 정규화) =====
 
+def _compute_supply_score_from_avg(
+    avg_net_bil: float,
+    ref_bil: float,
+    max_score: float,
+    signed: bool = False,
+    outlier_cap_bil: float = 0.0,
+) -> float:
+    """avg_net_bil → score 공통 변환 헬퍼.
+
+    Args:
+        avg_net_bil: 평균 외인 5일 net (억원, 음수 가능)
+        ref_bil: 정규화 기준액 (signed=True일 때 ±이 값 범위로 매핑)
+        max_score: 최대 점수
+        signed: True면 양선형 매핑 (-ref→0, 0→max/2, +ref→max),
+                False면 기존 (음수→0, 양수만 비례)
+        outlier_cap_bil: 절댓값이 이 값을 넘으면 ±cap으로 clamp (0 또는 음수면 미적용)
+
+    Returns:
+        0.0 ~ max_score 사이 점수
+    """
+    if max_score <= 0 or ref_bil <= 0:
+        return 0.0
+
+    # outlier cap 적용 (0 또는 음수면 미적용)
+    if outlier_cap_bil > 0:
+        avg_net_bil = max(-outlier_cap_bil, min(outlier_cap_bil, avg_net_bil))
+
+    if signed:
+        # 양선형: -ref→0, 0→max/2, +ref→max
+        clamped = max(-ref_bil, min(ref_bil, avg_net_bil))
+        ratio = (clamped + ref_bil) / (2 * ref_bil)  # 0~1
+        return ratio * max_score
+    else:
+        # 기존: 음수→0, 양수만 비례
+        if avg_net_bil <= 0:
+            return 0.0
+        ratio = min(1.0, avg_net_bil / ref_bil)
+        return ratio * max_score
+
+
 def calculate_theme_supply_score_v2(
     stock_codes: list,
     db,
     top_n: int = 5,
-    ref_bil: float = 30.0,
+    ref_bil: float = 10.0,
     max_score: float = 5.0,
+    signed: bool = True,
+    outlier_cap_bil: float = 100.0,
 ) -> dict:
     """테마 종목 풀의 외국인 5일 누적 net 기반 supply_score_v2 계산.
 
     Phase 1-B½ Shadow Run에서는 관측만 (총점 미반영), Phase 1-C에서 활성화.
 
+    2026-06-06 분포 차별성 개선: signed=True 양선형 매핑 + outlier_cap_bil 도입.
+
     Args:
         stock_codes: 테마의 종목코드 리스트 (6자리)
         db: Database 인스턴스 (close 안 함)
         top_n: 외인 5일 절댓값 상위 N개 종목 선정 (기본 5)
-        ref_bil: 정규화 기준액 (억원, 평균 net이 이 값 이상이면 만점)
+        ref_bil: 정규화 기준액 (억원). signed=True면 ±ref 범위로 매핑
         max_score: 최대 가산 점수 (Phase 1-B½ 0.0, Phase 1-C 2.5 → 5.0)
+        signed: True면 음수에도 점수 (양선형). False면 기존 (음수→0)
+        outlier_cap_bil: avg 절댓값 cap (이상치 방어, 0이면 미적용)
 
     Returns:
         {
-            'score': float (0~max_score, 양의 평균만 점수, 음의 평균은 0),
+            'score': float (0~max_score),
             'foreign_pos_ratio': float (0~1, 양수 비율),
-            'avg_net_bil': float (선정 종목 평균 외인 5일 net, 억원),
+            'avg_net_bil': float (선정 종목 평균 외인 5일 net, 억원, cap 적용 전 값),
             'top_codes': list[str] (선정된 종목코드, 디버그용)
         }
     """
@@ -286,12 +332,9 @@ def calculate_theme_supply_score_v2(
     pos_count = sum(1 for n in nets if n > 0)
     pos_ratio = pos_count / len(nets)
 
-    # 양의 평균만 점수 (음의 평균은 0)
-    if avg_net_bil <= 0:
-        score = 0.0
-    else:
-        ratio = min(1.0, avg_net_bil / ref_bil)
-        score = ratio * max_score
+    score = _compute_supply_score_from_avg(
+        avg_net_bil, ref_bil, max_score, signed=signed, outlier_cap_bil=outlier_cap_bil
+    )
 
     return {
         "score": round(score, 3),
@@ -305,8 +348,10 @@ def measure_universe_top_supply_signal(
     db,
     trade_date=None,
     top_n: int = 30,
-    ref_bil: float = 30.0,
+    ref_bil: float = 10.0,
     max_score: float = 5.0,
+    signed: bool = True,
+    outlier_cap_bil: float = 100.0,
 ) -> dict:
     """[권고 조치, 2026-05-13] universe 내부 외인 5일 net 상위 N개 신호 측정.
 
@@ -314,12 +359,16 @@ def measure_universe_top_supply_signal(
     안에서 외인 매수 상위를 동적 계산한 신호를 측정. Phase 1-C에서 KIS TOP30 vs
     universe 내부 TOP 중 어느 쪽을 점수 가산에 쓸지 결정하기 위한 추적 데이터.
 
+    2026-06-06 분포 차별성 개선: signed + outlier_cap_bil 도입 (테마 v2와 동일 패턴).
+
     Args:
         db: Database 인스턴스
         trade_date: 측정 기준일 (None이면 daily_supply_snapshot MAX)
         top_n: universe 내부 상위 N개 종목
         ref_bil: 정규화 기준액 (억원)
         max_score: 최대 점수
+        signed: True면 양선형 매핑
+        outlier_cap_bil: avg 절댓값 cap
 
     Returns:
         {
@@ -384,11 +433,9 @@ def measure_universe_top_supply_signal(
     pos_count = sum(1 for n in nets if n > 0)
     pos_ratio = pos_count / len(nets)
 
-    if avg_net_bil <= 0:
-        score = 0.0
-    else:
-        ratio = min(1.0, avg_net_bil / ref_bil)
-        score = ratio * max_score
+    score = _compute_supply_score_from_avg(
+        avg_net_bil, ref_bil, max_score, signed=signed, outlier_cap_bil=outlier_cap_bil
+    )
 
     return {
         "score": round(score, 3),
@@ -752,6 +799,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
     # SUPPLY_SIGNAL_ENABLED=False 시 전체 분기 스킵 (기존 동작 보존)
     _supply_db = None
     _universe_top_signal = None
+    # SUPPLY_SCORE_MAX=0 (관측 모드) 또는 음수일 때 5.0 만점 기준으로 관측 스케일 유지
+    # — Phase 1-C 활성화 후엔 SUPPLY_SCORE_MAX=2.5/5.0 등 양수로 설정
+    _supply_max_score = settings.SUPPLY_SCORE_MAX if settings.SUPPLY_SCORE_MAX > 0 else 5.0
     if settings.SUPPLY_SIGNAL_ENABLED:
         try:
             from database import Database  # lazy import (circular 방지)
@@ -762,7 +812,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                 _supply_db,
                 top_n=settings.SUPPLY_UNIVERSE_TOP_N,
                 ref_bil=settings.SUPPLY_INTENSITY_REF_BIL,
-                max_score=settings.SUPPLY_SCORE_MAX or 5.0,
+                max_score=_supply_max_score,
+                signed=settings.SUPPLY_SCORE_SIGNED,
+                outlier_cap_bil=settings.SUPPLY_OUTLIER_CAP_BIL,
             )
             logger.info(
                 f"📊 universe top signal — date={_universe_top_signal.get('measured_date')}, "
@@ -831,7 +883,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                 _supply_db,
                 top_n=settings.SUPPLY_SCORE_TOP_N,
                 ref_bil=settings.SUPPLY_INTENSITY_REF_BIL,
-                max_score=settings.SUPPLY_SCORE_MAX or 5.0,  # 0이면 관측용 5점 만점 기준
+                max_score=_supply_max_score,  # 0/음수 시 관측용 5.0 폴백
+                signed=settings.SUPPLY_SCORE_SIGNED,
+                outlier_cap_bil=settings.SUPPLY_OUTLIER_CAP_BIL,
             )
             supply_score_v2 = supply_v2_result["score"]
             # 관측 모드 OFF + MAX > 0 일 때만 총점 가산 (Phase 1-C 활성화 시)
@@ -926,6 +980,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                     "score_max": settings.SUPPLY_SCORE_MAX,
                     "ref_bil": settings.SUPPLY_INTENSITY_REF_BIL,
                     "top_n": settings.SUPPLY_SCORE_TOP_N,
+                    # 2026-06-06 변환식 재설계 추적 (Phase 1-B½ 분포 차별성 개선용)
+                    "signed": settings.SUPPLY_SCORE_SIGNED,
+                    "outlier_cap_bil": settings.SUPPLY_OUTLIER_CAP_BIL,
                 }
                 _supply_db.save_supply_score_observation(
                     obs_date=now_kst().date(),
