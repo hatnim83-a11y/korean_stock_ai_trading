@@ -346,6 +346,20 @@ class Settings(BaseSettings):
         default=True,
         description="09:00 조기 모니터링 + SellLock 활성화 (False=09:26 legacy)"
     )
+    # ----- 누락 종목 자동 편입 스윕 (2026-06-10 매수↔모니터 재시작 레이스 심층 방어) -----
+    MONITOR_MISSING_SWEEP_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "모니터 루프에서 'DB holding ∖ 메모리 포지션' 차집합을 주기 탐지해 "
+            "지각 체결/누락 종목을 자동 편입(load_positions_from_db 재호출). "
+            "어떤 경로로든 누락이 생겨도 다음 사이클에 복구되며 텔레그램 1회 경보. "
+            "False=스윕 미수행(롤백, 재시작 체이닝+cron 안전망만 의존)"
+        )
+    )
+    MONITOR_MISSING_SWEEP_INTERVAL_SEC: int = Field(
+        default=60,
+        description="누락 종목 스윕 주기(초). 모니터 루프에서 이 간격마다 차집합 탐지"
+    )
 
     # ===== 분할 진입 + 불타기 (v17 Tranche Entry + Pyramid-In) =====
     TRANCHE_ENTRY_ENABLED: bool = Field(
@@ -813,7 +827,9 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def monitoring_time_str(self) -> str:
-        return "09:06" if self.EARLY_BUY_ENABLED else "09:26"
+        # early_buy 시 실제 잡은 09:10 (scheduler.py monitoring_minute=10) — 매수 완료 여유
+        # (2026-06-10 매수↔모니터 재시작 레이스: 09:06→09:10 후행, 표시 문자열도 정합)
+        return "09:10" if self.EARLY_BUY_ENABLED else "09:26"
 
     @computed_field
     @property

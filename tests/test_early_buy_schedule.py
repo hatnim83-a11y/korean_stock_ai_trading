@@ -56,14 +56,14 @@ def test_early_schedule(monkeypatch):
     expected = {
         'stock_screening': 2,
         'execute_buy': 5,
-        'monitoring_start': 6,
+        'monitoring_start': 10,  # 2026-06-10 매수↔모니터 레이스: 09:06→09:10 후행
         'midweek_sell_loss': 1,
         'hold_period_sell': 2,
     }
     for jid, exp_min in expected.items():
         actual = _get_minute_for_job(s.scheduler, jid)
         assert actual == exp_min, f"EARLY {jid}: 기대 {exp_min}, 실제 {actual}"
-    print("  [PASS] early_schedule — 5개 잡 시간 09:02/05/06/01/02")
+    print("  [PASS] early_schedule — 5개 잡 시간 09:02/05/10/01/02")
 
 
 def test_unchanged_jobs():

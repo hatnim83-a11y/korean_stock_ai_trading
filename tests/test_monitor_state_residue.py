@@ -72,6 +72,8 @@ def _fresh_monitor(db_path: Path) -> PortfolioMonitorV2:
     # 매도 실패 카운터 (Phase 2 추가) — _record_sell_failure / remove_position 가 참조
     monitor.sell_failure_counts = {}
     monitor.on_sell_failed = None
+    # 누락 편입 경보 dedup set (2026-06-10 추가) — remove_position 이 discard 참조
+    monitor._recovered_alerted = set()
     return monitor
 
 

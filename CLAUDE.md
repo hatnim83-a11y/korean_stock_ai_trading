@@ -122,6 +122,17 @@
 - **정화 도구**: `scripts/cleanup_monitor_state_json.py` (systemctl is-active 가드 + KST 백업 + `portfolio.status='holding'` 외 키 제거). 운영 점검에서 잔재 발견 시 stop → cleanup → start
 - **상세**: `memory/project_monitor_state_residue_fix.md`
 
+## 매수↔모니터 재시작 정합 (레이스 차단 — 2026-06-10 도입)
+- **사건**: 09:05 `execute_buy`(공격적 지정가+재시도, 가변 ~82초) 잡이 도는 중 09:06 `monitoring_start`(재시작) cron이 발화 → DB 저장 전 `load_positions_from_db` → 그 뒤 체결된 종목(피에스케이홀딩스 09:06:19) **영구 누락**(손절/트레일링/분할익절/불타기 전부 미작동). 두 잡은 독립 APScheduler 잡이라 서로 안 기다림
+- **3단 방어**:
+  - **Step 1(보조)**: early_buy `monitoring_minute` 6→**10**(`scheduler.py:199`). cron 재시작을 매수 완료 이후로 후행 — 멱등 안전망으로 유지. `config.monitoring_time_str`도 "09:10" 동기. **매수 시각(`buy_minute=5`)은 절대 불변**
+  - **Step 2(근본)**: `main.py execute_buy_orders()` 말미(Phase 9, 모든 `save_holding_position` 완료 후 return 직전)에서 `start_monitoring()` 직접 체이닝 — "DB저장→재시작" 순서를 코드로 보장. `bought_count>0 and not test_mode` 가드 + try/except 격리(매수 잡 오염 차단)
+  - **Step 3(심층)**: 모니터 루프가 `MONITOR_MISSING_SWEEP_INTERVAL_SEC`(기본 60초)마다 `_sweep_missing_positions()` — `DB holding ∖ 메모리` 차집합 누락분만 `load_positions_from_db(only_codes=missing)`로 지각 편입 + `on_position_recovered` 텔레그램 1회 경보(종목별 dedup). **기존 메모리 포지션은 무손상**(실시간 트레일링 상태 후퇴 금지)
+- **핵심 주의**: `load_positions_from_db(only_codes=None)`(재시작 경로)는 **기존 동작 1:1 유지**(회귀 테스트가 이 경로 검증). 스윕은 반드시 `only_codes` 지정 경로로만 호출 — `_restore_trailing_state(only_codes=...)`도 누락분만 복원해 기존 포지션 트레일링/손절 후퇴 방지
+- **누락 편입은 항상 `load_positions_from_db` 경로 재사용**(개별 add_position 직접 호출 금지) — v17 필드(first/avg_buy_price, tranche_count, second_tranche_pending/executed, atr_at_buy) 누락 시 2026-05-27 삼현 케이스 회귀
+- **토글**: `MONITOR_MISSING_SWEEP_ENABLED`(기본 True). False+restart → 스윕 미동작 NO-OP(Step 2 체이닝은 잔존)
+- **상세**: `docs/work-plans/completed/20260610_buy-monitor-restart-race-fix/`
+
 ## MCP 서버
 프로젝트에 3개 MCP 서버(`SQLite`, `Fetch`, `Sequential Thinking`)가 `.mcp.json`에 등록되어 있다.
 **상세 사용법**: [`docs/mcp-usage.md`](docs/mcp-usage.md) 참조.

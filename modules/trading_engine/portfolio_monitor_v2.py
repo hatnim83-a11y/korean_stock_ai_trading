@@ -233,10 +233,16 @@ class PortfolioMonitorV2:
         self.on_trailing_level_change: Optional[Callable[[Position, int, int], None]] = None
         self.on_max_hold_sell: Optional[Callable[[Position, float], None]] = None
         self.on_sell_failed: Optional[Callable[[Position, str, str], None]] = None
-        
+        # 누락 종목 지각 편입 콜백 (code, name) — main.py가 텔레그램 1회 경보에 사용
+        self.on_position_recovered: Optional[Callable[[str, str], None]] = None
+
         # 상태
         self._running = False
         self._last_check = now_kst()
+
+        # 누락 종목 자동 편입 스윕 상태 (2026-06-10 매수↔모니터 재시작 레이스 방어)
+        # 이미 경보를 보낸 종목은 재편입(예: 매도 후 재진입)되기 전까지 중복 경보하지 않는다.
+        self._recovered_alerted: set[str] = set()
 
         # 매도 실패 카운터 (2026-05-18 Phase 2)
         # KIS 잔량 불일치/JSON 잔재로 매도가 반복 실패할 때 무한 도배를 봉쇄한다.
@@ -423,6 +429,10 @@ class PortfolioMonitorV2:
                 logger.debug(f"monitor_state.json 잔재 정리 실패: {e}")
             # 매도 실패 카운터도 함께 정리 (재진입 시 0부터 시작)
             self.sell_failure_counts.pop(stock_code, None)
+            # 누락 편입 경보 dedup도 정리 — 매도 후 같은 종목 재진입 시 누락되면 다시 경보 허용
+            # (__init__ 우회 인스턴스 — 일부 테스트 헬퍼 __new__ — 에서도 안전하도록 hasattr 가드)
+            if hasattr(self, "_recovered_alerted"):
+                self._recovered_alerted.discard(stock_code)
 
     def _record_sell_failure(self, pos: "Position", sell_type: str, err: str) -> None:
         """매도 실패 후처리: 카운터 증가 + 임계 도달 시 강제 모니터링 제거.
@@ -468,12 +478,59 @@ class PortfolioMonitorV2:
                 except Exception as e:
                     logger.error(f"on_sell_failed 콜백 오류: {e}")
 
-    def load_positions_from_db(self) -> int:
+    def _add_position_from_db_item(self, item: dict) -> None:
+        """DB portfolio 행(dict) 하나를 메모리 Position으로 편입한다.
+
+        load_positions_from_db(재시작 전량 적재)와 _sweep_missing_positions(누락분만
+        편입) 두 경로가 공유하는 v17 필드 추출 로직. 코드 중복을 막아 2026-05-27
+        삼현 케이스(필드 누락 → second_tranche_pending=False 강제) 회귀를 양쪽에서 차단한다.
+        """
+        # buy_date: buy_date 컬럼 → date 컬럼 폴백 → now_kst()
+        buy_date = item.get("buy_date") or item.get("date") or None
+        if isinstance(buy_date, str):
+            try:
+                buy_date = datetime.strptime(buy_date, "%Y-%m-%d").replace(
+                    tzinfo=now_kst().tzinfo
+                )
+            except ValueError:
+                buy_date = None
+
+        # v17: DB의 분할 진입/불타기/ATR 필드를 메모리 Position에 복원
+        # (2026-05-27 hotfix — 누락 시 second_tranche_pending=False로 default 되어
+        # _check_and_execute_pyramid_in 1단계 가드에서 즉시 차단됨)
+        self.add_position(
+            stock_code=item["stock_code"],
+            stock_name=item["stock_name"],
+            shares=item["shares"],
+            buy_price=item["buy_price"],
+            stop_loss_price=item["stop_loss"],
+            theme=item.get("theme", ""),
+            buy_date=buy_date or now_kst(),
+            first_buy_price=item.get("first_buy_price") or item.get("buy_price"),
+            avg_buy_price=item.get("avg_buy_price") or item.get("buy_price"),
+            tranche_count=int(item.get("tranche_count") or 1),
+            second_tranche_executed=bool(item.get("second_tranche_executed") or 0),
+            second_tranche_pending=bool(item.get("second_tranche_pending") or 0),
+            atr_at_buy=float(item.get("atr_at_buy") or 0.0),
+            atr_period=int(item.get("atr_period") or 14),
+        )
+
+    def load_positions_from_db(self, only_codes: Optional[set] = None) -> int:
         """
         DB에서 보유 포지션 로드
 
+        Args:
+            only_codes: None(기본, 재시작 경로) — 기존 동작 그대로. holding 전량을
+                적재(self.positions를 통째로 갈아끼우지는 않지만 모든 holding을
+                add_position) + `_restore_trailing_state()`로 전체 트레일링 상태 복원.
+                set 지정(스윕 경로) — only_codes에 속하고 아직 메모리에 없는 종목만
+                add_position하고, **그 종목들에 대해서만** 트레일링 상태를 복원한다.
+                이미 메모리에 있는 기존 포지션의 실시간 highest_price/trailing 상태는
+                절대 건드리지 않는다(스윕이 트레일링을 마지막 DB 저장 시점으로
+                후퇴시키던 회귀 차단 — 2026-06-10).
+
         Returns:
-            로드된 포지션 수
+            메모리에 적재된(현재 self.positions) 포지션 총 수
         """
         db = None
         try:
@@ -482,39 +539,23 @@ class PortfolioMonitorV2:
 
             portfolio = db.get_portfolio(status="holding")
 
+            # 스윕 경로: 누락분(only_codes ∩ holding ∖ 메모리)만 편입 대상
+            restored_codes = set()
             for item in portfolio:
-                # buy_date: buy_date 컬럼 → date 컬럼 폴백 → now_kst()
-                buy_date = item.get("buy_date") or item.get("date") or None
-                if isinstance(buy_date, str):
-                    try:
-                        buy_date = datetime.strptime(buy_date, "%Y-%m-%d").replace(
-                            tzinfo=now_kst().tzinfo
-                        )
-                    except ValueError:
-                        buy_date = None
+                code = item["stock_code"]
+                if only_codes is not None:
+                    if code not in only_codes or code in self.positions:
+                        continue
+                self._add_position_from_db_item(item)
+                restored_codes.add(code)
 
-                # v17: DB의 분할 진입/불타기/ATR 필드를 메모리 Position에 복원
-                # (2026-05-27 hotfix — 누락 시 second_tranche_pending=False로 default 되어
-                # _check_and_execute_pyramid_in 1단계 가드에서 즉시 차단됨)
-                self.add_position(
-                    stock_code=item["stock_code"],
-                    stock_name=item["stock_name"],
-                    shares=item["shares"],
-                    buy_price=item["buy_price"],
-                    stop_loss_price=item["stop_loss"],
-                    theme=item.get("theme", ""),
-                    buy_date=buy_date or now_kst(),
-                    first_buy_price=item.get("first_buy_price") or item.get("buy_price"),
-                    avg_buy_price=item.get("avg_buy_price") or item.get("buy_price"),
-                    tranche_count=int(item.get("tranche_count") or 1),
-                    second_tranche_executed=bool(item.get("second_tranche_executed") or 0),
-                    second_tranche_pending=bool(item.get("second_tranche_pending") or 0),
-                    atr_at_buy=float(item.get("atr_at_buy") or 0.0),
-                    atr_period=int(item.get("atr_period") or 14),
-                )
-
-            # monitor_state.json에서 트레일링 상태 복원
-            self._restore_trailing_state()
+            # 트레일링 상태 복원
+            # - 재시작 경로(only_codes is None): 전체 복원(기존 동작)
+            # - 스윕 경로: 신규 편입 종목(restored_codes)만 복원 → 기존 포지션 무손상
+            if only_codes is None:
+                self._restore_trailing_state()
+            elif restored_codes:
+                self._restore_trailing_state(only_codes=restored_codes)
 
             logger.info(f"포지션 로드: {len(self.positions)}개")
             return len(self.positions)
@@ -552,8 +593,14 @@ class PortfolioMonitorV2:
             )
         return {code: s for code, s in state.items() if code in holding_codes}
 
-    def _restore_trailing_state(self) -> None:
-        """DB에서 트레일링 상태 복원 (재시작 시). DB 우선, JSON 폴백."""
+    def _restore_trailing_state(self, only_codes: Optional[set] = None) -> None:
+        """DB에서 트레일링 상태 복원 (재시작 시). DB 우선, JSON 폴백.
+
+        Args:
+            only_codes: None(기본) — self.positions 전체를 복원(재시작 경로).
+                set 지정 — 해당 종목만 복원(스윕 누락 편입 경로). 기존 메모리
+                포지션의 실시간 트레일링 상태를 후퇴시키지 않기 위한 필터다.
+        """
         # 1) DB에서 position_state 로드 시도
         state = {}
         db_source = False
@@ -593,6 +640,9 @@ class PortfolioMonitorV2:
         restored = 0
         skipped_residue = 0
         for code, pos in self.positions.items():
+            # 스윕 경로: 신규 편입 종목만 복원 (기존 포지션 트레일링 상태 무손상)
+            if only_codes is not None and code not in only_codes:
+                continue
             if code not in state:
                 continue
             s = state[code]
@@ -794,9 +844,11 @@ class PortfolioMonitorV2:
         status_interval = 30 * 60  # 30분마다 상태 로그
         db_update_interval = 5 * 60  # 5분마다 DB 가격 갱신
         state_dump_interval = 30  # 30초마다 대시보드용 상태 덤프
+        sweep_interval = getattr(settings, "MONITOR_MISSING_SWEEP_INTERVAL_SEC", 60)
         last_status_log = 0
         last_db_update = 0
         last_state_dump = 0
+        last_sweep = 0
 
         while self._running:
             await asyncio.sleep(CHECK_INTERVAL)
@@ -805,10 +857,16 @@ class PortfolioMonitorV2:
             if not self._is_market_hours():
                 continue
 
+            now_ts = _time.time()
+
+            # 누락 종목 자동 편입 스윕 (손익 체크 前 — 편입 즉시 당일 청산 로직 적용)
+            if getattr(settings, "MONITOR_MISSING_SWEEP_ENABLED", True) and \
+               now_ts - last_sweep >= sweep_interval:
+                last_sweep = now_ts
+                self._sweep_missing_positions()
+
             # 손익 체크
             await self._check_all_positions()
-
-            now_ts = _time.time()
 
             # 주기적 DB 가격 갱신 (5분마다)
             if now_ts - last_db_update >= db_update_interval:
@@ -825,6 +883,78 @@ class PortfolioMonitorV2:
                 last_status_log = now_ts
                 self._log_status()
     
+    def _sweep_missing_positions(self) -> None:
+        """DB holding ∖ 메모리 포지션 차집합을 탐지해 누락 종목을 지각 편입한다.
+
+        2026-06-10 매수↔모니터 재시작 레이스 심층 방어(타이밍 무관):
+        매수 완료 체이닝/cron 재시작이 어떤 이유로든 누락을 남겨도, 모니터 루프가
+        주기적으로 DB와 메모리를 대조해 빠진 종목을 자동 복구한다.
+
+        안전 원칙:
+        - DB `status='holding'` 종목만 대상 (매도 직후 잔재 오편입 방지).
+        - 편입은 `load_positions_from_db(only_codes=missing)`로 수행 — 누락분만 편입하고
+          기존 DB 복원 경로(_add_position_from_db_item)를 공유해 v17 필드(first/avg_buy_price,
+          tranche_count, second_tranche_pending/executed, atr_at_buy)를 누락 없이 복원한다
+          (2026-05-27 삼현 케이스 회귀 차단).
+        - **기존 메모리 포지션은 절대 건드리지 않는다.** only_codes 경로는 self.positions를
+          초기화하지 않고, 트레일링 복원도 신규 편입 종목으로 한정한다 → 이미 모니터링
+          중이던 종목의 실시간 highest_price/trailing 상태가 마지막 DB 저장 시점으로
+          후퇴(=손절/트레일링 후퇴)하던 회귀를 차단(2026-06-10).
+        - WebSocket 동적 SUBSCRIBE 미지원이라 신규 종목은 다음 cron/체이닝 재시작 또는
+          DB 폴링 갱신으로 실시간 가격을 받는다. 본 스윕의 1차 목적은 "메모리 편입으로
+          손절/트레일링/분할익절 로직이 작동하게 만드는 것"이다.
+        - 경보는 종목별 1회만 (스팸 방지). 이미 메모리에 있던 종목은 대상 아님.
+        """
+        db = None
+        try:
+            db = Database()
+            db.connect()
+            holding = db.get_portfolio(status="holding")
+        except Exception as e:
+            logger.debug(f"누락 스윕 DB 조회 실패: {e}")
+            return
+        finally:
+            if db:
+                db.close()
+
+        holding_codes = {item["stock_code"] for item in holding}
+        missing = holding_codes - set(self.positions.keys())
+        if not missing:
+            return
+
+        # 누락 종목명 매핑 (경보용)
+        name_by_code = {item["stock_code"]: item.get("stock_name", "") for item in holding}
+        logger.warning(
+            f"🚨 모니터 누락 종목 감지 → 지각 편입: "
+            f"{', '.join(f'{name_by_code.get(c, c)}({c})' for c in missing)} "
+            f"(DB holding={len(holding_codes)} / 메모리={len(self.positions)})"
+        )
+
+        # 누락분(missing)만 편입한다. only_codes 지정 시 load_positions_from_db는
+        # self.positions를 초기화하지 않고, missing ∩ holding ∖ 메모리 종목만
+        # add_position + 그 종목들만 트레일링 복원한다. 이미 메모리에 있던 기존
+        # 포지션의 실시간 highest_price/trailing 상태는 절대 건드리지 않는다
+        # (전량 재적재로 트레일링이 마지막 DB 저장 시점까지 후퇴하던 회귀 차단 — 2026-06-10).
+        try:
+            self.load_positions_from_db(only_codes=missing)
+        except Exception as e:
+            logger.error(f"누락 스윕 재적재 실패: {e}")
+            return
+
+        # 실제 편입 성공분만 1회 경보 (콜백은 main.py가 텔레그램으로 전달)
+        for code in missing:
+            if code not in self.positions:
+                # 재적재 후에도 미편입(드문 케이스) → 다음 사이클 재시도, 경보 보류
+                continue
+            if code in self._recovered_alerted:
+                continue
+            self._recovered_alerted.add(code)
+            if self.on_position_recovered:
+                try:
+                    self.on_position_recovered(code, name_by_code.get(code, ""))
+                except Exception as e:
+                    logger.error(f"on_position_recovered 콜백 오류: {e}")
+
     def _is_market_hours(self) -> bool:
         """장 시간 여부 (KST 기준, 휴장일 체크 포함)"""
         if not is_trading_day():

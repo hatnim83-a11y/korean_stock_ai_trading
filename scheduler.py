@@ -186,11 +186,17 @@ class TradingScheduler:
         # ===== 아침 매수 조기 진입 토글 (A3안) =====
         # EARLY_BUY_ENABLED=True 시 7개 잡 시간 자동 재배치 (스크리닝/매수/모니터링/매도 잡)
         # 09:00 monitoring_start_early + midweek_sell_profit (유지)
-        # 09:01 midweek_sell_loss / 09:02 stock_screening + hold_period_sell / 09:05 execute_buy / 09:06 monitoring_start
+        # 09:01 midweek_sell_loss / 09:02 stock_screening + hold_period_sell / 09:05 execute_buy / 09:10 monitoring_start
         early_buy = settings.EARLY_BUY_ENABLED
         screening_minute = 2 if early_buy else 5
         buy_minute = 5 if early_buy else 25
-        monitoring_minute = 6 if early_buy else 26
+        # 매수 잡(buy_minute)과의 간격 = 매수 루프 최대 소요시간 안전마진.
+        # 2026-06-10 사건: 매수 루프 ~82초가 1분(09:05→09:06) 간격을 초과 →
+        # 재시작이 DB 저장 전 발화하여 신규 체결분(031980) 영구 누락.
+        # cron 재시작은 이제 "안전망" 역할이고, 1차 정합 보장은 매수 완료 직후
+        # execute_buy_orders() 말미의 start_monitoring() 체이닝(main.py)이 담당한다.
+        # → 이중 race를 없애기 위해 cron 시각을 매수 완료 이후로 충분히 후행시킨다.
+        monitoring_minute = 10 if early_buy else 26
         hold_period_minute = 2 if early_buy else 15
         midweek_loss_minute = 1 if early_buy else 10
 
@@ -241,7 +247,9 @@ class TradingScheduler:
                 replace_existing=True
             )
 
-        # 4. 모니터링 시작 (KST 09:26) — 09:25 매수분 포함 재시작
+        # 4. 모니터링 재시작 (early_buy 09:10 / legacy 09:26) — 매수분 포함 재시작 (안전망)
+        # 1차 정합은 매수 완료 직후 execute_buy_orders() 말미 start_monitoring() 체이닝이 보장.
+        # 이 cron 잡은 체이닝이 매수 잡 예외 등으로 누락된 경우를 대비한 멱등 안전망이다.
         # 옵션 D-1: KIS WebSocket 동적 SUBSCRIBE 미지원 → start_monitoring()이 stop+start 패턴으로 재시작
         self.scheduler.add_job(
             self._run_monitoring_start,

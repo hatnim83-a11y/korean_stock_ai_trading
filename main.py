@@ -1578,6 +1578,22 @@ class TradingSystem:
         # Phase 8: 텔레그램 요약 발송
         self._send_buy_summary(current_holdings, new_buy_orders, bought_count)
 
+        # Phase 9: 매수 완료 → 모니터 즉시 재시작 (재시작 cron과의 레이스 차단)
+        # 2026-06-10 사건: 매수 루프(~82초)가 cron 간격(1분)을 초과하면 재시작이
+        # DB 저장 전 발화해 신규 체결분이 영구 누락됐다. 모든 체결분이 이미
+        # save_holding_position으로 DB에 저장된 이 지점에서 직접 재시작을 체이닝하면
+        # "DB 저장 완료 → 재시작" 순서가 코드로 보장되어 레이스가 구조적으로 불가능해진다.
+        # - bought_count>0 일 때만 호출 (신규 진입 없으면 불필요한 WebSocket 재구독 회피;
+        #   기존 보유분은 09:00 조기 모니터/cron 안전망이 이미 적재).
+        # - test_mode에서는 실발주가 없으므로 스킵.
+        # - 예외는 매수 잡을 오염시키지 않도록 격리 (cron 안전망이 후속 처리).
+        if bought_count > 0 and not self.test_mode:
+            try:
+                logger.info("📊 매수 완료 → 모니터 재시작 (신규 체결분 즉시 편입)")
+                await self.start_monitoring()
+            except Exception as e:
+                logger.error(f"매수 후 모니터 재시작 실패(안전망 cron이 후속 처리): {e}")
+
         logger.info(f"\n✅ 매수 완료: 보유={held_count} 신규={bought_count}")
         return {
             "success": True,
@@ -1809,9 +1825,12 @@ class TradingSystem:
         self.monitor.on_trailing_level_change = self._on_trailing_level_change
         self.monitor.on_max_hold_sell = self._on_max_hold_sell
         self.monitor.on_sell_failed = self._on_sell_failed
+        self.monitor.on_position_recovered = self._on_position_recovered
 
         # 모니터링 시작 (백그라운드)
-        asyncio.create_task(self.monitor.start_monitoring())
+        # create_task 반환값을 인스턴스 속성에 보관 — 강한 참조 없으면 GC가
+        # 미완료 태스크를 회수할 수 있어(asyncio 공식 경고) 모니터 루프가 조용히 죽을 위험.
+        self._monitor_task = asyncio.create_task(self.monitor.start_monitoring())
 
     async def stop_monitoring(self) -> None:
         """실시간 모니터링 종료 (15:30 또는 재시작 시점)
@@ -1835,6 +1854,24 @@ class TradingSystem:
         except Exception as e:
             logger.debug(f"[v17] BuyLock clear_all 실패: {e}")
     
+    def _on_position_recovered(self, stock_code: str, stock_name: str) -> None:
+        """누락 종목 지각 편입 콜백 (모니터 스윕 → 텔레그램 1회 경보)
+
+        2026-06-10 매수↔모니터 재시작 레이스 심층 방어. 어떤 경로로든 모니터에서
+        누락된 holding 종목이 스윕으로 자동 복구됐음을 알린다(무음 복구 금지).
+        """
+        try:
+            from config import now_kst
+            self.notifier.send_message(
+                f"🛟 모니터 누락 종목 자동 편입\n\n"
+                f"📈 {stock_name} ({stock_code})\n"
+                f"⏰ {now_kst().strftime('%H:%M:%S')}\n\n"
+                f"매수↔모니터 재시작 타이밍으로 모니터링에서 누락됐던 종목을\n"
+                f"자동 스윕이 감지하여 편입했습니다. 손절/트레일링/분할익절이 정상 작동합니다."
+            )
+        except Exception as e:
+            logger.error(f"_on_position_recovered 콜백 오류: {e}")
+
     def _on_stop_loss(self, position, price) -> None:
         """손절 발동 콜백"""
         try:
