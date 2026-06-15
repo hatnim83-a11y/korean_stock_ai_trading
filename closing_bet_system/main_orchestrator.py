@@ -53,7 +53,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from logger import logger
-from config import now_kst, is_trading_day
+from config import now_kst, is_trading_day, previous_trading_day
 
 
 # ===== 시간표 상수 (PRD 16-3, Phase 1 알림형 단순화) =====
@@ -1012,8 +1012,8 @@ class MainOrchestrator:
             logger.info("[orchestrator] run_emergency_stop_check 스킵 — emergency_stop_enabled=False")
             return {"skipped": True, "reason": "emergency_stop_enabled=False"}
 
-        # T-1 = 어제 진입한 후보 (오늘 매도). 휴장 보정은 단위 2-5g 후속.
-        trade_date = (now_kst().date() - timedelta(days=1)).isoformat()
+        # T-1 진입일 = 직전 거래일(금/휴장 walk-back). 오늘이 T, 직전 거래일이 진입일.
+        trade_date = previous_trading_day().isoformat()
         logger.info(f"[orchestrator] run_emergency_stop_check 시작 trade_date={trade_date}")
         result = await self.exit_executor.execute_emergency_stop(trade_date)
         return {
@@ -1031,7 +1031,8 @@ class MainOrchestrator:
             logger.info("[orchestrator] run_morning_exit 스킵 — enabled=False")
             return {"skipped": True, "reason": "enabled=False"}
 
-        trade_date = (now_kst().date() - timedelta(days=1)).isoformat()
+        # T-1 진입일 = 직전 거래일(금/휴장 walk-back).
+        trade_date = previous_trading_day().isoformat()
         logger.info(f"[orchestrator] run_morning_exit 시작 trade_date={trade_date}")
         result = await self.exit_executor.execute_morning_exit(trade_date)
         return {
@@ -1050,7 +1051,8 @@ class MainOrchestrator:
             logger.info("[orchestrator] run_morning_force_close 스킵 — enabled=False")
             return {"skipped": True, "reason": "enabled=False"}
 
-        trade_date = (now_kst().date() - timedelta(days=1)).isoformat()
+        # T-1 진입일 = 직전 거래일(금/휴장 walk-back).
+        trade_date = previous_trading_day().isoformat()
         logger.info(f"[orchestrator] run_morning_force_close 시작 trade_date={trade_date}")
         result = await self.exit_executor.execute_force_close(trade_date)
         return {
@@ -1078,7 +1080,8 @@ class MainOrchestrator:
             <= time_cls(MORNING_TRAILING_END_HOUR, MORNING_TRAILING_END_MINUTE)
         ):
             return {"skipped": True, "reason": "out_of_window"}
-        trade_date = (now.date() - timedelta(days=1)).isoformat()
+        # T-1 진입일 = 직전 거래일(금/휴장 walk-back). now 박제값 기준.
+        trade_date = previous_trading_day(now.date()).isoformat()
         result = await self.exit_executor.execute_trailing_stop(trade_date)
         return {
             "skipped": False, "trade_date": trade_date, "cycle": "morning_trailing",

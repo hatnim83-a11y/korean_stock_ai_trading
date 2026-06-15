@@ -49,6 +49,28 @@ def is_trading_day(check_date=None) -> bool:
     return True  # holidays 미설치 시 평일이면 거래일로 간주
 
 
+def previous_trading_day(ref_date=None):
+    """ref_date 직전의 거래일(영업일)을 반환 (주말/공휴일 walk-back).
+
+    예: 월요일 입력 → 금요일, 수요일(휴장 가정) 입력 → 화요일.
+    종가베팅 청산 잡이 "직전 거래일 진입분"을 정확히 조회하기 위함
+    (달력 어제만 쓰면 금/휴장 직전 진입분이 영구 누락됨).
+
+    Args:
+        ref_date: 기준일 (None이면 오늘 KST). datetime 전달 시 .date()로 정규화.
+    Returns:
+        date: ref_date 직전의 첫 거래일
+    """
+    if ref_date is None:
+        ref_date = now_kst().date()
+    elif hasattr(ref_date, 'date'):
+        ref_date = ref_date.date()
+    d = ref_date - timedelta(days=1)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
 def count_trading_days(from_date, to_date=None) -> int:
     """from_date 다음날부터 to_date까지의 영업일수 (주말/공휴일 제외)
 

@@ -87,6 +87,8 @@
 
 | 2026-06-15 | 종가베팅 1차 부분익절 확대 (Phase 2C, closing-bet-exit-profit-max) | before: 09:02 morning_exit가 gap_up_low/flat 구간을 전량 매도 → 트레일링이 캡처할 잔여 없음(2B 효과 제한). | after: `morning_trailing_enabled` ON 시 gap_up_low(+0.5~+2%)/flat(-0.5~+0.5%)도 `morning_partial_ratio`(0.5)만 1차 매도(accumulate) + 잔여는 트레일링 위임. **트레일링 OFF면 부분익절도 OFF(전량 매도, 잔여 고아 방지)**. weak_gap_down/emergency는 전량 유지. `partial_qty<remaining` 가드(전량 시 부분 안 함). | docs/work-plans/active/closing-bet-exit-profit-max/ (Phase 2C) | hatni | 2A accumulate 경로 재사용(2A/2B에서 검증). 토글 default off → PC-2가 기존 전량매도 불변 확인. 47/47 PASS(PC-1~3 신규: ON 부분/OFF 전량/weak 제외). 2B와 세트로 효과(반사실 +1.55%). 롤백: morning_trailing_enabled=false. |
 
+| 2026-06-15 | 종가베팅 청산 trade_date 산정 (closing-bet-weekend-exit-skip-fix) | before: 청산 잡 4개(run_emergency_stop_check/morning_exit/morning_force_close/morning_trailing)가 `now_kst().date() - timedelta(days=1)`(**달력 어제**)로 청산 대상 조회 → 금요일/휴장 직전 진입분이 월요일 청산(trade_date=일요일=진입없음)에서 **영구 미청산 고아**(실피해 005935 7주 @206,500 6/12금 진입). | after: `config.previous_trading_day(ref_date=None)` 헬퍼 신규(직전 **거래일** walk-back, run_label_yesterday의 기존 정답패턴 공용화) → 4개 래퍼 `previous_trading_day().isoformat()`로 교체(trailing은 now.date() 박제 기준). **정상 연속거래일엔 직전거래일==달력어제라 동작 동일(회귀 없음)**, 금/휴장 갭에서만 교정. | docs/work-plans/active/closing-bet-weekend-exit-skip-fix/ | hatni | 버그fix(파라미터 아님, 항상 적용 로직). 토글 무관. strategy-planner+code-tester 사전리뷰(설계 타당, 방어코드 권고 반영) + 사후 code-tester 심각0/주의0(배포가능). 단위 14/14 PASS(월→금/추석 다중 walk-back/datetime 정규화) + 기존 회귀 exit47/candidate24/score28 PASS. 005935은 청산창 6/15 구코드로 지나가 별도 수동정리. |
+
 ## 관련 링크
 - 제안서 템플릿: `docs/improvements/_TEMPLATE.md`
 - 에이전트 정의: `.claude/agents/trade-improvement-analyst.md`
