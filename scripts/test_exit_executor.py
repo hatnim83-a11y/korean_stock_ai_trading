@@ -908,6 +908,52 @@ def test_EX_36_open_limit_submit_fail_market_fallback():
         db.close()
 
 
+# ===== EX-37: Phase 2A 부분청산 잔여 재청산 (gap_up_high 잔여 미청산 버그 fix) =====
+
+
+def test_EX_37_gap_up_high_partial_then_force_close_remaining():
+    """EX-37: gap_up_high 1차 60%(누적, exit_time 미박제) → 여전히 select 대상 →
+    force_close 잔여 40% 청산 → 전량(exit_time 박제). 기존 잔여 미청산 버그 fix 검증."""
+    from closing_bet_system.execution.exit_target_query import select_exit_targets
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75_250.0, shares=10)  # total=10
+        fast = dict(enabled=True, dry_run=False, polling_interval_sec=0.01,
+                    fill_check_deadline_sec=0.03, order_submit_sleep_sec=0.0)
+
+        # 1) morning_exit — gap_up_high(시가 +3.65%) → 1차 60% = 6주 부분청산
+        s1 = ExitExecutorSettings(**fast)
+        ex1 = _make_executor(
+            db, settings=s1, snap=_snap(open_price=78_000),
+            fill_status=_fill(qty=6, exec_qty=6, exec_price=78_000),
+        )
+        _run(ex1.execute_morning_exit("2026-05-15"))
+        row1 = ex1.candidate_logger.get_candidate(cid)
+        assert row1["exit_shares"] == 6, row1["exit_shares"]
+        assert row1["exit_time"] is None, "부분청산은 exit_time 미박제"
+
+        # 2) 잔여가 여전히 select 대상 (remaining=4)
+        targets = select_exit_targets(ex1.candidate_logger, "2026-05-15")
+        assert len(targets) == 1, "부분청산 잔여가 매도대상에 남아야 함"
+        assert targets[0].remaining_shares == 4, targets[0].remaining_shares
+
+        # 3) force_close → 잔여 4주 청산 → 전량(exit_time 박제)
+        s2 = ExitExecutorSettings(**fast)
+        ex2 = _make_executor(
+            db, settings=s2, snap=_snap(open_price=77_000),
+            fill_status=_fill(qty=4, exec_qty=4, exec_price=77_000),
+        )
+        _run(ex2.execute_force_close("2026-05-15"))
+        row2 = ex2.candidate_logger.get_candidate(cid)
+        assert row2["exit_shares"] == 10, row2["exit_shares"]
+        assert row2["exit_time"] is not None, "전량청산 → exit_time 박제"
+        # 더 이상 select 대상 아님
+        assert len(select_exit_targets(ex2.candidate_logger, "2026-05-15")) == 0
+        print("✅ EX-37 gap_up_high 1차 6주 → force_close 잔여 4주 → 전량(버그 fix)")
+        db.close()
+
+
 # ===== Runner =====
 
 
@@ -950,6 +996,7 @@ def main():
         test_EX_34_toggle_off_uses_market,
         test_EX_35_open_limit_dry_run_no_kis,
         test_EX_36_open_limit_submit_fail_market_fallback,
+        test_EX_37_gap_up_high_partial_then_force_close_remaining,
     ]
     print(f"\n=== ExitExecutor 단위 테스트 — {len(tests)}건 실행 ===\n")
     fails = []

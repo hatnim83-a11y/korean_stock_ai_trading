@@ -510,6 +510,104 @@ def test_log_features_idempotent_check():
         _cleanup(db, tmp)
 
 
+def _set_phase_shares(db, cid, p1_shares, p1_price=70_000, p2_shares=None):
+    """테스트용: entry_phase1/2 체결수량 직접 세팅 (total_entered 계산용)."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE candidates SET entry_phase1_executed_shares=?,
+               entry_phase1_executed_price=?, entry_phase2_executed_shares=?
+               WHERE candidate_id=?""",
+            (p1_shares, p1_price, p2_shares, cid),
+        )
+
+
+def test_v4_migration_columns():
+    """Phase 2A: v4 마이그레이션이 exit_shares/final_exit_time 컬럼을 추가."""
+    log, db, tmp = _make_logger()
+    try:
+        assert db._has_column("candidates", "exit_shares")
+        assert db._has_column("candidates", "final_exit_time")
+        print("  [PASS] v4 컬럼 exit_shares/final_exit_time 존재")
+    finally:
+        _cleanup(db, tmp)
+
+
+def test_v4_backfill_idempotent():
+    """Phase 2A: 백필 — 기존 청산행(exit_time NOT NULL, exit_shares=0)을 전량청산 마킹."""
+    log, db, tmp = _make_logger()
+    try:
+        cid = log.log_recommended(date(2026, 5, 4), "005930", "삼성전자",
+                                   score_breakdown=_full_score())
+        log.mark_entered(cid, entry_price=70_000, entry_amount=70_000_000)
+        _set_phase_shares(db, cid, 1000)
+        # 구버전 청산 시뮬: exit_time 박제하되 exit_shares=0 (백필 전 상태)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE candidates SET exit_time='2026-05-05T09:30:00', exit_shares=0 WHERE candidate_id=?",
+                (cid,),
+            )
+        db._migrate_v4()  # 멱등 재실행 = 백필
+        row = log.get_candidate(cid)
+        assert row["exit_shares"] == 1000, row["exit_shares"]
+        assert row["final_exit_time"] is not None
+        print("  [PASS] 백필 → exit_shares=1000, final_exit_time 박제")
+    finally:
+        _cleanup(db, tmp)
+
+
+def test_log_partial_exit_accumulate_and_full():
+    """Phase 2A: 부분청산 누적 — 1차 6주(미박제) → 2차 4주(전량→exit_time 박제), 가중평균가."""
+    log, db, tmp = _make_logger()
+    try:
+        cid = log.log_recommended(date(2026, 5, 4), "005930", "삼성전자",
+                                   score_breakdown=_full_score())
+        log.mark_entered(cid, entry_price=70_000, entry_amount=70_000_000)
+        _set_phase_shares(db, cid, 10)
+
+        # 1차 부분청산 6주 @72,000 → 미전량: exit_time NULL
+        log.log_partial_exit(cid, exit_price=72_000, exit_shares=6)
+        r1 = log.get_candidate(cid)
+        assert r1["exit_shares"] == 6
+        assert r1["exit_time"] is None, "부분단계는 exit_time 미박제"
+        assert r1["exit_price"] == 72_000
+
+        # 2차 잔여 4주 @71,000 → 전량: exit_time 박제 + 가중평균
+        log.log_partial_exit(cid, exit_price=71_000, exit_shares=4)
+        r2 = log.get_candidate(cid)
+        assert r2["exit_shares"] == 10
+        assert r2["exit_time"] is not None, "전량 도달 시 exit_time 박제"
+        assert r2["final_exit_time"] is not None
+        # 가중평균 = (6*72000 + 4*71000)/10 = 71600
+        assert r2["exit_price"] == 71_600, r2["exit_price"]
+        print("  [PASS] 부분청산 누적 6+4=10, exit_time 전량시만, 가중평균 71,600")
+    finally:
+        _cleanup(db, tmp)
+
+
+def test_log_partial_exit_clip_remaining():
+    """Phase 2A: 잔여 초과 청산수량은 잔여로 클립, 잔여 0 재호출은 LookupError."""
+    log, db, tmp = _make_logger()
+    try:
+        cid = log.log_recommended(date(2026, 5, 4), "005930", "삼성전자",
+                                   score_breakdown=_full_score())
+        log.mark_entered(cid, entry_price=70_000, entry_amount=70_000_000)
+        _set_phase_shares(db, cid, 10)
+        # 12주 요청 → 잔여 10으로 클립 → 전량
+        log.log_partial_exit(cid, exit_price=72_000, exit_shares=12)
+        r = log.get_candidate(cid)
+        assert r["exit_shares"] == 10, r["exit_shares"]
+        assert r["exit_time"] is not None
+        # 이미 전량 → 재호출 LookupError
+        try:
+            log.log_partial_exit(cid, exit_price=71_000, exit_shares=1)
+            assert False, "잔여 0 재호출은 LookupError 여야 함"
+        except LookupError:
+            pass
+        print("  [PASS] 잔여 초과 클립(12→10) + 잔여 0 재호출 LookupError")
+    finally:
+        _cleanup(db, tmp)
+
+
 def main():
     print("=== Phase 1-6 CandidateLogger 단위 테스트 ===\n")
     tests = [
@@ -533,6 +631,10 @@ def main():
         test_helpers,
         test_get_recent_recommended,
         test_log_features_idempotent_check,
+        test_v4_migration_columns,
+        test_v4_backfill_idempotent,
+        test_log_partial_exit_accumulate_and_full,
+        test_log_partial_exit_clip_remaining,
     ]
     for t in tests:
         print(f"▶ {t.__name__}")

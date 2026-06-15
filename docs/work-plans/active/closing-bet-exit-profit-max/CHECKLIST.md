@@ -36,10 +36,25 @@
 - [ ] CLAUDE.md 종가베팅 운영 규칙에 청산 토글 추가
 - [ ] PLAN/CONTEXT/CHECKLIST → completed/ 아카이브 (Phase 1 종료 시)
 
-## Phase 2 (B) — 오전 부분익절/트레일링 (단위 2-5g)
-- [ ] Phase 1 실발주 1주 관찰 완료 후 별도 PLAN 분리
-- [ ] gap_up_high 외 구간 1차 부분익절 + 잔여 트레일링(고점 −1.5%) 설계
-- [ ] `exit.trailing_stop_pct=-0.015` 활성화 + 폴링 루프 sell_lock 동시성 검증
+## Phase 2A — 부분청산 회계 + gap_up_high 잔여 미청산 버그 fix ✅ 구현 완료
+- [x] DB v4: `exit_shares`+`final_exit_time` + 원자적 백필(멱등)
+- [x] `log_partial_exit`(누적/가중평균가/전량시 exit_time) + `log_exit` exit_shares 정합 보강
+- [x] `ExitTarget.remaining_shares` + select에 exit_shares 노출(`exit_time IS NULL` 유지)
+- [x] 청산경로 `accumulate` 플래그: gap_up_high 1차/force_close 잔여 → 누적, force_close=remaining만
+- [x] 테스트 38/38(EX-37 흐름) + 24/24 PASS, code-tester 심각0
+- [x] change_log.md 1줄
+- 잔여 주의(후속): gap_up_high_partial_ratio 주석 50%→60% 정정 / 부분청산중 get_closed_today 미집계(설계상 허용)
+
+## Phase 2B — 트레일링 사이클 (다음 단위, 2A 기반)
+- [ ] `run_morning_trailing` IntervalTrigger(09:05~10:25, 30초, max_instances=1, coalesce)
+- [ ] `execute_trailing_stop`: remaining 보유분 → get_snapshot → `current ≤ high×(1-1.5%)` + 활성화가드 + snap유효성(high/current>0)
+- [ ] sell_lock 핸드오프(부분매도 후 해제 → 트레일링 own-owner) — morning_exit lock이 트레일링 차단하지 않게
+- [ ] 토글 morning_trailing_enabled(default false) + trailing_stop_pct 활성화
+- [ ] 09:05 첫폴링 즉시매도 방지(활성화가드: 고점이 진입가 대비 +N% 시에만)
+
+## Phase 2C — 1차 부분익절 확대 (2B 활성 시, 코드 가드)
+- [ ] morning_exit gap_up 구간 morning_partial_ratio 매도, 잔여 트레일링 위임
+- [ ] 2B 비활성 시 부분익절도 비활성(잔여 고아 방지) 코드 가드
 
 ## Phase 3 (필터) — atr_overheat 밴드 차등 ✅ 구현 완료(토글 off)
 - [x] `signal_score_engine.py` 밴드 차등 토글 `atr_overheat_band_enabled`(default false) + `atr_overheat_band_high`(2.2)
