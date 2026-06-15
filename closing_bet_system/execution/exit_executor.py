@@ -88,6 +88,10 @@ class ExitExecutorSettings:
     trailing_stop_pct: float = -0.015         # 당일 고가 대비 -1.5% 이탈 시 잔여 청산
     trailing_activation_pct: float = 0.01     # 당일 고가가 진입가 +1% 넘은 뒤에만 트레일 활성(손실종목 조기청산 방지)
 
+    # Phase 2C — 09:02 1차 부분익절 비율 (gap_up_low/flat). morning_trailing_enabled 시에만 적용
+    # (트레일링 비활성 시 부분익절 OFF → 잔여 고아 방지). gap_up_high 는 별도 gap_up_high_partial_ratio.
+    morning_partial_ratio: float = 0.5
+
 
 # ===== Result dataclass =====
 
@@ -497,6 +501,21 @@ class ExitExecutor:
             )
             exit_order.is_partial = True
             return exit_order
+
+        # Phase 2C: 트레일링 활성 시 gap_up_low/flat 도 1차 부분익절(morning_partial_ratio) →
+        # 잔여는 트레일링이 오전 상단 캡처. 트레일링 비활성 시엔 부분익절 OFF(잔여 고아 방지).
+        if (
+            self.settings.morning_trailing_enabled
+            and action in (ExitAction.GAP_UP_LOW, ExitAction.FLAT)
+        ):
+            partial_qty = max(int(target.remaining_shares * self.settings.morning_partial_ratio), 1)
+            if partial_qty < target.remaining_shares:  # 잔여가 남는 경우만 부분(아니면 전량)
+                exit_order = await self._execute_morning_sell(
+                    target=target, snap=snap, action=action, gap_rate=gap_rate,
+                    quantity=partial_qty, owner=owner, accumulate=True,
+                )
+                exit_order.is_partial = True
+                return exit_order
 
         return await self._execute_morning_sell(
             target=target, snap=snap, action=action, gap_rate=gap_rate,
