@@ -39,10 +39,25 @@
 | `docs/improvements/change_log.md` | 1줄 추가 |
 | phase25_simulator 가정 주석/문서 | open_pct 정합 동기 |
 
-## Phase 2 (B) — 별도 단위 2-5g (Phase 1 검증 후 착수)
-- gap_up_high 외 구간도 1차 부분익절(예 50%) + 잔여 오전 트레일링(고점 −1.5%, 10:30 force_close).
-- `exit.trailing_stop_pct=-0.015` dead config 활성화. 폴링 루프 신규 → sell_lock 동시성 재검증.
-- **Phase 1 실발주 1주 관찰 후 별도 PLAN 분리.**
+## Phase 2 (B) — 오전 부분익절 + 트레일링 (단위 2-5g) — 설계 확정, 구현 대기
+> **아키텍처 신규 기능**(연속 폴링 + 고점추적 상태 + 신규 스케줄). 실거래 청산이라 신중 구현 필요.
+> Phase 1 실발주 1주 관찰 후 착수 권장. 컨텍스트 큰 작업이라 **전용 세션**에서 이 PLAN 이어가기.
+
+### 설계
+- **스케줄(Option A 권장)**: `run_morning_trailing` 잡을 09:05~10:25 `IntervalTrigger`(예 5분)로 등록. 09:02 morning_exit(Phase 1) 이후 잔여 보유분을 주기적으로 점검. 10:30 force_close가 최종 안전망(불변).
+- **1차 부분익절**: 09:02 morning_exit에서 gap_up 구간은 1차 비율(예 50%) 매도(현 gap_up_high만 분할 → flat/gap_up_low로 확대). 잔여는 트레일링 위임.
+- **트레일링**: 각 점검마다 `highest_price` 갱신 → 현재가 ≤ `highest_price × (1 + trailing_stop_pct(−0.015))` 면 잔량 시장가(또는 Phase 1 지정가) 매도. `exit.trailing_stop_pct=−0.015` dead config 활성화.
+- **상태(highest_price) 저장**: 재시작 내성 위해 DB(candidates 신규 컬럼 또는 position_state 유사) 또는 메모리+JSON. monitor_state 잔재 교훈 적용(holding 화이트리스트 sanity).
+- **동시성**: sell_lock owner `closing_bet:morning_trailing`. morning_exit/emergency/force_close와 owner 분리 + 중복 매도 차단.
+- **토글**: `morning_trailing_enabled`(default false) + `morning_trailing_interval_min`(5) + `morning_partial_ratio`(0.5). default off → NO-OP.
+
+### 변경 파일(예상)
+- `exit_executor.py`(트레일링 사이클 + 상태), `main_orchestrator.py`(잡 등록), `scheduler` 잡, `settings.yaml`(토글 3키), `candidates`/state 스키마, 테스트.
+
+### 리스크
+- 폴링 루프 신규 = 동시성·재시작 내성·KIS 호출량 증가. strategy-planner + code-tester 사전 리뷰 필수.
+- highest_price 잔재 → 즉시 매도 오발동(monitor_state 5/13 사건 패턴). sanity 가드 필수.
+- **Phase 1 실발주 검증 전 착수 금지**(청산 지정가 효과 먼저 확인).
 
 ## Phase 3 (과열필터) — 별도 제안서 기반 (진입 모듈, 병행 가능)
 - `signal_score_engine.py` atr_overheat 하드컷(1.8) → 밴드 차등(1.8~2.2 차단 / 2.2+ 예외 통과) 또는 점수 감점 전환.
