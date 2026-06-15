@@ -344,6 +344,12 @@ class MainOrchestrator:
                 cancel_confirm_deadline_sec=float(
                     yaml_settings.get("cancel_confirm_deadline_sec", 30.0)
                 ),
+                open_limit_sell_enabled=bool(
+                    yaml_settings.get("open_limit_sell_enabled", False)
+                ),
+                limit_fill_deadline_sec=float(
+                    yaml_settings.get("limit_fill_deadline_sec", 30.0)
+                ),
             )
 
             kis_order_api = KISOrderApi()

@@ -76,6 +76,12 @@ class ExitExecutorSettings:
     cancel_confirm_deadline_sec: float = 30.0
     order_submit_sleep_sec: float = 0.5
 
+    # Phase 1 (A) — 시가 지정가 매도 + 미체결 시장가 폴백 (morning_exit 전용)
+    # 토글 OFF(기본) → 기존 _execute_market_sell 시장가 경로 NO-OP
+    open_limit_sell_enabled: bool = False
+    # 지정가 체결 대기 cut. 09:02 morning_exit → 09:05 스윙매수 전 폴백 수렴 위해 보수적 30초
+    limit_fill_deadline_sec: float = 30.0
+
 
 # ===== Result dataclass =====
 
@@ -387,16 +393,18 @@ class ExitExecutor:
                 )
 
         # GAP_UP_HIGH 만 50% 분할, 나머지는 전량
+        # Phase 1 (A): 토글 ON 시 시가 지정가 + 미체결 시장가 폴백 (morning_exit 전용).
+        #              emergency_stop/force_close 는 기존 시장가 경로 유지(_execute_market_sell).
         if action == ExitAction.GAP_UP_HIGH:
             partial_qty = max(int(target.total_shares * self.settings.gap_up_high_partial_ratio), 1)
-            exit_order = await self._execute_market_sell(
+            exit_order = await self._execute_morning_sell(
                 target=target, snap=snap, action=action, gap_rate=gap_rate,
                 quantity=partial_qty, owner=owner,
             )
             exit_order.is_partial = True
             return exit_order
 
-        return await self._execute_market_sell(
+        return await self._execute_morning_sell(
             target=target, snap=snap, action=action, gap_rate=gap_rate,
             quantity=target.total_shares, owner=owner,
         )
@@ -471,6 +479,217 @@ class ExitExecutor:
         return exit_order
 
     # ===== 매도 발주 + 폴링 + log_exit =====
+
+    async def _execute_morning_sell(
+        self,
+        *,
+        target: ExitTarget,
+        snap: MorningPriceSnapshot,
+        action: ExitAction,
+        gap_rate: float,
+        quantity: int,
+        owner: str,
+    ) -> CandidateExit:
+        """morning_exit 발주 디스패처 (Phase 1 A).
+
+        토글 ON → 시가 지정가 + 미체결 시장가 폴백. OFF → 기존 시장가 경로(NO-OP).
+        emergency_stop/force_close 는 이 디스패처를 거치지 않고 _execute_market_sell 직접 사용.
+        """
+        if self.settings.open_limit_sell_enabled:
+            return await self._execute_limit_sell_with_fallback(
+                target=target, snap=snap, action=action, gap_rate=gap_rate,
+                quantity=quantity, owner=owner,
+            )
+        return await self._execute_market_sell(
+            target=target, snap=snap, action=action, gap_rate=gap_rate,
+            quantity=quantity, owner=owner,
+        )
+
+    async def _execute_limit_sell_with_fallback(
+        self,
+        target: ExitTarget,
+        snap: MorningPriceSnapshot,
+        action: ExitAction,
+        gap_rate: float,
+        quantity: int,
+        owner: str,
+    ) -> CandidateExit:
+        """시가 지정가 매도 → 미체결/부분체결 시 잔량 시장가 폴백 (Phase 1 A).
+
+        불변식:
+        - log_exit 는 정확히 1회(체결분 합산 가중평균가·총 체결수량) 호출.
+        - 시장가 폴백 수량 = 지정가 미체결 잔량(quantity - limit_executed). total 재발주 금지.
+        - _pending_exit_orders ODNO 는 지정가→(취소확정)→시장가 순서로 교체.
+        """
+        exit_order = CandidateExit(
+            candidate_id=target.candidate_id, ticker=target.ticker, name=target.name,
+            action=action, target_shares=quantity, gap_rate=gap_rate,
+        )
+
+        # phase1 only 매도 시 mark (P0-2) — 발주 방식과 무관, 1회만 (폴백 경로 중복 차단)
+        if target.is_phase1_only:
+            try:
+                await asyncio.to_thread(
+                    self.candidate_logger.mark_entered_phase1_only, target.candidate_id,
+                )
+            except (LookupError, ValueError) as exc:
+                logger.error(
+                    f"[exit_executor] phase1 only mark 실패 cid={target.candidate_id}: {exc}"
+                )
+                exit_order.rejection_reason = "phase1_mark_fail"
+                return exit_order
+
+        limit_price = int(snap.open_price)
+
+        # dry_run 분기 (P1-3) — KIS 미발주 + log_exit 미호출
+        if self.settings.dry_run:
+            logger.info(
+                f"[exit_executor] DRY_RUN LIMIT_SELL {action.value}: {target.ticker} "
+                f"{quantity}주 지정가 {limit_price:,}원 (gap={gap_rate:+.3%}, owner={owner})"
+            )
+            exit_order.submitted = True
+            return exit_order
+
+        # open_price 비정상 방어 → 전량 시장가 폴백 (collector가 이미 >0 보장하나 이중 방어)
+        if limit_price <= 0:
+            logger.warning(f"[exit_executor] {target.ticker} open_price<=0 → 시장가 폴백")
+            return await self._fallback_market_remainder(
+                exit_order=exit_order, target=target, quantity=quantity,
+                limit_exec_shares=0, limit_exec_price=0,
+            )
+
+        # 1) 시가 지정가 발주
+        limit_res = await asyncio.to_thread(
+            self.kis_order_api.sell_limit_order, target.ticker, quantity, limit_price,
+        )
+        if not limit_res.get("success") or not limit_res.get("order_id"):
+            logger.warning(f"[exit_executor] {target.ticker} 지정가 발주 실패 → 전량 시장가 폴백")
+            return await self._fallback_market_remainder(
+                exit_order=exit_order, target=target, quantity=quantity,
+                limit_exec_shares=0, limit_exec_price=0,
+            )
+
+        limit_odno = limit_res["order_id"]
+        exit_order.order_id = limit_odno
+        exit_order.submitted = True
+        self._pending_exit_orders[target.ticker] = (limit_odno, quantity)
+        await asyncio.sleep(self.settings.order_submit_sleep_sec)
+
+        # 2) 지정가 체결 폴링 (보수적 limit_fill_deadline_sec)
+        limit_fill = await self._poll_fill(
+            limit_odno, deadline_sec=self.settings.limit_fill_deadline_sec,
+        )
+
+        # 전량 체결 → log_exit 1회, 종료
+        if limit_fill is not None and limit_fill.is_filled:
+            self._pending_exit_orders.pop(target.ticker, None)
+            exit_order.fill_status = limit_fill
+            await self._safe_log_exit(
+                exit_order, target.candidate_id,
+                float(limit_fill.executed_price), int(limit_fill.executed_shares),
+            )
+            return exit_order
+
+        # 3) 미체결/부분체결 → 지정가 잔량 취소 → 확정 → 최종 체결수량 재조회 → 잔량 시장가
+        limit_exec_shares = int(limit_fill.executed_shares) if limit_fill else 0
+        limit_exec_price = int(limit_fill.executed_price) if limit_fill else 0
+        try:
+            cancel_res = await asyncio.to_thread(
+                self.kis_order_api.cancel_order,
+                limit_odno, target.ticker, max(quantity - limit_exec_shares, 0),
+            )
+            if cancel_res.get("success"):
+                await self._wait_cancel_confirm(limit_odno)
+        except Exception as exc:
+            logger.warning(
+                f"[exit_executor] 지정가 취소 예외 {target.ticker}: {type(exc).__name__}: {exc}"
+            )
+        # 취소 직전 race 반영 — 최종 체결수량 재확인
+        final = await self.fill_checker.get_fill_status(limit_odno)
+        if final is not None and final.executed_shares > 0:
+            limit_exec_shares = int(final.executed_shares)
+            limit_exec_price = int(final.executed_price)
+
+        return await self._fallback_market_remainder(
+            exit_order=exit_order, target=target, quantity=quantity,
+            limit_exec_shares=limit_exec_shares, limit_exec_price=limit_exec_price,
+        )
+
+    async def _fallback_market_remainder(
+        self,
+        *,
+        exit_order: CandidateExit,
+        target: ExitTarget,
+        quantity: int,
+        limit_exec_shares: int,
+        limit_exec_price: int,
+    ) -> CandidateExit:
+        """지정가 체결분 + 잔량 시장가 → log_exit 1회(가중평균가·총 체결수량)."""
+        remaining = quantity - limit_exec_shares
+        mkt_exec_shares = 0
+        mkt_exec_price = 0
+
+        if remaining > 0:
+            mkt_res = await asyncio.to_thread(
+                self.kis_order_api.sell_market_order, target.ticker, remaining,
+            )
+            if mkt_res.get("success") and mkt_res.get("order_id"):
+                mkt_odno = mkt_res["order_id"]
+                exit_order.order_id = mkt_odno
+                exit_order.submitted = True
+                self._pending_exit_orders[target.ticker] = (mkt_odno, remaining)
+                await asyncio.sleep(self.settings.order_submit_sleep_sec)
+                mkt_fill = await self._poll_fill(mkt_odno)
+                if mkt_fill is not None and mkt_fill.is_filled:
+                    self._pending_exit_orders.pop(target.ticker, None)
+                if mkt_fill is not None and mkt_fill.executed_shares > 0:
+                    mkt_exec_shares = int(mkt_fill.executed_shares)
+                    mkt_exec_price = int(mkt_fill.executed_price)
+            else:
+                exit_order.rejection_reason = "fallback_submit_fail"
+
+        total_exec = limit_exec_shares + mkt_exec_shares
+        if total_exec <= 0:
+            # 아무것도 체결 안 됨 → log_exit 생략, force_close(10:30) 위임
+            exit_order.rejection_reason = exit_order.rejection_reason or "unfilled"
+            return exit_order
+
+        avg_price = (
+            limit_exec_shares * limit_exec_price + mkt_exec_shares * mkt_exec_price
+        ) / total_exec
+        # 집계 fill_status (swing 자본 환원 로그 정확도용)
+        exit_order.fill_status = FillStatus(
+            order_id=exit_order.order_id or "",
+            order_qty=quantity,
+            executed_shares=total_exec,
+            executed_price=int(round(avg_price)),
+            remaining_shares=max(quantity - total_exec, 0),
+            is_filled=(total_exec >= quantity),
+            is_partial=(0 < total_exec < quantity),
+            raw_status="limit+market_fallback",
+        )
+        await self._safe_log_exit(
+            exit_order, target.candidate_id, float(avg_price), int(total_exec),
+        )
+        # 부분 미청산 잔량 가시성 경보 — exit_time 박제로 force_close가 못 잡으므로 텔레그램 수동 확인용
+        # (근본 해결: candidates.exit_shares 컬럼 + force_close 잔량 재조회 — 실발주 활성화 전제조건)
+        if total_exec < quantity:
+            exit_order.rejection_reason = (
+                exit_order.rejection_reason or "partial_fallback_pending"
+            )
+        return exit_order
+
+    async def _safe_log_exit(
+        self, exit_order: CandidateExit, candidate_id: int, price: float, shares: int,
+    ) -> None:
+        """log_exit 호출 + 예외 흡수 (cost_engine 비용 분해 + UPDATE)."""
+        try:
+            await asyncio.to_thread(
+                self.candidate_logger.log_exit, candidate_id, price, None, shares,
+            )
+        except (LookupError, ValueError) as exc:
+            logger.error(f"[exit_executor] log_exit 실패 cid={candidate_id}: {exc}")
+            exit_order.rejection_reason = exit_order.rejection_reason or "log_exit_fail"
 
     async def _execute_market_sell(
         self,
@@ -569,9 +788,17 @@ class ExitExecutor:
         )
         return False
 
-    async def _poll_fill(self, order_id: str) -> Optional[FillStatus]:
-        """fill_checker 폴링 (entry_executor 패턴 재사용)."""
-        deadline = self.settings.fill_check_deadline_sec
+    async def _poll_fill(
+        self, order_id: str, deadline_sec: Optional[float] = None
+    ) -> Optional[FillStatus]:
+        """fill_checker 폴링 (entry_executor 패턴 재사용).
+
+        deadline_sec=None → 기존 fill_check_deadline_sec(시장가용). 지정가 폴백은
+        limit_fill_deadline_sec(보수적 짧은 cut)를 명시 전달.
+        """
+        deadline = (
+            self.settings.fill_check_deadline_sec if deadline_sec is None else deadline_sec
+        )
         interval = self.settings.polling_interval_sec
         elapsed = 0.0
         last_status: Optional[FillStatus] = None

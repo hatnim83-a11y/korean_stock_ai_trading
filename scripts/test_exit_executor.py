@@ -727,6 +727,187 @@ def test_EX_30_action_counts_aggregation():
         db.close()
 
 
+# ===== EX-31~36: Phase 1 (A) 시가 지정가 + 미체결 시장가 폴백 =====
+
+
+def _make_limit_executor(db, *, settings, snap, gfs_side_effect,
+                         limit_res=None, market_res=None, cancel_res=None):
+    """지정가 폴백 테스트 전용 — sell_limit_order/sell_market_order/cancel_order/get_fill_status 개별 주입."""
+    ex = _make_executor(db, settings=settings, snap=snap)
+    ex.kis_order_api.sell_limit_order = MagicMock(
+        return_value=limit_res or {"success": True, "order_id": "ODNO_LIMIT"}
+    )
+    ex.kis_order_api.sell_market_order = MagicMock(
+        return_value=market_res or {"success": True, "order_id": "ODNO_MKT"}
+    )
+    ex.kis_order_api.cancel_order = MagicMock(
+        return_value=cancel_res or {"success": True, "order_id": "ODNO_LIMIT"}
+    )
+    ex.fill_checker.get_fill_status = AsyncMock(side_effect=gfs_side_effect)
+    return ex
+
+
+def _fast_limit_settings():
+    return ExitExecutorSettings(
+        enabled=True, dry_run=False, open_limit_sell_enabled=True,
+        polling_interval_sec=0.01, fill_check_deadline_sec=0.03,
+        limit_fill_deadline_sec=0.03, cancel_confirm_deadline_sec=0.03,
+        order_submit_sleep_sec=0.0,
+    )
+
+
+def test_EX_31_open_limit_full_fill():
+    """EX-31: 토글 ON + 지정가 전량체결 → sell_limit_order만, 시장가 미발주, 시가 체결가 박제."""
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75000.0, shares=10)
+
+        async def gfs(order_id):
+            return _fill(qty=10, exec_qty=10, exec_price=75100, is_filled=True)
+
+        ex = _make_limit_executor(
+            db, settings=_fast_limit_settings(), snap=_snap(open_price=75100),
+            gfs_side_effect=gfs,
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        ex.kis_order_api.sell_limit_order.assert_called_once()
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_price"] == 75100  # 시가 지정가 체결
+        assert row["exit_time"] is not None
+        print("✅ EX-31 지정가 전량체결 → 시장가 미발주")
+        db.close()
+
+
+def test_EX_32_open_limit_unfill_market_fallback():
+    """EX-32: 지정가 미체결 → 취소 → 전량 시장가 폴백 → 시장가 체결가 박제."""
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75000.0, shares=10)
+
+        async def gfs(order_id):
+            if order_id == "ODNO_LIMIT":
+                return _fill(qty=10, exec_qty=0, exec_price=0, is_filled=False)
+            return _fill(qty=10, exec_qty=10, exec_price=74000, is_filled=True)
+
+        ex = _make_limit_executor(
+            db, settings=_fast_limit_settings(), snap=_snap(open_price=75100),
+            gfs_side_effect=gfs,
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        ex.kis_order_api.sell_limit_order.assert_called_once()
+        ex.kis_order_api.sell_market_order.assert_called_once()
+        # 폴백 시장가 수량 = 전량(10)
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 10
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_price"] == 74000
+        print("✅ EX-32 지정가 미체결 → 전량 시장가 폴백")
+        db.close()
+
+
+def test_EX_33_open_limit_partial_then_market():
+    """EX-33: 지정가 부분체결(6) → 잔량(4)만 시장가 → log_exit 1회 가중평균가."""
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75000.0, shares=10)
+
+        async def gfs(order_id):
+            if order_id == "ODNO_LIMIT":
+                return _fill(qty=10, exec_qty=6, exec_price=75100, is_filled=False)
+            return _fill(qty=4, exec_qty=4, exec_price=74000, is_filled=True)
+
+        ex = _make_limit_executor(
+            db, settings=_fast_limit_settings(), snap=_snap(open_price=75100),
+            gfs_side_effect=gfs,
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        # 잔량 시장가 = 10-6 = 4
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 4
+        # 가중평균 = (6*75100 + 4*74000)/10 = 74660
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_price"] == 74660, row["exit_price"]
+        print("✅ EX-33 부분체결 → 잔량 시장가 → 가중평균 박제")
+        db.close()
+
+
+def test_EX_34_toggle_off_uses_market():
+    """EX-34: 토글 OFF(기본) → 기존 시장가 경로 NO-OP (sell_limit_order 미호출)."""
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75000.0, shares=10)
+        s = ExitExecutorSettings(
+            enabled=True, dry_run=False, open_limit_sell_enabled=False,
+            polling_interval_sec=0.01, fill_check_deadline_sec=0.03,
+            order_submit_sleep_sec=0.0,
+        )
+        ex = _make_executor(
+            db, settings=s, snap=_snap(open_price=75100),
+            fill_status=_fill(qty=10, exec_qty=10, exec_price=75100),
+        )
+        ex.kis_order_api.sell_limit_order = MagicMock()
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        ex.kis_order_api.sell_limit_order.assert_not_called()
+        ex.kis_order_api.sell_market_order.assert_called_once()
+        print("✅ EX-34 토글 OFF → 시장가 경로 유지")
+        db.close()
+
+
+def test_EX_35_open_limit_dry_run_no_kis():
+    """EX-35: 토글 ON + dry_run → KIS 미발주(지정가/시장가) + log_exit 미호출."""
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75000.0, shares=10)
+        s = ExitExecutorSettings(
+            enabled=True, dry_run=True, open_limit_sell_enabled=True,
+            polling_interval_sec=0.01, fill_check_deadline_sec=0.03,
+            limit_fill_deadline_sec=0.03, order_submit_sleep_sec=0.0,
+        )
+        ex = _make_executor(db, settings=s, snap=_snap(open_price=75100))
+        ex.kis_order_api.sell_limit_order = MagicMock()
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        ex.kis_order_api.sell_limit_order.assert_not_called()
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_time"] is None  # log_exit 미호출
+        print("✅ EX-35 토글 ON + dry_run → KIS/log_exit 미호출")
+        db.close()
+
+
+def test_EX_36_open_limit_submit_fail_market_fallback():
+    """EX-36: 지정가 발주 실패 → 즉시 전량 시장가 폴백."""
+    with tempfile.TemporaryDirectory() as td:
+        db = _make_db(Path(td))
+        cid = _insert_candidate(db, ticker="005930")
+        _set_entered(db, cid, price=75000.0, shares=10)
+
+        async def gfs(order_id):
+            return _fill(qty=10, exec_qty=10, exec_price=74000, is_filled=True)
+
+        ex = _make_limit_executor(
+            db, settings=_fast_limit_settings(), snap=_snap(open_price=75100),
+            gfs_side_effect=gfs,
+            limit_res={"success": False, "order_id": "", "message": "FAIL"},
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        ex.kis_order_api.sell_limit_order.assert_called_once()
+        ex.kis_order_api.sell_market_order.assert_called_once()
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 10
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_price"] == 74000
+        print("✅ EX-36 지정가 발주 실패 → 전량 시장가 폴백")
+        db.close()
+
+
 # ===== Runner =====
 
 
@@ -763,6 +944,12 @@ def main():
         test_EX_28_gap_up_high_partial_quantity,
         test_EX_29_fill_checker_none_deadline,
         test_EX_30_action_counts_aggregation,
+        test_EX_31_open_limit_full_fill,
+        test_EX_32_open_limit_unfill_market_fallback,
+        test_EX_33_open_limit_partial_then_market,
+        test_EX_34_toggle_off_uses_market,
+        test_EX_35_open_limit_dry_run_no_kis,
+        test_EX_36_open_limit_submit_fail_market_fallback,
     ]
     print(f"\n=== ExitExecutor 단위 테스트 — {len(tests)}건 실행 ===\n")
     fails = []
