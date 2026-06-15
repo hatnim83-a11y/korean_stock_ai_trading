@@ -55,7 +55,7 @@ def test_empty_stock_codes():
     """빈 리스트 → score=0.0, top_codes=[]."""
     db = _temp_db()
     try:
-        result = calculate_theme_supply_score_v2([], db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
+        result = calculate_theme_supply_score_v2([], db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["score"] == 0.0
         assert result["top_codes"] == []
         assert result["foreign_pos_ratio"] == 0.0
@@ -70,7 +70,7 @@ def test_no_snapshots_in_db():
     db = _temp_db()
     try:
         result = calculate_theme_supply_score_v2(["005930", "000660"], db,
-                                                  top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
+                                                  top_n=5, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["score"] == 0.0
         assert result["top_codes"] == []
         print("✅ test_no_snapshots_in_db PASS")
@@ -93,7 +93,7 @@ def test_strong_positive_case():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["score"] == 5.0, f"expected 5.0, got {result['score']}"
         assert result["foreign_pos_ratio"] == 1.0
         assert len(result["top_codes"]) == 5
@@ -114,7 +114,7 @@ def test_negative_avg_returns_zero():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["score"] == 0.0
         assert result["foreign_pos_ratio"] == 0.0
         print(f"✅ test_negative_avg_returns_zero PASS (avg={result['avg_net_bil']}억)")
@@ -135,7 +135,7 @@ def test_boundary_exact_ref_bil():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=5, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert abs(result["score"] - 5.0) < 0.01, f"expected ~5.0, got {result['score']}"
         print(f"✅ test_boundary_exact_ref_bil PASS (score={result['score']})")
     finally:
@@ -155,7 +155,7 @@ def test_top_n_selection():
         ]
         _insert_snapshots(db, td, samples)
         codes = [c for c, *_ in samples]
-        result = calculate_theme_supply_score_v2(codes, db, top_n=2, ref_bil=30.0, max_score=5.0, signed=False)
+        result = calculate_theme_supply_score_v2(codes, db, top_n=2, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         # 평균 (100+80)/2 = 90억 → ratio=1.0 → score=5.0
         assert result["score"] == 5.0
         assert len(result["top_codes"]) == 2
@@ -188,7 +188,7 @@ def test_universe_top_signal_empty_db():
     """빈 DB → score=0.0, measured_date=None."""
     db = _temp_db()
     try:
-        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0, signed=False)
+        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["score"] == 0.0
         assert result["measured_date"] is None
         assert result["top_codes"] == []
@@ -211,7 +211,7 @@ def test_universe_top_signal_normal():
             ("066970", "엘앤에프", 4e9, 1e9, 400000),
         ]
         _insert_snapshots(db, td, samples)
-        result = measure_universe_top_supply_signal(db, top_n=3, ref_bil=30.0, max_score=5.0, signed=False)
+        result = measure_universe_top_supply_signal(db, top_n=3, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["measured_date"] == "2026-05-18"
         assert result["universe_size"] == 5
         assert len(result["top_codes"]) == 3
@@ -235,7 +235,7 @@ def test_universe_top_signal_top_n_cap():
             ("000660", "SK하이닉스", 6e9, 0, 150000),
         ]
         _insert_snapshots(db, td, samples)
-        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0, signed=False)
+        result = measure_universe_top_supply_signal(db, top_n=30, ref_bil=30.0, max_score=5.0, signed=False, use_ratio=False)
         assert result["universe_size"] == 2
         assert len(result["top_codes"]) == 2  # universe보다 많이 요청해도 universe 만큼만
         print(f"✅ test_universe_top_signal_top_n_cap PASS (size={result['universe_size']})")
@@ -258,7 +258,7 @@ def test_signed_avg_zero_returns_half_max():
         _insert_snapshots(db, td, samples)
         result = calculate_theme_supply_score_v2(
             ["005930", "000660"], db,
-            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True, use_ratio=False
         )
         assert abs(result["score"] - 2.5) < 0.01, f"expected ~2.5, got {result['score']}"
         print(f"✅ test_signed_avg_zero_returns_half_max PASS (score={result['score']})")
@@ -278,7 +278,7 @@ def test_signed_negative_returns_low_score():
         _insert_snapshots(db, td, samples)
         result = calculate_theme_supply_score_v2(
             ["005930"], db,
-            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True, use_ratio=False
         )
         # ratio = (-5+10)/(2*10) = 0.25 → score = 1.25
         assert abs(result["score"] - 1.25) < 0.01, f"expected 1.25, got {result['score']}"
@@ -298,7 +298,7 @@ def test_signed_positive_returns_high_score():
         _insert_snapshots(db, td, samples)
         result = calculate_theme_supply_score_v2(
             ["005930"], db,
-            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True, use_ratio=False
         )
         # ratio = (5+10)/(2*10) = 0.75 → score = 3.75
         assert abs(result["score"] - 3.75) < 0.01, f"expected 3.75, got {result['score']}"
@@ -318,7 +318,7 @@ def test_signed_below_neg_ref_clamps_to_zero():
         _insert_snapshots(db, td, samples)
         result = calculate_theme_supply_score_v2(
             ["005930"], db,
-            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True, use_ratio=False
         )
         assert result["score"] == 0.0
         print(f"✅ test_signed_below_neg_ref_clamps_to_zero PASS (avg={result['avg_net_bil']}억)")
@@ -337,7 +337,7 @@ def test_signed_above_ref_clamps_to_max():
         _insert_snapshots(db, td, samples)
         result = calculate_theme_supply_score_v2(
             ["005930"], db,
-            top_n=5, ref_bil=10.0, max_score=5.0, signed=True
+            top_n=5, ref_bil=10.0, max_score=5.0, signed=True, use_ratio=False
         )
         assert result["score"] == 5.0
         print(f"✅ test_signed_above_ref_clamps_to_max PASS (avg={result['avg_net_bil']}억)")
@@ -358,7 +358,7 @@ def test_outlier_cap_applied():
         result = calculate_theme_supply_score_v2(
             ["005930"], db,
             top_n=5, ref_bil=10.0, max_score=5.0,
-            signed=True, outlier_cap_bil=100.0,
+            signed=True, outlier_cap_bil=100.0, use_ratio=False,
         )
         # cap=-100억 → signed clamp max(-ref=-10, -100)=-10 → (-10+10)/(2×10)=0 → 0.0
         assert result["score"] == 0.0
@@ -381,7 +381,7 @@ def test_outlier_cap_disabled_zero():
         result = calculate_theme_supply_score_v2(
             ["005930"], db,
             top_n=5, ref_bil=10.0, max_score=5.0,
-            signed=True, outlier_cap_bil=0.0,
+            signed=True, outlier_cap_bil=0.0, use_ratio=False,
         )
         # cap 미적용이지만 ref=10 clamp는 작동 → score=0 (clamp -10)
         assert result["score"] == 0.0
@@ -403,11 +403,197 @@ def test_universe_signal_signed_mapping():
         ]
         _insert_snapshots(db, td, samples)
         result = measure_universe_top_supply_signal(
-            db, top_n=3, ref_bil=10.0, max_score=5.0, signed=True
+            db, top_n=3, ref_bil=10.0, max_score=5.0, signed=True, use_ratio=False,
         )
         # 평균 -5억 → signed (-5+10)/(20)=0.25 → 1.25
         assert abs(result["score"] - 1.25) < 0.01
         print(f"✅ test_universe_signal_signed_mapping PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+# ===== 2026-06-15 신규: ratio 모드 (옵션 C, 거래대금 대비 비율 정규화) =====
+
+
+def _insert_snapshots_with_value(db, trade_date, samples):
+    """samples: [(code, name, foreign_net_5d, inst_net_5d, close, trade_value_5d_avg), ...]
+
+    save_supply_snapshot()이 trade_value를 daily에서 자동 계산하므로,
+    테스트는 INSERT OR REPLACE로 직접 컬럼값 박제.
+    """
+    td_iso = trade_date.isoformat() if hasattr(trade_date, "isoformat") else trade_date
+    with db.get_cursor() as cursor:
+        for code, name, fnet, inet, close, trade_val in samples:
+            cursor.execute("""
+                INSERT OR REPLACE INTO daily_supply_snapshot (
+                    trade_date, stock_code, stock_name,
+                    foreign_net_5d, institution_net_5d, individual_net_5d,
+                    foreign_ratio, foreign_net_1d, institution_net_1d,
+                    close_price, trade_value_5d_avg, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEST')
+            """, (
+                td_iso, code, name,
+                fnet, inet, -(fnet + inet),
+                50.0, None, None,
+                close, trade_val,
+            ))
+
+
+def test_ratio_avg_zero_returns_half_max():
+    """ratio 모드, avg_ratio=0 → score = max/2 (signed)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # ratio = 0 (외인 net = 0)
+        samples = [
+            ("005930", "삼성전자", 0, 0, 50000, 1e10),
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        assert abs(result["score"] - 2.5) < 0.01, f"expected ~2.5, got {result['score']}"
+        assert result["mode"] == "ratio"
+        print(f"✅ test_ratio_avg_zero_returns_half_max PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+def test_ratio_positive_max():
+    """ratio 모드, ratio >= ref_ratio → score = max."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # foreign_net = 5e9, trade_value_5d_avg = 6e9 → ratio = 5e9/(6e9*5) = 0.167 > 0.15
+        samples = [
+            ("005930", "삼성전자", 5e9, 0, 50000, 6e9),
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        assert result["score"] == 5.0
+        assert result["avg_ratio"] > 0.15
+        print(f"✅ test_ratio_positive_max PASS (avg_ratio={result['avg_ratio']:.4f})")
+    finally:
+        db.close()
+
+
+def test_ratio_negative_zero():
+    """ratio 모드, ratio <= -ref_ratio → score = 0 (clamp)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # ratio = -5e9/(6e9*5) = -0.167 < -0.15
+        samples = [
+            ("005930", "삼성전자", -5e9, 0, 50000, 6e9),
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        assert result["score"] == 0.0
+        print(f"✅ test_ratio_negative_zero PASS (avg_ratio={result['avg_ratio']:.4f})")
+    finally:
+        db.close()
+
+
+def test_ratio_trade_value_zero_guard():
+    """ratio 모드, trade_value_5d_avg=0 → ratio=0 (division-by-zero 가드)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", 5e9, 0, 50000, 0),  # trade_value_5d_avg=0
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930"], db,
+            top_n=5, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        # ratio=0 → score = max/2 = 2.5 (signed 양선형 중간)
+        assert abs(result["score"] - 2.5) < 0.01
+        assert result["avg_ratio"] == 0.0
+        print(f"✅ test_ratio_trade_value_zero_guard PASS (score={result['score']})")
+    finally:
+        db.close()
+
+
+def test_ratio_top_n_uses_ratio_not_net():
+    """ratio 모드 top_n 선정은 net 절댓값이 아닌 ratio 절댓값 기준 (대형주 편향 제거)."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        # 005930: 큰 net(-7e9)이지만 거래대금도 큼(8e10) → ratio = -0.0175
+        # 100000(가상): 작은 net(+5e8)이지만 거래대금도 작음(5e8) → ratio = +0.20 (강함)
+        samples = [
+            ("005930", "삼성전자", -7e9, 0, 50000, 8e10),
+            ("123456", "중소형주", 5e8, 0, 5000, 5e8),
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = calculate_theme_supply_score_v2(
+            ["005930", "123456"], db,
+            top_n=1, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        # top_n=1 선정 시 ratio 절댓값 큰 123456 선정 (0.20 vs 0.0175)
+        assert "123456" in result["top_codes"]
+        assert result["avg_ratio"] > 0
+        print(f"✅ test_ratio_top_n_uses_ratio_not_net PASS (top={result['top_codes']}, ratio={result['avg_ratio']:.4f})")
+    finally:
+        db.close()
+
+
+def test_ratio_universe_signal_normal():
+    """universe top signal ratio 모드 정상 동작."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", 3e9, 0, 50000, 4e9),  # ratio = 0.15
+            ("000660", "SK하이닉스", 6e9, 0, 150000, 4e9),  # ratio = 0.30
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = measure_universe_top_supply_signal(
+            db, top_n=2, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        assert result["mode"] == "ratio"
+        # 평균 ratio = (0.30 + 0.15) / 2 = 0.225 → clamped 0.15 → ratio = 1.0 → score = 5.0
+        assert result["score"] == 5.0
+        assert result["top_avg_ratio"] > 0.15
+        print(f"✅ test_ratio_universe_signal_normal PASS (score={result['score']}, avg_ratio={result['top_avg_ratio']:.4f})")
+    finally:
+        db.close()
+
+
+def test_ratio_universe_signal_skips_zero_trade_value():
+    """universe ratio 모드, trade_value_5d_avg=0 종목은 SQL에서 제외."""
+    db = _temp_db()
+    try:
+        td = date(2026, 5, 18)
+        samples = [
+            ("005930", "삼성전자", 5e9, 0, 50000, 4e9),  # 정상
+            ("000660", "SK하이닉스", 5e9, 0, 150000, 0),  # trade_value=0 → 제외
+        ]
+        _insert_snapshots_with_value(db, td, samples)
+        result = measure_universe_top_supply_signal(
+            db, top_n=10, max_score=5.0, signed=True,
+            use_ratio=True, ref_ratio=0.15,
+        )
+        # 005930만 선정 (000660은 trade_value_5d_avg=0이라 제외)
+        assert "000660" not in result["top_codes"]
+        assert "005930" in result["top_codes"]
+        # universe_size는 전체 개수(2) — 측정 대상이 1개여도 universe 자체는 2
+        assert result["universe_size"] == 2
+        print(f"✅ test_ratio_universe_signal_skips_zero_trade_value PASS (top={result['top_codes']})")
     finally:
         db.close()
 
@@ -433,6 +619,14 @@ def run_all():
         test_outlier_cap_applied,
         test_outlier_cap_disabled_zero,
         test_universe_signal_signed_mapping,
+        # 2026-06-15 신규 — ratio 모드 (옵션 C)
+        test_ratio_avg_zero_returns_half_max,
+        test_ratio_positive_max,
+        test_ratio_negative_zero,
+        test_ratio_trade_value_zero_guard,
+        test_ratio_top_n_uses_ratio_not_net,
+        test_ratio_universe_signal_normal,
+        test_ratio_universe_signal_skips_zero_trade_value,
     ]
     failures = 0
     for t in tests:
