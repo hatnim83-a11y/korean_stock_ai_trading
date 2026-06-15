@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import date as date_cls, datetime, timedelta
+from datetime import date as date_cls, datetime, time as time_cls, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -94,6 +94,13 @@ MORNING_EXIT_MINUTE = 2  # 2026-05-26: 09:30 → 09:02. EARLY_BUY_ENABLED=True �
                          # KIS ord_psbl_cash는 매도 체결 즉시 가산되므로 자금 흐름 정합.
 MORNING_FORCE_CLOSE_HOUR = 10
 MORNING_FORCE_CLOSE_MINUTE = 30
+
+# Phase 2B 오전 트레일링 폴링 윈도우 (09:05~10:25, 30초 간격). 09:02 morning_exit 이후~10:30 force_close 이전.
+MORNING_TRAILING_START_HOUR = 9
+MORNING_TRAILING_START_MINUTE = 5
+MORNING_TRAILING_END_HOUR = 10
+MORNING_TRAILING_END_MINUTE = 25
+MORNING_TRAILING_INTERVAL_SEC = 30
 
 # 1-9 운영 점검 게이트 (settings.yaml gate.operational_review 와 동기화)
 DEFAULT_GATE_OPERATIONAL_REVIEW = 30
@@ -349,6 +356,13 @@ class MainOrchestrator:
                 ),
                 limit_fill_deadline_sec=float(
                     yaml_settings.get("limit_fill_deadline_sec", 30.0)
+                ),
+                morning_trailing_enabled=bool(
+                    yaml_settings.get("morning_trailing_enabled", False)
+                ),
+                trailing_stop_pct=float(exit_cfg.get("trailing_stop_pct", -0.015)),
+                trailing_activation_pct=float(
+                    yaml_settings.get("trailing_activation_pct", 0.01)
                 ),
             )
 
@@ -1042,6 +1056,32 @@ class MainOrchestrator:
             "unfilled": result.unfilled, "cancelled": result.cancelled,
         }
 
+    async def run_morning_trailing(self) -> dict:
+        """Phase 2B — 09:05~10:25 오전 트레일링 폴링 (30초 간격, IntervalTrigger).
+
+        잡은 전일(全日) 30초로 발화하나 윈도우/거래일 가드로 09:05~10:25·거래일에만 동작.
+        (IntervalTrigger start/end_date 는 절대일자라 일별 반복 불가 → 내부 시간 가드 사용.)
+        """
+        settings = self.exit_executor.settings
+        if not settings.enabled or not settings.morning_trailing_enabled:
+            return {"skipped": True, "reason": "disabled"}
+        now = now_kst()
+        if not is_trading_day(now.date()):
+            return {"skipped": True, "reason": "holiday"}
+        t = now.time()
+        if not (
+            time_cls(MORNING_TRAILING_START_HOUR, MORNING_TRAILING_START_MINUTE)
+            <= t
+            <= time_cls(MORNING_TRAILING_END_HOUR, MORNING_TRAILING_END_MINUTE)
+        ):
+            return {"skipped": True, "reason": "out_of_window"}
+        trade_date = (now.date() - timedelta(days=1)).isoformat()
+        result = await self.exit_executor.execute_trailing_stop(trade_date)
+        return {
+            "skipped": False, "trade_date": trade_date, "cycle": "morning_trailing",
+            "total_targets": result.total_targets, "filled": result.filled,
+        }
+
     def register_jobs(self, scheduler) -> None:
         """기존 main.py ``scheduler`` 에 종가베팅 잡 4건 등록.
 
@@ -1143,8 +1183,27 @@ class MainOrchestrator:
             misfire_grace_time=120,
             coalesce=True,
         )
+        # Phase 2B 오전 트레일링 — 토글 ON 시에만 등록 (OFF=잡 미등록 NO-OP)
+        if self.exit_executor.settings.morning_trailing_enabled:
+            from apscheduler.triggers.interval import IntervalTrigger
+            scheduler.add_job(
+                self.run_morning_trailing,
+                IntervalTrigger(seconds=MORNING_TRAILING_INTERVAL_SEC, timezone=kst),
+                id="closing_bet_morning_trailing",
+                replace_existing=True,
+                max_instances=1,      # 직전 폴링 미완료 시 중첩 방지(이중매도 차단)
+                coalesce=True,
+                misfire_grace_time=15,
+            )
+            logger.info(
+                f"[orchestrator] 종가베팅 오전 트레일링 잡 등록 — "
+                f"{MORNING_TRAILING_START_HOUR:02d}:{MORNING_TRAILING_START_MINUTE:02d}~"
+                f"{MORNING_TRAILING_END_HOUR:02d}:{MORNING_TRAILING_END_MINUTE:02d} "
+                f"/ {MORNING_TRAILING_INTERVAL_SEC}초"
+            )
+        n_jobs = 8 + (1 if self.exit_executor.settings.morning_trailing_enabled else 0)
         logger.info(
-            f"[orchestrator] 종가베팅 잡 8건 등록 — "
+            f"[orchestrator] 종가베팅 잡 {n_jobs}건 등록 — "
             f"pipeline {PIPELINE_SCHEDULE_HOUR:02d}:{PIPELINE_SCHEDULE_MINUTE:02d} / "
             f"summary {SUMMARY_SCHEDULE_HOUR:02d}:{SUMMARY_SCHEDULE_MINUTE:02d} / "
             f"label {LABEL_SCHEDULE_HOUR:02d}:{LABEL_SCHEDULE_MINUTE:02d} / "
