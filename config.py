@@ -952,7 +952,15 @@ class Settings(BaseSettings):
     )
     SUPPLY_OUTLIER_CAP_BIL: float = Field(
         default=100.0,
-        description="theme_avg_net_bil outlier cap (억원). 절댓값이 이 값을 넘으면 ±cap으로 잘라냄. 2026-06-06 발견된 대형주(삼성전자/SK하이닉스) -55000억대 이상치 방어 (별도 후속 단위에서 root cause 점검 예정)"
+        description="theme_avg_net_bil outlier cap (억원). use_ratio=False(absolute 모드)에서만 의미. 2026-06-15 결과: 대형주 -7.78조원이 outlier가 아닌 정상 데이터로 확인 → ratio 모드 도입으로 절대값 cap 의존성 제거"
+    )
+    SUPPLY_USE_RATIO: bool = Field(
+        default=True,
+        description="2026-06-15 추가 — True면 종목 거래대금 대비 비율(foreign_net_5d / (trade_value_5d_avg × 5))로 정규화. 대형주(삼성전자 등)와 중소형주를 동일 척도로 비교 가능. False면 절대값 기반 (SUPPLY_INTENSITY_REF_BIL 사용)"
+    )
+    SUPPLY_REF_RATIO: float = Field(
+        default=0.15,
+        description="use_ratio=True일 때 정규화 기준 비율. 5일 거래대금의 ±이 비율에 도달하면 만점/0점 매핑 (signed 양선형). 2026-06-15 6/10~6/12 실측 분포(-30%~+30% 정규분포) 기반 15% 채택"
     )
     SUPPLY_STRENGTH_ENABLED: bool = Field(
         default=False,

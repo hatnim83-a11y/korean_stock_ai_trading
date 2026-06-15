@@ -125,7 +125,24 @@
 - [x] 실측 165건 시뮬레이션: 새 공식 분포 0(39.4%) / 2-3(44.2%) / 5(15.2%) — 양극화 대폭 개선
 - [ ] **systemctl restart trading_system** (사용자 진행 필요) → 5영업일 후 (~6/12) 분포 재평가
 
-### 검증 — 2차 측정 (~2026-06-12, 5영업일 누적 후 재시작 이후 데이터만)
+### 검증 — 2차 측정 (2026-06-15)
+- [ ] ~~분포 차별성: 0/2-3/5 각 구간 모두 ≥ 10%~~ — ❌ FAIL (0=86.7% 양극화 유지, 6/10~6/12 90건)
+- [x] Pearson r 유지 (< 0.7) — ✅ r=0.30 (stocks=1 필터 45건 기준)
+- [x] outlier root cause 진단 — **데이터 정상**: 삼성전자 -7.78조원은 시장 실제값. cap=100억이 대형주 정상 데이터를 outlier로 오인하는 게 진짜 문제
+- [x] **사용자 의사결정**: "outlier root cause 먼저 해결" → 변환식 근본 재설계 (옵션 C)
+
+### 변환식 3차 재설계 — 옵션 C (ratio 정규화, 2026-06-15)
+- [x] `config.py` 신규 토글 2개: `SUPPLY_USE_RATIO=True`, `SUPPLY_REF_RATIO=0.15` (5일 거래대금의 15%=만점)
+- [x] `scorer.py` 신규 함수 2개: `_compute_supply_score_from_ratio()` 헬퍼 + `_stock_supply_ratio()` 단일 종목 비율 계산 (trade_value=0 가드)
+- [x] `calculate_theme_supply_score_v2()` 시그니처 확장: `use_ratio`/`ref_ratio` 인자. top_n 선정도 ratio 절댓값 기준 (대형주 net 편향 제거)
+- [x] `measure_universe_top_supply_signal()` 시그니처 확장: 동일 인자. SQL에서 `trade_value_5d_avg > 0` 필터 + ratio 계산
+- [x] `score_themes()`: settings 토글 전달 + breakdown_json에 mode/avg_ratio/use_ratio/ref_ratio 추적
+- [x] 단위 테스트 25/25 PASS (기존 18 회귀 보존 use_ratio=False 명시 + 신규 7 ratio 모드)
+- [x] code-tester 심각 0/주의 2/참고 3 "배포 가능" — 참고 2(로그 가시성) 즉시 처리, 주의 2(테스트 보강)는 후속
+- [x] 실측 통합 검증: 반도체(005930/000660) absolute=0 → ratio=3.3 (차별 점수 회복), 중소형 외인 매수 상위=5.0, 회귀 absolute=0.0
+- [ ] **systemctl restart trading_system** (사용자 진행 필요) → 5영업일 후 (~6/22) 3차 측정
+
+### 검증 — 3차 측정 (~2026-06-22, 5영업일 누적)
 - [ ] 분포 차별성: 0/2-3/5 각 구간 모두 ≥ 10% (양극화 해소 기준)
 - [ ] Pearson r 유지 (< 0.7)
 - [ ] **사용자 확인 → Phase 1-C 진행**

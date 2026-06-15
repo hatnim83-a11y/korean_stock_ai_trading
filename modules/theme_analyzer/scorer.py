@@ -226,6 +226,40 @@ def calculate_supply_score_from_amount(
 
 # ===== Phase 1-B½/1-C 수급 점수 v2 (DB 기반 정규화) =====
 
+def _compute_supply_score_from_ratio(
+    ratio: float,
+    ref_ratio: float,
+    max_score: float,
+    signed: bool = True,
+) -> float:
+    """ratio → score 변환 헬퍼 (2026-06-15 옵션 C — 거래대금 대비 비율 정규화).
+
+    ratio = foreign_net_5d / (trade_value_5d_avg × 5)
+          (5일 거래대금 총합 대비 외인 순매수 비율)
+
+    Args:
+        ratio: 거래대금 대비 외인 5일 net 비율 (양수=매수 / 음수=매도, 단위 없음)
+        ref_ratio: 만점/0점 기준 비율 (예: 0.15 = 15%)
+        max_score: 최대 점수
+        signed: True면 양선형 매핑 (-ref→0, 0→max/2, +ref→max). False면 음수→0
+
+    Returns:
+        0.0 ~ max_score 사이 점수
+    """
+    if max_score <= 0 or ref_ratio <= 0:
+        return 0.0
+
+    if signed:
+        clamped = max(-ref_ratio, min(ref_ratio, ratio))
+        r = (clamped + ref_ratio) / (2 * ref_ratio)
+        return r * max_score
+    else:
+        if ratio <= 0:
+            return 0.0
+        r = min(1.0, ratio / ref_ratio)
+        return r * max_score
+
+
 def _compute_supply_score_from_avg(
     avg_net_bil: float,
     ref_bil: float,
@@ -266,6 +300,19 @@ def _compute_supply_score_from_avg(
         return ratio * max_score
 
 
+def _stock_supply_ratio(snap: dict, lookback_days: int = 5) -> float:
+    """단일 종목 snapshot에서 거래대금 대비 외인 5일 net 비율 계산.
+
+    Returns: ratio (양수=매수, 음수=매도, 0=데이터 없음/거래대금 0)
+    """
+    foreign_net = snap.get("foreign_net_5d") or 0
+    trade_value_avg = snap.get("trade_value_5d_avg") or 0
+    denominator = trade_value_avg * lookback_days
+    if denominator <= 0:
+        return 0.0
+    return foreign_net / denominator
+
+
 def calculate_theme_supply_score_v2(
     stock_codes: list,
     db,
@@ -274,35 +321,45 @@ def calculate_theme_supply_score_v2(
     max_score: float = 5.0,
     signed: bool = True,
     outlier_cap_bil: float = 100.0,
+    use_ratio: bool = True,
+    ref_ratio: float = 0.15,
 ) -> dict:
     """테마 종목 풀의 외국인 5일 누적 net 기반 supply_score_v2 계산.
 
     Phase 1-B½ Shadow Run에서는 관측만 (총점 미반영), Phase 1-C에서 활성화.
 
-    2026-06-06 분포 차별성 개선: signed=True 양선형 매핑 + outlier_cap_bil 도입.
+    2026-06-06: signed=True 양선형 매핑 + outlier_cap_bil 도입
+    2026-06-15: use_ratio=True 옵션 C — 거래대금 대비 비율 정규화 (대형주/중소형주 동일 척도)
 
     Args:
         stock_codes: 테마의 종목코드 리스트 (6자리)
         db: Database 인스턴스 (close 안 함)
-        top_n: 외인 5일 절댓값 상위 N개 종목 선정 (기본 5)
-        ref_bil: 정규화 기준액 (억원). signed=True면 ±ref 범위로 매핑
-        max_score: 최대 가산 점수 (Phase 1-B½ 0.0, Phase 1-C 2.5 → 5.0)
-        signed: True면 음수에도 점수 (양선형). False면 기존 (음수→0)
-        outlier_cap_bil: avg 절댓값 cap (이상치 방어, 0이면 미적용)
+        top_n: 절댓값(use_ratio면 ratio, 아니면 net) 상위 N개 종목 선정
+        ref_bil: absolute 모드 정규화 기준액 (억원)
+        max_score: 최대 가산 점수
+        signed: True면 양선형 매핑, False면 음수→0
+        outlier_cap_bil: absolute 모드 outlier cap (0이면 미적용)
+        use_ratio: True면 ratio 모드 (foreign_net_5d / (trade_value_5d_avg×5)),
+                  False면 absolute 모드 (절대값 기준, deprecated 가능)
+        ref_ratio: ratio 모드 기준 비율 (예: 0.15 = 15%)
 
     Returns:
         {
             'score': float (0~max_score),
             'foreign_pos_ratio': float (0~1, 양수 비율),
-            'avg_net_bil': float (선정 종목 평균 외인 5일 net, 억원, cap 적용 전 값),
-            'top_codes': list[str] (선정된 종목코드, 디버그용)
+            'avg_net_bil': float (선정 종목 평균 외인 5일 net, 억원),
+            'avg_ratio': float (선정 종목 평균 ratio, use_ratio=True일 때만 의미),
+            'top_codes': list[str],
+            'mode': str ('ratio' 또는 'absolute', 분석용)
         }
     """
     empty_result = {
         "score": 0.0,
         "foreign_pos_ratio": 0.0,
         "avg_net_bil": 0.0,
+        "avg_ratio": 0.0,
         "top_codes": [],
+        "mode": "ratio" if use_ratio else "absolute",
     }
     if not stock_codes:
         return empty_result
@@ -316,31 +373,52 @@ def calculate_theme_supply_score_v2(
     if not snapshots:
         return empty_result
 
-    # foreign_net_5d 절댓값 상위 top_n 선정 (양/음 모두 포함, 신호 강도 기준)
-    sorted_codes = sorted(
-        snapshots.keys(),
-        key=lambda c: abs(snapshots[c].get("foreign_net_5d") or 0),
-        reverse=True,
-    )[:top_n]
-
-    nets = [(snapshots[c].get("foreign_net_5d") or 0) for c in sorted_codes]
-    if not nets:
-        return empty_result
-
-    avg_net = sum(nets) / len(nets)
-    avg_net_bil = avg_net / 1e8  # 원 → 억원
-    pos_count = sum(1 for n in nets if n > 0)
-    pos_ratio = pos_count / len(nets)
-
-    score = _compute_supply_score_from_avg(
-        avg_net_bil, ref_bil, max_score, signed=signed, outlier_cap_bil=outlier_cap_bil
-    )
+    if use_ratio:
+        # ratio 모드: foreign_net_5d / (trade_value_5d_avg × 5) 절댓값 기준 top_n
+        # trade_value_avg=0/NULL인 종목은 ratio=0으로 자동 후순위
+        sorted_codes = sorted(
+            snapshots.keys(),
+            key=lambda c: abs(_stock_supply_ratio(snapshots[c])),
+            reverse=True,
+        )[:top_n]
+        ratios = [_stock_supply_ratio(snapshots[c]) for c in sorted_codes]
+        if not ratios:
+            return empty_result
+        avg_ratio = sum(ratios) / len(ratios)
+        pos_count = sum(1 for r in ratios if r > 0)
+        pos_ratio = pos_count / len(ratios)
+        score = _compute_supply_score_from_ratio(
+            avg_ratio, ref_ratio, max_score, signed=signed
+        )
+        # avg_net_bil도 같이 산출 (디버깅용)
+        nets = [(snapshots[c].get("foreign_net_5d") or 0) for c in sorted_codes]
+        avg_net_bil = (sum(nets) / len(nets)) / 1e8 if nets else 0.0
+    else:
+        # absolute 모드 (기존): foreign_net_5d 절댓값 기준 top_n
+        sorted_codes = sorted(
+            snapshots.keys(),
+            key=lambda c: abs(snapshots[c].get("foreign_net_5d") or 0),
+            reverse=True,
+        )[:top_n]
+        nets = [(snapshots[c].get("foreign_net_5d") or 0) for c in sorted_codes]
+        if not nets:
+            return empty_result
+        avg_net = sum(nets) / len(nets)
+        avg_net_bil = avg_net / 1e8
+        pos_count = sum(1 for n in nets if n > 0)
+        pos_ratio = pos_count / len(nets)
+        score = _compute_supply_score_from_avg(
+            avg_net_bil, ref_bil, max_score, signed=signed, outlier_cap_bil=outlier_cap_bil
+        )
+        avg_ratio = 0.0
 
     return {
         "score": round(score, 3),
         "foreign_pos_ratio": round(pos_ratio, 3),
         "avg_net_bil": round(avg_net_bil, 2),
+        "avg_ratio": round(avg_ratio, 4),
         "top_codes": sorted_codes,
+        "mode": "ratio" if use_ratio else "absolute",
     }
 
 
@@ -352,41 +430,46 @@ def measure_universe_top_supply_signal(
     max_score: float = 5.0,
     signed: bool = True,
     outlier_cap_bil: float = 100.0,
+    use_ratio: bool = True,
+    ref_ratio: float = 0.15,
 ) -> dict:
     """[권고 조치, 2026-05-13] universe 내부 외인 5일 net 상위 N개 신호 측정.
 
-    KIS FHPTJ04400000 30건 한도(시장 전체 핫스팟)와 별도로, universe 종목 풀
-    안에서 외인 매수 상위를 동적 계산한 신호를 측정. Phase 1-C에서 KIS TOP30 vs
-    universe 내부 TOP 중 어느 쪽을 점수 가산에 쓸지 결정하기 위한 추적 데이터.
-
-    2026-06-06 분포 차별성 개선: signed + outlier_cap_bil 도입 (테마 v2와 동일 패턴).
+    2026-06-06: signed + outlier_cap_bil 도입.
+    2026-06-15: use_ratio 옵션 C — 거래대금 대비 비율 정규화 (대형주 편향 제거).
 
     Args:
         db: Database 인스턴스
         trade_date: 측정 기준일 (None이면 daily_supply_snapshot MAX)
         top_n: universe 내부 상위 N개 종목
-        ref_bil: 정규화 기준액 (억원)
+        ref_bil: absolute 모드 정규화 기준액 (억원)
         max_score: 최대 점수
         signed: True면 양선형 매핑
-        outlier_cap_bil: avg 절댓값 cap
+        outlier_cap_bil: absolute 모드 outlier cap
+        use_ratio: True면 거래대금 대비 비율 모드 (대형주/중소형주 동일 척도)
+        ref_ratio: ratio 모드 기준 비율 (예: 0.15 = 15%)
 
     Returns:
         {
-            'score': float (테마와 무관한 시장 전체 universe 신호 점수),
-            'top_codes': list[str] (상위 종목코드),
+            'score': float,
+            'top_codes': list[str],
             'top_avg_net_bil': float,
+            'top_avg_ratio': float (ratio 모드),
             'pos_ratio': float,
             'measured_date': str (ISO),
-            'universe_size': int
+            'universe_size': int,
+            'mode': str
         }
     """
     empty_result = {
         "score": 0.0,
         "top_codes": [],
         "top_avg_net_bil": 0.0,
+        "top_avg_ratio": 0.0,
         "pos_ratio": 0.0,
         "measured_date": None,
         "universe_size": 0,
+        "mode": "ratio" if use_ratio else "absolute",
     }
 
     try:
@@ -403,18 +486,30 @@ def measure_universe_top_supply_signal(
             else:
                 td = trade_date.isoformat() if hasattr(trade_date, "isoformat") else trade_date
 
-            # universe 전체 외인 5일 net 상위 top_n
-            cursor.execute(
-                """SELECT stock_code, foreign_net_5d
-                   FROM daily_supply_snapshot
-                   WHERE trade_date = ? AND foreign_net_5d IS NOT NULL
-                   ORDER BY foreign_net_5d DESC
-                   LIMIT ?""",
-                (td, top_n),
-            )
+            if use_ratio:
+                # ratio 모드: 절댓값 ratio 기준 top_n (trade_value_5d_avg>0 가드)
+                cursor.execute(
+                    """SELECT stock_code, foreign_net_5d, trade_value_5d_avg,
+                              (foreign_net_5d * 1.0 / (trade_value_5d_avg * 5)) AS r
+                       FROM daily_supply_snapshot
+                       WHERE trade_date = ? AND foreign_net_5d IS NOT NULL
+                         AND trade_value_5d_avg > 0
+                       ORDER BY r DESC
+                       LIMIT ?""",
+                    (td, top_n),
+                )
+            else:
+                # absolute 모드 (기존)
+                cursor.execute(
+                    """SELECT stock_code, foreign_net_5d, trade_value_5d_avg, 0.0 AS r
+                       FROM daily_supply_snapshot
+                       WHERE trade_date = ? AND foreign_net_5d IS NOT NULL
+                       ORDER BY foreign_net_5d DESC
+                       LIMIT ?""",
+                    (td, top_n),
+                )
             rows = cursor.fetchall()
 
-            # universe 전체 크기
             cursor.execute(
                 "SELECT COUNT(*) FROM daily_supply_snapshot WHERE trade_date = ?",
                 (td,),
@@ -433,17 +528,27 @@ def measure_universe_top_supply_signal(
     pos_count = sum(1 for n in nets if n > 0)
     pos_ratio = pos_count / len(nets)
 
-    score = _compute_supply_score_from_avg(
-        avg_net_bil, ref_bil, max_score, signed=signed, outlier_cap_bil=outlier_cap_bil
-    )
+    if use_ratio:
+        ratios = [r[3] for r in rows]
+        avg_ratio = sum(ratios) / len(ratios) if ratios else 0.0
+        score = _compute_supply_score_from_ratio(
+            avg_ratio, ref_ratio, max_score, signed=signed
+        )
+    else:
+        avg_ratio = 0.0
+        score = _compute_supply_score_from_avg(
+            avg_net_bil, ref_bil, max_score, signed=signed, outlier_cap_bil=outlier_cap_bil
+        )
 
     return {
         "score": round(score, 3),
         "top_codes": top_codes,
         "top_avg_net_bil": round(avg_net_bil, 2),
+        "top_avg_ratio": round(avg_ratio, 4),
         "pos_ratio": round(pos_ratio, 3),
         "measured_date": td,
         "universe_size": universe_size,
+        "mode": "ratio" if use_ratio else "absolute",
     }
 
 
@@ -815,11 +920,19 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                 max_score=_supply_max_score,
                 signed=settings.SUPPLY_SCORE_SIGNED,
                 outlier_cap_bil=settings.SUPPLY_OUTLIER_CAP_BIL,
+                use_ratio=settings.SUPPLY_USE_RATIO,
+                ref_ratio=settings.SUPPLY_REF_RATIO,
+            )
+            _mode = _universe_top_signal.get("mode", "absolute")
+            _ratio_str = (
+                f", top_avg_ratio={_universe_top_signal.get('top_avg_ratio', 0):.2%}"
+                if _mode == "ratio" else ""
             )
             logger.info(
-                f"📊 universe top signal — date={_universe_top_signal.get('measured_date')}, "
+                f"📊 universe top signal [{_mode}] — date={_universe_top_signal.get('measured_date')}, "
                 f"size={_universe_top_signal.get('universe_size')}, "
-                f"top_avg={_universe_top_signal.get('top_avg_net_bil'):.2f}억, "
+                f"top_avg={_universe_top_signal.get('top_avg_net_bil'):.2f}억"
+                f"{_ratio_str}, "
                 f"pos_ratio={_universe_top_signal.get('pos_ratio'):.0%}"
             )
         except Exception as e:
@@ -886,6 +999,8 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                 max_score=_supply_max_score,  # 0/음수 시 관측용 5.0 폴백
                 signed=settings.SUPPLY_SCORE_SIGNED,
                 outlier_cap_bil=settings.SUPPLY_OUTLIER_CAP_BIL,
+                use_ratio=settings.SUPPLY_USE_RATIO,
+                ref_ratio=settings.SUPPLY_REF_RATIO,
             )
             supply_score_v2 = supply_v2_result["score"]
             # 관측 모드 OFF + MAX > 0 일 때만 총점 가산 (Phase 1-C 활성화 시)
@@ -971,7 +1086,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                 breakdown = {
                     "theme_top_codes": supply_v2_result.get("top_codes", []),
                     "theme_avg_net_bil": supply_v2_result.get("avg_net_bil"),
+                    "theme_avg_ratio": supply_v2_result.get("avg_ratio"),  # 2026-06-15 ratio 모드
                     "theme_pos_ratio": supply_v2_result.get("foreign_pos_ratio"),
+                    "theme_mode": supply_v2_result.get("mode"),  # 'ratio' | 'absolute'
                     # 권고 조치: universe 내부 동적 TOP 신호 병기 저장
                     "universe_top_signal": _universe_top_signal,
                     "observe_only": settings.SUPPLY_SCORE_OBSERVE_ONLY,
@@ -983,6 +1100,9 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                     # 2026-06-06 변환식 재설계 추적 (Phase 1-B½ 분포 차별성 개선용)
                     "signed": settings.SUPPLY_SCORE_SIGNED,
                     "outlier_cap_bil": settings.SUPPLY_OUTLIER_CAP_BIL,
+                    # 2026-06-15 ratio 모드 추적 (옵션 C)
+                    "use_ratio": settings.SUPPLY_USE_RATIO,
+                    "ref_ratio": settings.SUPPLY_REF_RATIO,
                 }
                 _supply_db.save_supply_score_observation(
                     obs_date=now_kst().date(),
