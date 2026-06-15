@@ -364,6 +364,9 @@ class MainOrchestrator:
                 trailing_activation_pct=float(
                     yaml_settings.get("trailing_activation_pct", 0.01)
                 ),
+                morning_partial_ratio=float(
+                    yaml_settings.get("morning_partial_ratio", 0.5)
+                ),
             )
 
             kis_order_api = KISOrderApi()

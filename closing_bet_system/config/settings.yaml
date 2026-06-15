@@ -202,6 +202,7 @@ morning_exit:
   limit_fill_deadline_sec: 30              # 지정가 체결 대기 cut. 09:02 발주→09:05 스윙매수 전 폴백 수렴 위해 보수적 30초
   morning_trailing_enabled: false          # Phase 2B 2026-06-15: 09:05~10:25 오전 트레일링(잔여 보유분). false=잡 미등록 NO-OP. 실적용은 사용자 승인
   trailing_activation_pct: 0.01            # 당일 고가가 진입가 +1% 넘은 뒤에만 트레일 활성(손실종목 조기청산 방지). trailing_stop_pct는 exit: 섹션(-0.015) 사용
+  morning_partial_ratio: 0.5               # Phase 2C: 09:02 1차 부분익절 비율(gap_up_low/flat). morning_trailing_enabled 시에만 적용(비활성 시 부분익절 OFF)
 
 # ─── Kill Switch (Phase 3에서 활성화) ────────────────────────────────────
 kill_switch:

@@ -1076,6 +1076,73 @@ def test_TR_6_snap_none_skips():
         db.close()
 
 
+# ===== PC-1~3: Phase 2C 1차 부분익절 확대 (gap_up_low/flat) =====
+
+
+def test_PC_1_trailing_on_flat_partial():
+    """PC-1: 트레일링 ON + flat(시가 +0.1%) → morning_partial_ratio(50%)만 매도, 잔여 재선택."""
+    from closing_bet_system.execution.exit_target_query import select_exit_targets
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)  # entry 75000, shares 10
+        ex = _make_executor(
+            db, settings=_trailing_settings(morning_partial_ratio=0.5),
+            snap=_snap(open_price=75_100, high=75_500, low=74_800, current=75_100),
+            fill_status=_fill(qty=5, exec_qty=5, exec_price=75_100),
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 5  # 50% 부분
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_shares"] == 5
+        assert row["exit_time"] is None  # 부분 → 미박제
+        # 잔여 5주 재선택
+        targets = select_exit_targets(ex.candidate_logger, "2026-05-15")
+        assert len(targets) == 1 and targets[0].remaining_shares == 5
+        print("✅ PC-1 트레일링 ON + flat → 50% 부분익절, 잔여 재선택")
+        db.close()
+
+
+def test_PC_2_trailing_off_flat_full():
+    """PC-2: 트레일링 OFF(기본) + flat → 전량 매도(기존 동작 유지, exit_time 박제)."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        s = ExitExecutorSettings(
+            enabled=True, dry_run=False, morning_trailing_enabled=False,
+            polling_interval_sec=0.01, fill_check_deadline_sec=0.03, order_submit_sleep_sec=0.0,
+        )
+        ex = _make_executor(
+            db, settings=s, snap=_snap(open_price=75_100, high=75_500, current=75_100),
+            fill_status=_fill(qty=10, exec_qty=10, exec_price=75_100),
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 10  # 전량
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_shares"] == 10
+        assert row["exit_time"] is not None
+        print("✅ PC-2 트레일링 OFF + flat → 전량(기존 동작)")
+        db.close()
+
+
+def test_PC_3_trailing_on_weak_gap_down_full():
+    """PC-3: 트레일링 ON + weak_gap_down(시가 -0.7%) → 부분익절 대상 아님 → 전량."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)  # entry 75000
+        # gap -0.7% → open 74475 (flat_lower -0.5% < x, hard_stop -1% 위) → WEAK_GAP_DOWN
+        ex = _make_executor(
+            db, settings=_trailing_settings(morning_partial_ratio=0.5),
+            snap=_snap(open_price=74_475, high=75_000, low=74_000, current=74_500),
+            fill_status=_fill(qty=10, exec_qty=10, exec_price=74_475),
+        )
+        r = _run(ex.execute_morning_exit("2026-05-15"))
+        assert r.filled == 1
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 10  # 전량
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_time"] is not None
+        print("✅ PC-3 트레일링 ON + weak_gap_down → 전량(부분익절 제외)")
+        db.close()
+
+
 # ===== Runner =====
 
 
@@ -1125,6 +1192,9 @@ def main():
         test_TR_4_above_trigger_holds,
         test_TR_5_invalid_snap_skips,
         test_TR_6_snap_none_skips,
+        test_PC_1_trailing_on_flat_partial,
+        test_PC_2_trailing_off_flat_full,
+        test_PC_3_trailing_on_weak_gap_down_full,
     ]
     print(f"\n=== ExitExecutor 단위 테스트 — {len(tests)}건 실행 ===\n")
     fails = []

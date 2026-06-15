@@ -54,9 +54,18 @@
 - [x] 44/44 PASS(TR-1~6) + code-tester 심각0 + change_log
 - 잔여 주의(후속): trailing↔force_close 10:25:30 race(KIS 잔고로 차단, 저위험) / sell_lock owner 미검증 release(force_close 동일 패턴)
 
-## Phase 2C — 1차 부분익절 확대 (2B 활성 시, 코드 가드)
-- [ ] morning_exit gap_up 구간 morning_partial_ratio 매도, 잔여 트레일링 위임
-- [ ] 2B 비활성 시 부분익절도 비활성(잔여 고아 방지) 코드 가드
+## Phase 2C — 1차 부분익절 확대 ✅ 구현 완료(토글 off)
+- [x] morning_exit gap_up_low/flat → morning_partial_ratio(0.5) 1차 매도(accumulate), 잔여 트레일링 위임
+- [x] 트레일링 비활성 시 부분익절도 비활성(전량 매도, 잔여 고아 방지) 코드 가드 + partial_qty<remaining 가드
+- [x] weak_gap_down/emergency 전량 유지. 47/47 PASS(PC-1~3)
+- [x] change_log.md 1줄
+
+## 실 활성화 게이트 (전 Phase 공통, 사용자 승인 필요)
+- [ ] Phase 1: `open_limit_sell_enabled=true` + restart → dry_run 검증 → 1주 관찰
+- [ ] Phase 2B/2C: `morning_trailing_enabled=true` (2C는 2B 켜야 의미)
+- [ ] Phase 3: `atr_overheat_band_enabled=true` (청산개선과 세트)
+- [ ] 전제조건: candidates.exit_shares는 2A에서 도입 완료(부분폴백 잔여 방어)
+- [ ] 실발주 후 "청산가−시가" 갭/오전 캡처 효과 측정
 
 ## Phase 3 (필터) — atr_overheat 밴드 차등 ✅ 구현 완료(토글 off)
 - [x] `signal_score_engine.py` 밴드 차등 토글 `atr_overheat_band_enabled`(default false) + `atr_overheat_band_high`(2.2)
