@@ -182,6 +182,58 @@ def test_hard_filter_atr_nan():
     print(f"  [PASS] atr_overheat=NaN → EXCLUDED")
 
 
+def test_band_disabled_keeps_hardcut():
+    """Phase 3: band_enabled=False(기본) → 극과열 2.5도 기존 하드컷으로 EXCLUDED (NO-OP)."""
+    eng = SignalScoreEngine()  # 기본 band off
+    bd = eng.score("005930", _full_l1(), _full_l2(atr_overheat=2.5), _full_l3())
+    assert bd.excluded_by_filter is True
+    assert "하드 필터" in bd.exclusion_reason
+    print("  [PASS] band off → 2.5 하드컷 EXCLUDED (기존 동작 유지)")
+
+
+def test_band_mid_overheat_blocked():
+    """Phase 3: band on → 중간과열(1.8<atr<=2.2)은 차단."""
+    eng = SignalScoreEngine(atr_overheat_band_enabled=True)
+    bd = eng.score("005930", _full_l1(), _full_l2(atr_overheat=2.0), _full_l3())
+    assert bd.excluded_by_filter is True
+    assert "중간과열 밴드" in bd.exclusion_reason
+    print(f"  [PASS] band on → 2.0 중간과열 차단 ({bd.exclusion_reason})")
+
+
+def test_band_extreme_overheat_passes():
+    """Phase 3: band on → 극과열(atr>2.2)은 통과 (최고·최안전 구간)."""
+    eng = SignalScoreEngine(atr_overheat_band_enabled=True)
+    bd = eng.score("005930", _full_l1(), _full_l2(atr_overheat=2.5), _full_l3())
+    assert bd.excluded_by_filter is False, "2.5(>2.2 극과열)는 밴드차등 시 통과해야 함"
+    print("  [PASS] band on → 2.5 극과열 통과")
+
+
+def test_band_boundary_high_blocked():
+    """Phase 3: band on → atr==band_high(2.2) 경계는 차단(<=band_high)."""
+    eng = SignalScoreEngine(atr_overheat_band_enabled=True)
+    bd = eng.score("005930", _full_l1(), _full_l2(atr_overheat=2.2), _full_l3())
+    assert bd.excluded_by_filter is True
+    print("  [PASS] band on → 2.2(=band_high) 차단")
+
+
+def test_band_normal_passes():
+    """Phase 3: band on → 정상(atr<=1.8)은 통과."""
+    eng = SignalScoreEngine(atr_overheat_band_enabled=True)
+    bd = eng.score("005930", _full_l1(), _full_l2(atr_overheat=1.5), _full_l3())
+    assert bd.excluded_by_filter is False
+    print("  [PASS] band on → 1.5 정상 통과")
+
+
+def test_band_high_below_max_raises():
+    """Phase 3: band_high < atr_overheat_max → ValueError."""
+    try:
+        SignalScoreEngine(atr_overheat_band_enabled=True, atr_overheat_max=1.8,
+                          atr_overheat_band_high=1.5)
+        assert False, "band_high<max 는 ValueError 여야 함"
+    except ValueError:
+        print("  [PASS] band_high(1.5) < max(1.8) → ValueError")
+
+
 def test_layer2_thresholds_strict():
     """Layer 2 임계값 정확성 — close_strength=0.85 (=), vol_surprise=2.0 (=) 모두 통과."""
     eng = SignalScoreEngine()
@@ -479,6 +531,12 @@ def main():
         test_hard_filter_atr_at_boundary,
         test_hard_filter_atr_none,
         test_hard_filter_atr_nan,
+        test_band_disabled_keeps_hardcut,
+        test_band_mid_overheat_blocked,
+        test_band_extreme_overheat_passes,
+        test_band_boundary_high_blocked,
+        test_band_normal_passes,
+        test_band_high_below_max_raises,
         test_layer2_thresholds_strict,
         test_layer2_below_threshold,
         test_layer1_phase2_weights_alert,

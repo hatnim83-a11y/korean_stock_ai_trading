@@ -41,10 +41,14 @@
 - [ ] gap_up_high 외 구간 1차 부분익절 + 잔여 트레일링(고점 −1.5%) 설계
 - [ ] `exit.trailing_stop_pct=-0.015` 활성화 + 폴링 루프 sell_lock 동시성 검증
 
-## Phase 3 (필터) — atr_overheat 밴드 차등
-- [ ] 별도 PLAN 분리 (진입 모듈 signal_score_engine.py)
-- [ ] 밴드 차등(1.8~2.2 차단 / 2.2+ 통과) 또는 점수 감점 전환
-- [ ] 청산 개선(Phase 1)과 세트 검증
+## Phase 3 (필터) — atr_overheat 밴드 차등 ✅ 구현 완료(토글 off)
+- [x] `signal_score_engine.py` 밴드 차등 토글 `atr_overheat_band_enabled`(default false) + `atr_overheat_band_high`(2.2)
+- [x] 필터 로직: band on 시 `max < atr <= band_high`만 차단, band_high 초과 극과열 통과. band off=하드컷 NO-OP
+- [x] `__init__` 검증(band_high>=max) + `from_settings` 매핑 + settings.yaml `score:` 3키
+- [x] 테스트 28/28 PASS (밴드 6건: NO-OP/중간차단/극과열통과/경계/정상/ValueError)
+- [x] change_log.md 1줄
+- [ ] (실적용 별도 승인) 청산 개선(Phase 1)과 세트 + 드라이런 30건 누적 검증
+- [ ] code-tester 정식 검증 (실적용 전)
 
 ## 진행 메모
 - 2026-06-15: 3문서 생성. 범위=전부(A+B+과열) phased. Phase 1부터 착수.
