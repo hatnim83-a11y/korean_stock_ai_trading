@@ -35,6 +35,7 @@ class ExitTarget:
     phase1_executed_shares: int       # 0 가능 (entered 인데 phase1만 체결 안된 케이스는 옵션 A상 불가)
     phase2_executed_price: Optional[float]
     phase2_executed_shares: int       # 0 / None 가능 (phase1 only 케이스)
+    exit_shares: int = 0              # 누적 청산수량 (부분청산, Phase 2A). 기본 0
 
     @property
     def is_phase1_only(self) -> bool:
@@ -47,10 +48,19 @@ class ExitTarget:
 
     @property
     def total_shares(self) -> int:
-        """총 보유 수량 (phase1 + phase2 합, NULL 안전)."""
+        """진입 총 수량 (phase1 + phase2 합, NULL 안전)."""
         p1 = self.phase1_executed_shares or 0
         p2 = self.phase2_executed_shares or 0
         return p1 + p2
+
+    @property
+    def remaining_shares(self) -> int:
+        """미청산 잔여 수량 = 진입총량 − 누적청산(exit_shares). 부분청산 후 잔여(Phase 2A).
+
+        force_close/트레일링은 total_shares 가 아닌 이 값으로 발주해야 이미 청산된 수량
+        재발주(과매도)를 막는다. 최소 0.
+        """
+        return max(self.total_shares - (self.exit_shares or 0), 0)
 
 
 def select_exit_targets(
@@ -72,7 +82,8 @@ def select_exit_targets(
             SELECT candidate_id, ticker, name, candidate_status,
                    entry_price, entry_amount,
                    entry_phase1_executed_price, entry_phase1_executed_shares,
-                   entry_phase2_executed_price, entry_phase2_executed_shares
+                   entry_phase2_executed_price, entry_phase2_executed_shares,
+                   COALESCE(exit_shares, 0) AS exit_shares
             FROM candidates
             WHERE trade_date = ?
               AND (
@@ -108,6 +119,7 @@ def select_exit_targets(
                 phase1_executed_shares=p1_shares,
                 phase2_executed_price=row["entry_phase2_executed_price"],
                 phase2_executed_shares=p2_shares,
+                exit_shares=int(row["exit_shares"] or 0),
             )
         )
 

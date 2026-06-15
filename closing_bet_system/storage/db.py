@@ -178,6 +178,7 @@ class ClosingBetDatabase:
             (1, "Phase 0-A: candidates/features/labels/flow_reliability 4테이블", self._migrate_v1),
             (2, "Phase 2-1: orderbook_snapshots 테이블 (호가 1단계 스냅샷)", self._migrate_v2),
             (3, "단위 2-4c: candidates entry_phase1/2 +6 컬럼 (EntryExecutor)", self._migrate_v3),
+            (4, "Phase 2-5g: candidates 부분청산 추적 (exit_shares, final_exit_time)", self._migrate_v4),
         ]
 
         pending = [(v, d, fn) for v, d, fn in migrations if v > current]
@@ -418,6 +419,38 @@ class ClosingBetDatabase:
                     cursor.execute(
                         f"ALTER TABLE candidates ADD COLUMN {col_name} {col_type}"
                     )
+
+    def _migrate_v4(self) -> None:
+        """v4: candidates 부분청산 추적 컬럼 + 기존 청산행 원자적 백필.
+
+        - ``exit_shares INTEGER DEFAULT 0``: 누적 청산수량 (부분청산 합).
+        - ``final_exit_time TIMESTAMP``: 전량청산 완료 시각 (부분 단계는 NULL).
+        - 백필(같은 트랜잭션): 기존 청산완료행(exit_time NOT NULL)을 전량청산으로 마킹
+          (exit_shares=진입수량, final_exit_time=exit_time). 이로써 select_exit_targets 가
+          잔여(remaining)를 SELECT 에 노출해도 과거 청산행이 재선택(이중매도)되지 않는다.
+          (실제 재선택 차단은 select 의 ``exit_time IS NULL`` 조건이 1차 담당 — 백필은 회계 정합용.)
+        - ADD COLUMN 은 _has_column 가드, UPDATE 는 ``COALESCE(exit_shares,0)=0`` 가드로 멱등.
+        """
+        with self.get_cursor() as cursor:
+            if not self._has_column("candidates", "exit_shares"):
+                cursor.execute(
+                    "ALTER TABLE candidates ADD COLUMN exit_shares INTEGER DEFAULT 0"
+                )
+            if not self._has_column("candidates", "final_exit_time"):
+                cursor.execute(
+                    "ALTER TABLE candidates ADD COLUMN final_exit_time TIMESTAMP"
+                )
+            # 백필: 기존 청산완료행 → 전량청산 마킹 (멱등: exit_shares 미설정 행만)
+            cursor.execute(
+                """
+                UPDATE candidates
+                SET exit_shares = COALESCE(entry_phase1_executed_shares, 0)
+                                + COALESCE(entry_phase2_executed_shares, 0),
+                    final_exit_time = exit_time
+                WHERE exit_time IS NOT NULL
+                  AND COALESCE(exit_shares, 0) = 0
+                """
+            )
 
 
 def init_db(db_path: Optional[str | Path] = None) -> ClosingBetDatabase:

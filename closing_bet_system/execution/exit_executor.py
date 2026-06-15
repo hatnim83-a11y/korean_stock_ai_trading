@@ -396,17 +396,19 @@ class ExitExecutor:
         # Phase 1 (A): 토글 ON 시 시가 지정가 + 미체결 시장가 폴백 (morning_exit 전용).
         #              emergency_stop/force_close 는 기존 시장가 경로 유지(_execute_market_sell).
         if action == ExitAction.GAP_UP_HIGH:
-            partial_qty = max(int(target.total_shares * self.settings.gap_up_high_partial_ratio), 1)
+            # Phase 2A: 1차 부분익절은 누적(accumulate=True) → exit_time 미박제 →
+            # 잔여가 force_close(또는 트레일링)에서 재선택되어 청산됨 (잔여 미청산 버그 fix).
+            partial_qty = max(int(target.remaining_shares * self.settings.gap_up_high_partial_ratio), 1)
             exit_order = await self._execute_morning_sell(
                 target=target, snap=snap, action=action, gap_rate=gap_rate,
-                quantity=partial_qty, owner=owner,
+                quantity=partial_qty, owner=owner, accumulate=True,
             )
             exit_order.is_partial = True
             return exit_order
 
         return await self._execute_morning_sell(
             target=target, snap=snap, action=action, gap_rate=gap_rate,
-            quantity=target.total_shares, owner=owner,
+            quantity=target.remaining_shares, owner=owner,
         )
 
     async def _process_force_close(
@@ -461,7 +463,6 @@ class ExitExecutor:
             finally:
                 self._pending_exit_orders.pop(target.ticker, None)
 
-        # remaining_shares = total_shares (10:30 시점에 아직 exit_time NULL → 미체결)
         entry_price = self._resolve_entry_price(target)
         if entry_price is None or entry_price <= 0:
             return CandidateExit(
@@ -470,9 +471,16 @@ class ExitExecutor:
             )
         gap_rate = (snap.open_price - entry_price) / entry_price
 
+        # Phase 2A: 부분청산 잔여(remaining)만 발주. accumulate=True → 누적 후 전량 도달 시 exit_time 박제.
+        remaining = target.remaining_shares
+        if remaining <= 0:
+            return CandidateExit(
+                candidate_id=target.candidate_id, ticker=target.ticker, name=target.name,
+                rejection_reason="already_closed",
+            )
         exit_order = await self._execute_market_sell(
             target=target, snap=snap, action=ExitAction.FLAT,   # force_close action은 단순 분류
-            gap_rate=gap_rate, quantity=target.total_shares, owner=owner,
+            gap_rate=gap_rate, quantity=remaining, owner=owner, accumulate=True,
         )
         if cancelled:
             exit_order.rejection_reason = exit_order.rejection_reason or "force_close_after_cancel"
@@ -489,20 +497,22 @@ class ExitExecutor:
         gap_rate: float,
         quantity: int,
         owner: str,
+        accumulate: bool = False,
     ) -> CandidateExit:
         """morning_exit 발주 디스패처 (Phase 1 A).
 
         토글 ON → 시가 지정가 + 미체결 시장가 폴백. OFF → 기존 시장가 경로(NO-OP).
+        accumulate=True (gap_up_high 1차 부분익절 등) → log_partial_exit 누적.
         emergency_stop/force_close 는 이 디스패처를 거치지 않고 _execute_market_sell 직접 사용.
         """
         if self.settings.open_limit_sell_enabled:
             return await self._execute_limit_sell_with_fallback(
                 target=target, snap=snap, action=action, gap_rate=gap_rate,
-                quantity=quantity, owner=owner,
+                quantity=quantity, owner=owner, accumulate=accumulate,
             )
         return await self._execute_market_sell(
             target=target, snap=snap, action=action, gap_rate=gap_rate,
-            quantity=quantity, owner=owner,
+            quantity=quantity, owner=owner, accumulate=accumulate,
         )
 
     async def _execute_limit_sell_with_fallback(
@@ -513,6 +523,7 @@ class ExitExecutor:
         gap_rate: float,
         quantity: int,
         owner: str,
+        accumulate: bool = False,
     ) -> CandidateExit:
         """시가 지정가 매도 → 미체결/부분체결 시 잔량 시장가 폴백 (Phase 1 A).
 
@@ -587,6 +598,7 @@ class ExitExecutor:
             await self._safe_log_exit(
                 exit_order, target.candidate_id,
                 float(limit_fill.executed_price), int(limit_fill.executed_shares),
+                accumulate=accumulate,
             )
             return exit_order
 
@@ -613,6 +625,7 @@ class ExitExecutor:
         return await self._fallback_market_remainder(
             exit_order=exit_order, target=target, quantity=quantity,
             limit_exec_shares=limit_exec_shares, limit_exec_price=limit_exec_price,
+            accumulate=accumulate,
         )
 
     async def _fallback_market_remainder(
@@ -623,6 +636,7 @@ class ExitExecutor:
         quantity: int,
         limit_exec_shares: int,
         limit_exec_price: int,
+        accumulate: bool = False,
     ) -> CandidateExit:
         """지정가 체결분 + 잔량 시장가 → log_exit 1회(가중평균가·총 체결수량)."""
         remaining = quantity - limit_exec_shares
@@ -670,10 +684,11 @@ class ExitExecutor:
         )
         await self._safe_log_exit(
             exit_order, target.candidate_id, float(avg_price), int(total_exec),
+            accumulate=accumulate,
         )
-        # 부분 미청산 잔량 가시성 경보 — exit_time 박제로 force_close가 못 잡으므로 텔레그램 수동 확인용
-        # (근본 해결: candidates.exit_shares 컬럼 + force_close 잔량 재조회 — 실발주 활성화 전제조건)
-        if total_exec < quantity:
+        # 부분 미청산 잔량 가시성 경보 — (accumulate=False 경로) exit_time 박제로 force_close가
+        # 못 잡으므로 텔레그램 수동 확인용. accumulate=True 면 exit_shares 누적으로 잔여 재선택됨.
+        if total_exec < quantity and not accumulate:
             exit_order.rejection_reason = (
                 exit_order.rejection_reason or "partial_fallback_pending"
             )
@@ -681,12 +696,22 @@ class ExitExecutor:
 
     async def _safe_log_exit(
         self, exit_order: CandidateExit, candidate_id: int, price: float, shares: int,
+        accumulate: bool = False,
     ) -> None:
-        """log_exit 호출 + 예외 흡수 (cost_engine 비용 분해 + UPDATE)."""
+        """청산 기록 + 예외 흡수 (cost_engine 비용 분해 + UPDATE).
+
+        accumulate=True (부분청산: gap_up_high 1차 / force_close 잔여 / 트레일링) →
+        log_partial_exit(누적, 전량 도달 시에만 exit_time 박제). False → log_exit(전량 1회).
+        """
         try:
-            await asyncio.to_thread(
-                self.candidate_logger.log_exit, candidate_id, price, None, shares,
-            )
+            if accumulate:
+                await asyncio.to_thread(
+                    self.candidate_logger.log_partial_exit, candidate_id, price, shares,
+                )
+            else:
+                await asyncio.to_thread(
+                    self.candidate_logger.log_exit, candidate_id, price, None, shares,
+                )
         except (LookupError, ValueError) as exc:
             logger.error(f"[exit_executor] log_exit 실패 cid={candidate_id}: {exc}")
             exit_order.rejection_reason = exit_order.rejection_reason or "log_exit_fail"
@@ -699,8 +724,12 @@ class ExitExecutor:
         gap_rate: float,
         quantity: int,
         owner: str,
+        accumulate: bool = False,
     ) -> CandidateExit:
-        """시장가 매도 발주 + 체결 폴링 + log_exit 호출."""
+        """시장가 매도 발주 + 체결 폴링 + 청산 기록.
+
+        accumulate=True (부분청산: gap_up_high 1차 / force_close 잔여) → log_partial_exit.
+        """
         exit_order = CandidateExit(
             candidate_id=target.candidate_id, ticker=target.ticker, name=target.name,
             action=action, target_shares=quantity, gap_rate=gap_rate,
@@ -751,20 +780,12 @@ class ExitExecutor:
         if fill is None or fill.executed_shares <= 0:
             return exit_order
 
-        # log_exit 호출 (cost_engine 비용 분해 + UPDATE)
-        try:
-            await asyncio.to_thread(
-                self.candidate_logger.log_exit,
-                target.candidate_id,
-                float(fill.executed_price),
-                None,                      # exit_time = now_kst()
-                int(fill.executed_shares),
-            )
-        except (LookupError, ValueError) as exc:
-            logger.error(
-                f"[exit_executor] log_exit 실패 cid={target.candidate_id}: {exc}"
-            )
-            exit_order.rejection_reason = "log_exit_fail"
+        # 청산 기록 (cost_engine 비용 분해 + UPDATE). 부분청산이면 누적(log_partial_exit).
+        await self._safe_log_exit(
+            exit_order, target.candidate_id,
+            float(fill.executed_price), int(fill.executed_shares),
+            accumulate=accumulate,
+        )
         return exit_order
 
     async def _wait_cancel_confirm(self, order_id: str) -> bool:

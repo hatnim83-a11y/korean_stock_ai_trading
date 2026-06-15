@@ -388,13 +388,13 @@ class CandidateLogger:
             cursor.execute(
                 """
                 UPDATE candidates
-                SET exit_price=?, exit_time=?,
+                SET exit_price=?, exit_time=?, exit_shares=?, final_exit_time=?,
                     buy_commission=?, sell_commission=?, transaction_tax=?,
                     estimated_slippage=?, net_pnl_pct=?
                 WHERE candidate_id=?
                 """,
                 (
-                    float(exit_price), ts,
+                    float(exit_price), ts, int(shares), ts,
                     cost_payload["buy_commission"], cost_payload["sell_commission"],
                     cost_payload["transaction_tax"], cost_payload["estimated_slippage"],
                     cost_payload["net_pnl_pct"],
@@ -411,6 +411,118 @@ class CandidateLogger:
             candidate_id=candidate_id,
             cost_breakdown=breakdown,
             saved_columns={**cost_payload, "exit_price": float(exit_price), "exit_time": ts},
+        )
+
+    def log_partial_exit(
+        self,
+        candidate_id: int,
+        exit_price: float,
+        exit_shares: int,
+        exit_time: Optional[datetime] = None,
+        slippage_rate: Optional[float] = None,
+    ) -> ExitResult:
+        """부분청산 누적 기록 (단위 2-5g Phase 2A). 같은 candidate 다중 호출 가능.
+
+        - ``exit_shares`` 누적(old+this), ``exit_price`` 가중평균 갱신.
+        - 누적이 진입 총수량 도달 시 전량청산: ``exit_time`` + ``final_exit_time`` 박제.
+          **미도달(부분)이면 exit_time 을 박제하지 않음** → select_exit_targets 의
+          ``exit_time IS NULL`` 가 잔여를 계속 매도대상으로 인식(gap_up_high 잔여 미청산 버그 fix).
+        - 비용/net_pnl_pct 는 누적 청산수량·가중평균가 기준 재계산(완결성).
+
+        log_exit(전량 1회)과 달리 부분→전량 핸드오프(09:02 1차 + 트레일링/force_close 잔여)에 사용.
+        """
+        if not isinstance(candidate_id, int) or isinstance(candidate_id, bool) or candidate_id <= 0:
+            raise ValueError(f"candidate_id 는 양의 정수: got {candidate_id!r}")
+        if exit_price is None or float(exit_price) <= 0:
+            raise ValueError(f"exit_price 는 양수: got {exit_price}")
+        if not isinstance(exit_shares, int) or isinstance(exit_shares, bool) or exit_shares <= 0:
+            raise ValueError(f"exit_shares 는 양의 정수: got {exit_shares!r}")
+
+        row = self.get_candidate(candidate_id)
+        if row is None:
+            raise LookupError(f"candidate_id={candidate_id} 미존재 (log_partial_exit)")
+        entry_price = row.get("entry_price")
+        if entry_price is None or entry_price <= 0:
+            raise LookupError(
+                f"candidate_id={candidate_id} entry_price 없음 (status={row.get('candidate_status')!r}). "
+                f"먼저 mark_entered 호출 필요."
+            )
+
+        total_entered = int(row.get("entry_phase1_executed_shares") or 0) + int(
+            row.get("entry_phase2_executed_shares") or 0
+        )
+        old_exit_shares = int(row.get("exit_shares") or 0)
+        old_exit_price = float(row.get("exit_price") or 0.0)
+
+        # 잔여 초과분 클립 (총수량 모르면=0 클립 안 함)
+        this_shares = exit_shares
+        if total_entered > 0:
+            remaining = max(total_entered - old_exit_shares, 0)
+            if remaining <= 0:
+                raise LookupError(
+                    f"candidate_id={candidate_id} 잔여 0 (이미 전량청산: "
+                    f"exit_shares={old_exit_shares}/{total_entered})"
+                )
+            this_shares = min(exit_shares, remaining)
+
+        new_exit_shares = old_exit_shares + this_shares
+        # 가중평균 청산가
+        if old_exit_shares > 0 and old_exit_price > 0:
+            avg_exit_price = (
+                old_exit_shares * old_exit_price + this_shares * float(exit_price)
+            ) / new_exit_shares
+        else:
+            avg_exit_price = float(exit_price)
+
+        is_full = total_entered > 0 and new_exit_shares >= total_entered
+
+        # 누적 청산수량·가중평균가 기준 비용/PnL 재계산
+        breakdown = self.cost_engine.compute_pnl(
+            buy_price=float(entry_price),
+            sell_price=float(avg_exit_price),
+            shares=int(new_exit_shares),
+            slippage_rate=slippage_rate,
+        )
+        cost_payload = self.cost_engine.to_db_payload(breakdown)
+
+        ts = (exit_time or now_kst()).isoformat()
+        final_ts = ts if is_full else None  # exit_time/final_exit_time 은 전량청산 시에만
+
+        with self.db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE candidates
+                SET exit_shares=?, exit_price=?,
+                    buy_commission=?, sell_commission=?, transaction_tax=?,
+                    estimated_slippage=?, net_pnl_pct=?,
+                    exit_time=COALESCE(?, exit_time),
+                    final_exit_time=COALESCE(?, final_exit_time)
+                WHERE candidate_id=?
+                """,
+                (
+                    int(new_exit_shares), float(avg_exit_price),
+                    cost_payload["buy_commission"], cost_payload["sell_commission"],
+                    cost_payload["transaction_tax"], cost_payload["estimated_slippage"],
+                    cost_payload["net_pnl_pct"],
+                    final_ts, final_ts,
+                    candidate_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise LookupError(f"candidate_id={candidate_id} UPDATE 영향 없음 (log_partial_exit)")
+        logger.info(
+            f"[candidate_logger] candidate_id={candidate_id} partial_exit "
+            f"{this_shares}주 (누적 {new_exit_shares}/{total_entered}, "
+            f"avg={avg_exit_price:,.0f}, full={is_full})"
+        )
+        return ExitResult(
+            candidate_id=candidate_id,
+            cost_breakdown=breakdown,
+            saved_columns={
+                **cost_payload, "exit_price": float(avg_exit_price),
+                "exit_shares": int(new_exit_shares),
+                "exit_time": final_ts, "final_exit_time": final_ts,
+            },
         )
 
     # ===== 4. log_labels (T+1 09:30 — INSERT OR REPLACE) =====
