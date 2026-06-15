@@ -77,6 +77,11 @@ DEFAULT_CLOSE_STRENGTH_MIN = 0.85
 DEFAULT_VOLUME_SURPRISE_MIN = 2.0
 DEFAULT_CLOSING_BUY_SELL_RATIO_MIN = 1.2
 DEFAULT_ATR_OVERHEAT_MAX = 1.8        # 하드 필터 (PRD 5-Layer 2)
+# Phase 3 (2026-06-15): 과열 밴드 차등. 전수분석 결과 과열도가 비단조 —
+# 1.8~2.2 중간과열이 최악(stop위험↑), 2.2+ 극과열이 최고·최안전(연속 모멘텀).
+# band_enabled=True → band_low(=ATR_OVERHEAT_MAX) < atr <= band_high 만 차단, band_high 초과는 통과.
+DEFAULT_ATR_OVERHEAT_BAND_ENABLED = False  # 기본 OFF → 기존 하드컷(>1.8) 유지(NO-OP)
+DEFAULT_ATR_OVERHEAT_BAND_HIGH = 2.2       # 극과열 통과 하한
 
 # Layer 3 임계값 (PRD 5-Layer 3 + 6-1)
 DEFAULT_THEME_LEADERSHIP_RANK_MAX = 3  # 테마 내 상승률 상위 3위 (PRD 5-Layer 3)
@@ -187,6 +192,8 @@ class SignalScoreEngine:
         volume_surprise_min: float = DEFAULT_VOLUME_SURPRISE_MIN,
         closing_buy_sell_ratio_min: float = DEFAULT_CLOSING_BUY_SELL_RATIO_MIN,
         atr_overheat_max: float = DEFAULT_ATR_OVERHEAT_MAX,
+        atr_overheat_band_enabled: bool = DEFAULT_ATR_OVERHEAT_BAND_ENABLED,
+        atr_overheat_band_high: float = DEFAULT_ATR_OVERHEAT_BAND_HIGH,
         theme_leadership_rank_max: int = DEFAULT_THEME_LEADERSHIP_RANK_MAX,
     ):
         # 가중치 검증 (음수 차단)
@@ -214,6 +221,13 @@ class SignalScoreEngine:
         self.volume_surprise_min = float(volume_surprise_min)
         self.closing_buy_sell_ratio_min = float(closing_buy_sell_ratio_min)
         self.atr_overheat_max = float(atr_overheat_max)
+        self.atr_overheat_band_enabled = bool(atr_overheat_band_enabled)
+        self.atr_overheat_band_high = float(atr_overheat_band_high)
+        if self.atr_overheat_band_enabled and self.atr_overheat_band_high < self.atr_overheat_max:
+            raise ValueError(
+                f"atr_overheat_band_high({self.atr_overheat_band_high}) 는 "
+                f"atr_overheat_max({self.atr_overheat_max}) 이상이어야 함"
+            )
         self.theme_leadership_rank_max = int(theme_leadership_rank_max)
 
     # ===== settings.yaml 진입점 =====
@@ -244,6 +258,12 @@ class SignalScoreEngine:
                 "closing_buy_sell_ratio_min", DEFAULT_CLOSING_BUY_SELL_RATIO_MIN
             ),
             atr_overheat_max=score_settings.get("atr_overheat_max", DEFAULT_ATR_OVERHEAT_MAX),
+            atr_overheat_band_enabled=score_settings.get(
+                "atr_overheat_band_enabled", DEFAULT_ATR_OVERHEAT_BAND_ENABLED
+            ),
+            atr_overheat_band_high=score_settings.get(
+                "atr_overheat_band_high", DEFAULT_ATR_OVERHEAT_BAND_HIGH
+            ),
             theme_leadership_rank_max=score_settings.get(
                 "theme_leadership_rank_max", DEFAULT_THEME_LEADERSHIP_RANK_MAX
             ),
@@ -350,6 +370,16 @@ class SignalScoreEngine:
             # 변환 실패 (문자열/bool/NaN/inf) → EXCLUDED
             excluded = True
             excl_reason = f"atr_overheat 타입/값 오류: {atr_oh_raw!r}"
+        elif self.atr_overheat_band_enabled:
+            # Phase 3 밴드 차등: band_low(=max) < atr <= band_high 만 차단(최악 중간과열),
+            # band_high 초과(극과열)는 통과 — 연속 모멘텀 최강·최안전 (2026-06-15 전수분석)
+            if self.atr_overheat_max < atr_oh_f <= self.atr_overheat_band_high:
+                excluded = True
+                excl_reason = (
+                    f"atr_overheat={atr_oh_f:.3f} in ({self.atr_overheat_max}, "
+                    f"{self.atr_overheat_band_high}] 중간과열 밴드 차단"
+                )
+            # atr_oh_f > band_high → 극과열 통과 (excluded 유지 False)
         elif atr_oh_f > self.atr_overheat_max:
             excluded = True
             excl_reason = (
