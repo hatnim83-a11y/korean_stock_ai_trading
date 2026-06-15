@@ -195,6 +195,8 @@ morning_exit:
   polling_interval_sec: 5                  # fill_checker 폴링 간격
   fill_check_deadline_sec: 60              # 시장가 매도는 빠름, 1분 cut
   cancel_confirm_deadline_sec: 30          # P1-4 force_close 미체결 취소 확인 대기
+  open_limit_sell_enabled: false           # Phase 1(A) 2026-06-15: 시가 지정가 매도 + 미체결 시장가 폴백. false=기존 시장가 NO-OP. 실발주 전환은 사용자 승인 필요
+  limit_fill_deadline_sec: 30              # 지정가 체결 대기 cut. 09:02 발주→09:05 스윙매수 전 폴백 수렴 위해 보수적 30초
 
 # ─── Kill Switch (Phase 3에서 활성화) ────────────────────────────────────
 kill_switch:

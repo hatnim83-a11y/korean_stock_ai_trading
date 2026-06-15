@@ -1081,7 +1081,62 @@ class MockOrderApi:
 
         logger.info(f"[모의] 매도 주문: {stock_code} {quantity}주 @ {mock_price:,}원")
         return order
-    
+
+    def sell_limit_order(self, stock_code: str, quantity: int, price: int) -> dict:
+        """모의 지정가 매도 — scenario_fill_ratio 기반 부분체결 시뮬 (지정가 폴백 테스트용).
+
+        buy_limit_order 와 대칭: 체결분만큼 포지션 차감 + 현금 가산, _pending_orders 등록
+        (get_order_status/fill_checker 가 부분체결/미체결을 조회). scenario_next_error 1회성 소비.
+        """
+        if self.scenario_next_error:
+            err = self.scenario_next_error
+            self.scenario_next_error = None  # 1회성 소비
+            return {"success": False, "order_id": "", "stock_code": stock_code, "message": err}
+
+        if stock_code not in self.positions:
+            return {"success": False, "order_id": "", "stock_code": stock_code, "message": "보유 종목 없음"}
+
+        pos = self.positions[stock_code]
+        if pos["quantity"] < quantity:
+            return {"success": False, "order_id": "", "stock_code": stock_code, "message": "수량 부족"}
+
+        order_id = self._generate_order_id()
+        filled_qty = int(quantity * self.scenario_fill_ratio)
+        filled_price = price if filled_qty > 0 else 0
+
+        # 체결된 수량만큼 포지션 차감 / 현금 가산
+        if filled_qty > 0:
+            self.cash += filled_price * filled_qty
+            pos["quantity"] -= filled_qty
+            if pos["quantity"] == 0:
+                del self.positions[stock_code]
+
+        self._pending_orders[order_id] = {
+            "stock_code": stock_code,
+            "quantity": quantity,
+            "price": price,
+            "filled_qty": filled_qty,
+            "filled_price": filled_price,
+        }
+
+        order = {
+            "success": True,
+            "order_id": order_id,
+            "order_time": now_kst().strftime("%H%M%S"),
+            "stock_code": stock_code,
+            "quantity": quantity,
+            "price": price,
+            "action": "매도",
+            "order_type": "지정가",
+            "message": "모의 지정가 매도 접수",
+        }
+        self.orders.append(order)
+        logger.info(
+            f"[모의] 지정가 매도: {stock_code} {quantity}주 @ {price:,}원 "
+            f"(시나리오 체결 {filled_qty}주, {self.scenario_fill_ratio:.0%})"
+        )
+        return order
+
     def get_balance(self) -> dict:
         positions = []
         total_value = self.cash
