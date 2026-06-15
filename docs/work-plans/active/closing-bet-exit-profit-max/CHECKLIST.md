@@ -45,12 +45,14 @@
 - [x] change_log.md 1줄
 - 잔여 주의(후속): gap_up_high_partial_ratio 주석 50%→60% 정정 / 부분청산중 get_closed_today 미집계(설계상 허용)
 
-## Phase 2B — 트레일링 사이클 (다음 단위, 2A 기반)
-- [ ] `run_morning_trailing` IntervalTrigger(09:05~10:25, 30초, max_instances=1, coalesce)
-- [ ] `execute_trailing_stop`: remaining 보유분 → get_snapshot → `current ≤ high×(1-1.5%)` + 활성화가드 + snap유효성(high/current>0)
-- [ ] sell_lock 핸드오프(부분매도 후 해제 → 트레일링 own-owner) — morning_exit lock이 트레일링 차단하지 않게
-- [ ] 토글 morning_trailing_enabled(default false) + trailing_stop_pct 활성화
-- [ ] 09:05 첫폴링 즉시매도 방지(활성화가드: 고점이 진입가 대비 +N% 시에만)
+## Phase 2B — 트레일링 사이클 ✅ 구현 완료(토글 off)
+- [x] `run_morning_trailing` IntervalTrigger(30초, max_instances=1, coalesce) + 내부 윈도우 가드(09:05~10:25, is_trading_day)
+- [x] `execute_trailing_stop`/`_process_trailing_stop`: remaining 보유분 → get_snapshot → `current ≤ high×(1+trailing_stop_pct)` + 활성화가드(high≥진입×1.01) + snap유효성(high/current>0)
+- [x] sell_lock 핸드오프(release→acquire owner "closing_bet:morning_trailing") — morning_exit lock 차단 해소
+- [x] 토글 morning_trailing_enabled(default false, 잡 미등록 NO-OP) + trailing_stop_pct(-0.015, exit:) + trailing_activation_pct(0.01)
+- [x] 텔레그램 "오전 TRAILING STOP" 레이블 + send_trailing_result
+- [x] 44/44 PASS(TR-1~6) + code-tester 심각0 + change_log
+- 잔여 주의(후속): trailing↔force_close 10:25:30 race(KIS 잔고로 차단, 저위험) / sell_lock owner 미검증 release(force_close 동일 패턴)
 
 ## Phase 2C — 1차 부분익절 확대 (2B 활성 시, 코드 가드)
 - [ ] morning_exit gap_up 구간 morning_partial_ratio 매도, 잔여 트레일링 위임

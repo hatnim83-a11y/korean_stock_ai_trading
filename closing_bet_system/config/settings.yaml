@@ -200,6 +200,8 @@ morning_exit:
   cancel_confirm_deadline_sec: 30          # P1-4 force_close 미체결 취소 확인 대기
   open_limit_sell_enabled: false           # Phase 1(A) 2026-06-15: 시가 지정가 매도 + 미체결 시장가 폴백. false=기존 시장가 NO-OP. 실발주 전환은 사용자 승인 필요
   limit_fill_deadline_sec: 30              # 지정가 체결 대기 cut. 09:02 발주→09:05 스윙매수 전 폴백 수렴 위해 보수적 30초
+  morning_trailing_enabled: false          # Phase 2B 2026-06-15: 09:05~10:25 오전 트레일링(잔여 보유분). false=잡 미등록 NO-OP. 실적용은 사용자 승인
+  trailing_activation_pct: 0.01            # 당일 고가가 진입가 +1% 넘은 뒤에만 트레일 활성(손실종목 조기청산 방지). trailing_stop_pct는 exit: 섹션(-0.015) 사용
 
 # ─── Kill Switch (Phase 3에서 활성화) ────────────────────────────────────
 kill_switch:

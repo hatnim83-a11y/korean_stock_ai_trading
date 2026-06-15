@@ -954,6 +954,128 @@ def test_EX_37_gap_up_high_partial_then_force_close_remaining():
         db.close()
 
 
+# ===== TR-1~6: Phase 2B 오전 트레일링 =====
+
+
+def _trailing_settings(**over):
+    base = dict(
+        enabled=True, dry_run=False, morning_trailing_enabled=True,
+        trailing_stop_pct=-0.015, trailing_activation_pct=0.01,
+        polling_interval_sec=0.01, fill_check_deadline_sec=0.03, order_submit_sleep_sec=0.0,
+    )
+    base.update(over)
+    return ExitExecutorSettings(**base)
+
+
+def _entered_db(td_dir, *, price=75_000.0, shares=10):
+    db = _make_db(Path(td_dir))
+    cid = _insert_candidate(db, ticker="005930")
+    _set_entered(db, cid, price=price, shares=shares)
+    return db, cid
+
+
+def test_TR_1_toggle_off_noop():
+    """TR-1: morning_trailing_enabled=False → NO-OP (get_snapshot/매도 미발생)."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        ex = _make_executor(
+            db, settings=_trailing_settings(morning_trailing_enabled=False),
+            snap=_snap(open_price=76_000, high=80_000, current=78_000),
+            fill_status=_fill(qty=10, exec_qty=10, exec_price=78_000),
+        )
+        r = _run(ex.execute_trailing_stop("2026-05-15"))
+        assert r.total_targets == 0
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        print("✅ TR-1 토글 OFF → NO-OP")
+        db.close()
+
+
+def test_TR_2_trigger_sells_remaining():
+    """TR-2: 고가≥진입+1% AND 현재≤고가×0.985 → 잔여 전량 청산(전량→exit_time 박제)."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        # entry 75000, high 80000(≥75750), trigger 80000×0.985=78800, current 78000(≤78800)
+        ex = _make_executor(
+            db, settings=_trailing_settings(),
+            snap=_snap(open_price=76_000, high=80_000, low=75_000, current=78_000),
+            fill_status=_fill(qty=10, exec_qty=10, exec_price=78_000),
+        )
+        r = _run(ex.execute_trailing_stop("2026-05-15"))
+        assert r.filled == 1
+        ex.kis_order_api.sell_market_order.assert_called_once()
+        assert ex.kis_order_api.sell_market_order.call_args[0][1] == 10  # 잔여 전량
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["exit_shares"] == 10
+        assert row["exit_time"] is not None
+        print("✅ TR-2 트레일 발동 → 잔여 전량 청산")
+        db.close()
+
+
+def test_TR_3_activation_guard_holds():
+    """TR-3: 당일 고가가 진입가 +1% 미달 → 트레일 비활성(보유, force_close 위임)."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        # high 75500 < 75750 → 활성화 가드 미충족
+        ex = _make_executor(
+            db, settings=_trailing_settings(),
+            snap=_snap(open_price=75_200, high=75_500, low=74_000, current=74_500),
+            fill_status=_fill(qty=10, exec_qty=10),
+        )
+        r = _run(ex.execute_trailing_stop("2026-05-15"))
+        assert r.total_targets == 0
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        print("✅ TR-3 활성화 가드 미충족 → 보유")
+        db.close()
+
+
+def test_TR_4_above_trigger_holds():
+    """TR-4: 현재가가 트리거가 위(고점 부근) → 보유 지속(매도 안함)."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        # high 80000, trigger 78800, current 79500 (>78800) → 보유
+        ex = _make_executor(
+            db, settings=_trailing_settings(),
+            snap=_snap(open_price=76_000, high=80_000, low=75_000, current=79_500),
+            fill_status=_fill(qty=10, exec_qty=10),
+        )
+        r = _run(ex.execute_trailing_stop("2026-05-15"))
+        assert r.total_targets == 0
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        print("✅ TR-4 고점 부근 유지 → 보유")
+        db.close()
+
+
+def test_TR_5_invalid_snap_skips():
+    """TR-5: snap current/high 0 → 트리거 평가 스킵(오발동 차단)."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        ex = _make_executor(
+            db, settings=_trailing_settings(),
+            snap=_snap(open_price=76_000, high=80_000, low=0, current=0),  # current=0
+            fill_status=_fill(qty=10, exec_qty=10),
+        )
+        r = _run(ex.execute_trailing_stop("2026-05-15"))
+        assert r.total_targets == 0
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        print("✅ TR-5 snap 무효(current=0) → 스킵")
+        db.close()
+
+
+def test_TR_6_snap_none_skips():
+    """TR-6: get_snapshot None → 스킵."""
+    with tempfile.TemporaryDirectory() as td:
+        db, cid = _entered_db(td)
+        ex = _make_executor(
+            db, settings=_trailing_settings(), snap=None,
+            fill_status=_fill(qty=10, exec_qty=10),
+        )
+        r = _run(ex.execute_trailing_stop("2026-05-15"))
+        assert r.total_targets == 0
+        ex.kis_order_api.sell_market_order.assert_not_called()
+        print("✅ TR-6 snap None → 스킵")
+        db.close()
+
+
 # ===== Runner =====
 
 
@@ -997,6 +1119,12 @@ def main():
         test_EX_35_open_limit_dry_run_no_kis,
         test_EX_36_open_limit_submit_fail_market_fallback,
         test_EX_37_gap_up_high_partial_then_force_close_remaining,
+        test_TR_1_toggle_off_noop,
+        test_TR_2_trigger_sells_remaining,
+        test_TR_3_activation_guard_holds,
+        test_TR_4_above_trigger_holds,
+        test_TR_5_invalid_snap_skips,
+        test_TR_6_snap_none_skips,
     ]
     print(f"\n=== ExitExecutor 단위 테스트 — {len(tests)}건 실행 ===\n")
     fails = []

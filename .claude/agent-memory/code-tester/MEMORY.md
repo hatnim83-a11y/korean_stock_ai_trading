@@ -390,6 +390,18 @@
 - 13개 단위 테스트 전체 PASS 확인 (2026-05-21 실행 완료)
 - py_compile: atr_calculator.py/buy_lock.py/portfolio_monitor_v2.py/trading_engine.py/database.py 모두 통과
 
+### Phase 2B 오전 트레일링 (exit_executor + main_orchestrator, 2026-06-15 검증)
+- 44/44 PASS (EX-1~37 + TR-1~6). py_compile 양 파일 PASS.
+- **sell_lock unconditional release 이슈 (P1)**: `_process_trailing_stop`의 `sell_lock.release(ticker)` 는 owner 체크 없이 해제. 스윙봇 sell_lock 보유 중에도 해제 후 morning_trailing acquire 가능. 단 종가베팅과 스윙 종목 중복이 없는 한 실전 발생 불가 (수동 /buy로 겹칠 경우 이론적). force_close도 동일 패턴(설계 일관성).
+- **trailing vs force_close race (P2)**: 10:25:30 trailing 마지막 폴링 발동 → fill_poll 60초 중 10:30 force_close 발화 → remaining>0 → 중복 발주. KIS 잔고 초과 거절이 최후 방어(이중체결 불가). fill_check_deadline_sec=60초 줄이면 race window 축소 가능.
+- **텔레그램 레이블 오표기 (P2)**: `execute_trailing_stop`가 `send_morning_exit_result` 재사용 → 텔레그램 메시지 "09:30 MORNING EXIT" 표기(트레일링 매도임에도). 수정: `_CYCLE_LABELS`에 `morning_trailing` 추가 + `send_trailing_result` 신설 권장.
+- **register_jobs 로그 카운트 (P3)**: trailing OFF 시 실 등록 7건인데 로그는 항상 "8건" 출력(line 1205). 기능 무관.
+- **윈도우 경계 초단위 이탈**: time_cls(10, 25) 비교는 HH:MM:SS 기준. 10:25:30 폴링은 차단. 마지막 유효 폴링은 10:25:00 이전 발화분만. 설계 의도와 일치.
+- **trade_date 일관성 확인**: trailing/morning_exit/force_close 모두 `now_kst().date() - timedelta(days=1)` 동일 계산. 월요일(today=Monday, trade_date=Sunday)의 경우 DB에 일요일 종목이 없으므로 실전 무해.
+- **재시작 일관성**: snap.high는 KIS 실시간 조회(stck_hgpr) → 재시작 후에도 일관성 유지. DB exit_time NOT NULL 종목은 select_exit_targets에서 자동 제외.
+- **토글 이중가드 설계 정상**: settings.yaml morning_trailing_enabled=false → 잡 미등록(register_jobs 조건부) + execute_trailing_stop 내부 guard(NO-OP) 이중 보호.
+- **하드코딩 점검**: trailing_stop_pct(-0.015)/trailing_activation_pct(0.01)은 ExitExecutorSettings 기본값 + settings.yaml exit:/morning_exit: 섹션에서 매핑됨. 윈도우 시간상수 MORNING_TRAILING_START_HOUR/MINUTE 등 모두 모듈 레벨 상수로 분리.
+
 ### 전체 검증 완료 파일 목록
 - 상세: `review-history.md`
 - 테마 파이프라인 상세: `theme-pipeline-review.md`

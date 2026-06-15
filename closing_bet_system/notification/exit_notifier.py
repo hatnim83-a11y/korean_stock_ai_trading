@@ -32,6 +32,7 @@ _SEPARATOR = "━" * 22
 _CYCLE_LABELS = {
     "emergency_stop": "09:01 EMERGENCY STOP",
     "morning_exit": "09:30 MORNING EXIT",
+    "morning_trailing": "오전 TRAILING STOP",
     "force_close": "10:30 FORCE CLOSE",
 }
 
@@ -64,6 +65,10 @@ class ExitNotifier:
     def send_force_close_result(self, result: "ExitResult", dry_run: bool) -> bool:
         """10:30 force_close 결과."""
         return self._send_result(result, cycle="force_close", dry_run=dry_run)
+
+    def send_trailing_result(self, result: "ExitResult", dry_run: bool) -> bool:
+        """09:05~10:25 오전 트레일링 결과 (Phase 2B)."""
+        return self._send_result(result, cycle="morning_trailing", dry_run=dry_run)
 
     # ===== Internal dispatch =====
 

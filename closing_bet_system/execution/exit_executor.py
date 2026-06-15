@@ -82,6 +82,12 @@ class ExitExecutorSettings:
     # 지정가 체결 대기 cut. 09:02 morning_exit → 09:05 스윙매수 전 폴백 수렴 위해 보수적 30초
     limit_fill_deadline_sec: float = 30.0
 
+    # Phase 2B — 오전 트레일링 (09:05~10:25 폴링, 잔여 보유분 대상)
+    # 토글 OFF(기본) → run_morning_trailing 잡 미등록 NO-OP
+    morning_trailing_enabled: bool = False
+    trailing_stop_pct: float = -0.015         # 당일 고가 대비 -1.5% 이탈 시 잔여 청산
+    trailing_activation_pct: float = 0.01     # 당일 고가가 진입가 +1% 넘은 뒤에만 트레일 활성(손실종목 조기청산 방지)
+
 
 # ===== Result dataclass =====
 
@@ -291,6 +297,92 @@ class ExitExecutor:
             self.exit_notifier.send_force_close_result, result, self.settings.dry_run,
         )
         return result
+
+    async def execute_trailing_stop(self, trade_date: str) -> ExitResult:
+        """09:05~10:25 오전 트레일링 (Phase 2B). 잔여 보유분(remaining>0) 대상.
+
+        토글 OFF(morning_trailing_enabled=False) → NO-OP. IntervalTrigger 가 30초마다 호출.
+        각 폴링: snap.high(KIS 당일 고가) 대비 현재가가 trailing_stop_pct 이탈 + 활성화 가드
+        충족 시 잔여 전량 청산(log_partial_exit 누적 → 전량 도달 시 exit_time 박제).
+        """
+        result = ExitResult(trade_date=trade_date, cycle="morning_trailing")
+        if not self.settings.enabled or not self.settings.morning_trailing_enabled:
+            return result  # NO-OP (잡 미등록이 1차, 이중 가드)
+
+        targets = await asyncio.to_thread(
+            select_exit_targets, self.candidate_logger, trade_date,
+        )
+        # 잔여 보유분만 (full 청산된 종목은 exit_time 으로 이미 제외됨)
+        targets = [t for t in targets if t.remaining_shares > 0]
+        if not targets:
+            return result
+
+        for target in targets:
+            try:
+                exit_order = await self._process_trailing_stop(target, trade_date)
+                if exit_order is None:
+                    continue  # 트리거 미충족 → 보유 지속 (다음 폴링 재평가)
+                result.orders.append(exit_order)
+                result.total_targets += 1
+                if exit_order.fill_status and exit_order.fill_status.executed_shares > 0:
+                    result.filled += 1
+                else:
+                    result.unfilled += 1
+            except Exception as exc:
+                msg = f"{target.ticker}: {type(exc).__name__}: {exc}"
+                logger.error(f"[exit_executor] morning_trailing 처리 실패: {msg}")
+                result.errors.append(msg)
+
+        if result.filled > 0:
+            self._log_swing_capital_return(result, cycle="morning_trailing")
+            await asyncio.to_thread(
+                self.exit_notifier.send_trailing_result, result, self.settings.dry_run,
+            )
+        return result
+
+    async def _process_trailing_stop(
+        self, target: ExitTarget, trade_date: str
+    ) -> Optional[CandidateExit]:
+        """단일 종목 트레일링 평가 — 트리거 충족 시 잔여 전량 매도, 아니면 None."""
+        snap = await self.morning_price_collector.get_snapshot(target.ticker)
+        # snap 유효성 방어 (current/high 0 시 오발동 차단 — 트리거 평가 자체 스킵)
+        if snap is None or snap.high <= 0 or snap.current_price <= 0:
+            return None
+
+        entry_price = self._resolve_entry_price(target)
+        if entry_price is None or entry_price <= 0:
+            return None
+
+        # 활성화 가드: 당일 고가가 진입가 +activation_pct 넘은 뒤에만 트레일 (손실종목 조기청산 방지)
+        if snap.high < entry_price * (1 + self.settings.trailing_activation_pct):
+            return None  # 아직 수익권 고점 미형성 → force_close(10:30) 위임
+
+        # 트레일링 트리거: 현재가 ≤ 당일고가 × (1 + trailing_stop_pct)  (trailing_stop_pct<0)
+        trigger_price = snap.high * (1 + self.settings.trailing_stop_pct)
+        if snap.current_price > trigger_price:
+            return None  # 고점 부근 유지 → 보유 지속
+
+        # 트레일 발동 → 잔여 전량 매도. force_close 패턴(lock 핸드오프): morning_exit 잔류 lock 해제 후 acquire
+        owner = "closing_bet:morning_trailing"
+        if self.settings.use_sell_lock:
+            self.sell_lock.release(target.ticker)
+            acquired = self.sell_lock.acquire(target.ticker, owner)
+            if not acquired:
+                return CandidateExit(
+                    candidate_id=target.candidate_id, ticker=target.ticker, name=target.name,
+                    rejection_reason="sell_lock_busy",
+                )
+
+        gap_rate = (snap.open_price - entry_price) / entry_price
+        logger.info(
+            f"[exit_executor] trailing 발동 {target.ticker} 잔여 {target.remaining_shares}주 "
+            f"(고가 {snap.high:,} × {1 + self.settings.trailing_stop_pct:.3f} = {trigger_price:,.0f} "
+            f">= 현재 {snap.current_price:,})"
+        )
+        return await self._execute_market_sell(
+            target=target, snap=snap, action=ExitAction.FLAT,
+            gap_rate=gap_rate, quantity=target.remaining_shares, owner=owner, accumulate=True,
+        )
 
     # ===== 스윙 자본 환원 로그 (2026-05-23 동적 자본 분리) =====
 
