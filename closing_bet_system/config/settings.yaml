@@ -33,7 +33,7 @@ score:
   min_entry: 8                     # 8점 이상 진입 가능 (Layer1 활성화 후 기준)
   max_position_score: 9            # 9점 이상 + 시장 양호 시 최대 비중
   atr_overheat_max: 1.8            # 하드 필터 임계 (PRD 5-Layer 2)
-  atr_overheat_band_enabled: false # Phase 3(2026-06-15): 과열 밴드 차등. false=기존 하드컷(>1.8) NO-OP. true=1.8~2.2만 차단/2.2+ 통과(전수분석: 극과열이 최고·최안전)
+  atr_overheat_band_enabled: true  # Phase 3(2026-06-15): 과열 밴드 차등. false=기존 하드컷(>1.8) NO-OP. true=1.8~2.2만 차단/2.2+ 통과(전수분석: 극과열이 최고·최안전)
   atr_overheat_band_high: 2.2      # 극과열 통과 하한 (band_enabled=true 시)
 
 # ─── 의사결정 게이트 (이중 게이트, P0-2) ──────────────────────────────────
@@ -198,9 +198,9 @@ morning_exit:
   polling_interval_sec: 5                  # fill_checker 폴링 간격
   fill_check_deadline_sec: 60              # 시장가 매도는 빠름, 1분 cut
   cancel_confirm_deadline_sec: 30          # P1-4 force_close 미체결 취소 확인 대기
-  open_limit_sell_enabled: false           # Phase 1(A) 2026-06-15: 시가 지정가 매도 + 미체결 시장가 폴백. false=기존 시장가 NO-OP. 실발주 전환은 사용자 승인 필요
+  open_limit_sell_enabled: true            # Phase 1(A) 2026-06-15: 시가 지정가 매도 + 미체결 시장가 폴백. false=기존 시장가 NO-OP. 실발주 전환은 사용자 승인 필요
   limit_fill_deadline_sec: 30              # 지정가 체결 대기 cut. 09:02 발주→09:05 스윙매수 전 폴백 수렴 위해 보수적 30초
-  morning_trailing_enabled: false          # Phase 2B 2026-06-15: 09:05~10:25 오전 트레일링(잔여 보유분). false=잡 미등록 NO-OP. 실적용은 사용자 승인
+  morning_trailing_enabled: true           # Phase 2B 2026-06-15: 09:05~10:25 오전 트레일링(잔여 보유분). false=잡 미등록 NO-OP. 실적용은 사용자 승인
   trailing_activation_pct: 0.01            # 당일 고가가 진입가 +1% 넘은 뒤에만 트레일 활성(손실종목 조기청산 방지). trailing_stop_pct는 exit: 섹션(-0.015) 사용
   morning_partial_ratio: 0.5               # Phase 2C: 09:02 1차 부분익절 비율(gap_up_low/flat). morning_trailing_enabled 시에만 적용(비활성 시 부분익절 OFF)
 
