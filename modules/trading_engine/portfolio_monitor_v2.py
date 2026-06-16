@@ -774,6 +774,31 @@ class PortfolioMonitorV2:
                 saved_highest = s.get("highest_price", 0)
                 if saved_highest > pos.highest_price:
                     pos.highest_price = saved_highest
+
+                # ATR cap 즉시 소급 (2026-06-16): 복원된 trailing_stop은 cap 도입 이전에 계산된
+                # 옛값(예 ATR폭 22%)일 수 있다. effective_trailing_pct(cap 적용)로 재계산해 더 타이트하면
+                # 상향(트레일링은 올라가기만). cap=0이면 폭 동일 → NO-OP. 신고가 갱신을 기다리지 않고
+                # 기존 활성 포지션(롯데쇼핑/대주전자재료)에도 cap 적용.
+                if pos.highest_price > 0:
+                    if pos.trailing_level == 3:
+                        fixed_pct = self.trail_level3_pct
+                    elif pos.trailing_level == 2:
+                        fixed_pct = self.trail_level2_pct
+                    else:
+                        fixed_pct = self.trail_level1_pct
+                    capped_stop = pos.highest_price * (1 - pos.effective_trailing_pct(fixed_pct))
+                    if pos.trailing_stop is None or capped_stop > pos.trailing_stop:
+                        old_stop = pos.trailing_stop
+                        pos.trailing_stop = capped_stop
+                        if pos.trailing_stop > pos.stop_loss_price:
+                            pos.stop_loss_price = pos.trailing_stop
+                        if old_stop is not None and capped_stop > old_stop:
+                            logger.info(
+                                f"   🔧 ATR cap 소급 상향: {pos.stock_name} "
+                                f"트레일링 {old_stop:,.0f} → {capped_stop:,.0f}원 "
+                                f"(고점 {pos.highest_price:,.0f} × {1 - pos.effective_trailing_pct(fixed_pct):.1%})"
+                            )
+
                 restored += 1
                 stop_str = f"{pos.trailing_stop:,.0f}원" if pos.trailing_stop is not None else "미설정"
                 logger.info(

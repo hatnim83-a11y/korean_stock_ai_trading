@@ -222,3 +222,115 @@ def test_B14_normal_trailing_in_grace_still_yields():
         buy_date=now_kst(),
     )
     assert m._check_stop_loss(pos) is False
+
+
+# ===== cap 즉시 소급 (복원 경로) =====
+
+def _seed_position_state(db_path, code: str, state: dict) -> None:
+    """position_state 테이블 생성 + 트레일링 활성 상태 1건 시드 (db_source 복원 경로용)."""
+    import sqlite3 as _sq
+    conn = _sq.connect(str(db_path))
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS position_state (
+            stock_code TEXT PRIMARY KEY, current_price REAL, highest_price REAL,
+            trailing_active INTEGER, trailing_level INTEGER, trailing_stop_price REAL,
+            max_profit_rate REAL, partial_1_executed INTEGER, partial_2_executed INTEGER,
+            partial_3_executed INTEGER, remaining_shares INTEGER, last_updated TEXT)"""
+    )
+    conn.execute(
+        """INSERT INTO position_state (stock_code,current_price,highest_price,trailing_active,
+            trailing_level,trailing_stop_price,max_profit_rate,partial_1_executed,
+            partial_2_executed,partial_3_executed,remaining_shares,last_updated)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            code, state["current_price"], state["highest_price"],
+            int(state["trailing_active"]), state["trailing_level"],
+            state["trailing_stop_price"], state["max_profit_rate"],
+            0, 0, 0, state["remaining_shares"], "2026-06-16 06:00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _restore_monitor(db_path) -> PortfolioMonitorV2:
+    """_restore_trailing_state 가 참조하는 속성을 갖춘 경량 monitor (cap 소급 포함)."""
+    m = PortfolioMonitorV2.__new__(PortfolioMonitorV2)
+    m.positions = {}
+    m.enable_be_stop = True
+    m.trail_be_activate_pct = 0.05
+    m.trail_be_stop_pct = -0.01
+    m.trail_be_floor_enabled = True
+    # cap 소급 로직이 참조하는 레벨별 고정 폭
+    m.trail_level1_pct = 0.04
+    m.trail_level2_pct = 0.03
+    m.trail_level3_pct = 0.02
+    m.sell_failure_counts = {}
+    m.on_sell_failed = None
+    m._recovered_alerted = set()
+    return m
+
+
+def test_restore_applies_atr_cap_to_existing_position(tmp_path, monkeypatch):
+    """복원 시 cap 미반영 옛 trailing_stop을 cap 적용값으로 즉시 소급 상향 (롯데쇼핑 케이스)."""
+    db_path = tmp_path / "trading.db"
+    monkeypatch.setattr(
+        "modules.trading_engine.portfolio_monitor_v2.settings.DATABASE_PATH",
+        str(db_path), raising=False,
+    )
+    monkeypatch.setattr(settings, "TRAILING_USE_ATR", True)
+    monkeypatch.setattr(settings, "ATR_MULTIPLIER", 2.0)
+    monkeypatch.setattr(settings, "TRAILING_ATR_CAP_PCT", 0.08)
+
+    # L2 활성 상태 시드 (옛 ATR폭 14.78% → trailing_stop 175,560)
+    _seed_position_state(db_path, "023530", {
+        "current_price": 196_400, "highest_price": 206_000,
+        "trailing_active": True, "trailing_level": 2,
+        "trailing_stop_price": 175_560, "max_profit_rate": 0.22,
+        "remaining_shares": 8,
+    })
+
+    monitor = _restore_monitor(db_path)
+    pos = _make_pos(first_buy_price=168_800, atr_at_buy=12_471, stop_loss_price=156_984)
+    pos.stock_code = "023530"; pos.stock_name = "롯데쇼핑"
+    monitor.positions["023530"] = pos
+
+    monitor._restore_trailing_state()
+
+    # cap 8% 적용 → 206,000 × 0.92 = 189,520 으로 상향 (옛값 175,560 대비)
+    assert pos.trailing_active and pos.trailing_level == 2
+    assert pos.trailing_stop == pytest.approx(206_000 * 0.92, abs=1)
+    assert pos.trailing_stop > 175_560
+    # stop_loss_price 도 동기화 상향 (올라가기만)
+    assert pos.stop_loss_price == pytest.approx(206_000 * 0.92, abs=1)
+
+
+def test_restore_no_downgrade_when_atr_below_cap(tmp_path, monkeypatch):
+    """ATR폭이 cap 이하면 복원 trailing_stop을 낮추지 않음 (올라가기만 — 회귀 안전)."""
+    db_path = tmp_path / "trading.db"
+    monkeypatch.setattr(
+        "modules.trading_engine.portfolio_monitor_v2.settings.DATABASE_PATH",
+        str(db_path), raising=False,
+    )
+    monkeypatch.setattr(settings, "TRAILING_USE_ATR", True)
+    monkeypatch.setattr(settings, "ATR_MULTIPLIER", 2.0)
+    monkeypatch.setattr(settings, "TRAILING_ATR_CAP_PCT", 0.08)
+
+    # ATR폭 = 2*2000/100000 = 4% < cap. L2 고정 3%. effective=max(0.03,0.04)=0.04
+    # 저장된 trailing_stop = 110,000×0.96 = 105,600 (정상값). 소급해도 동일 → 미변경
+    _seed_position_state(db_path, "000001", {
+        "current_price": 108_000, "highest_price": 110_000,
+        "trailing_active": True, "trailing_level": 2,
+        "trailing_stop_price": 105_600, "max_profit_rate": 0.10,
+        "remaining_shares": 10,
+    })
+
+    monitor = _restore_monitor(db_path)
+    pos = _make_pos(first_buy_price=100_000, atr_at_buy=2_000, stop_loss_price=93_000)
+    pos.stock_code = "000001"; pos.stock_name = "테스트"
+    monitor.positions["000001"] = pos
+
+    monitor._restore_trailing_state()
+
+    # effective 4% → 110,000×0.96 = 105,600. 저장값과 동일 → 하향/이상 변동 없음
+    assert pos.trailing_stop == pytest.approx(105_600, abs=1)
