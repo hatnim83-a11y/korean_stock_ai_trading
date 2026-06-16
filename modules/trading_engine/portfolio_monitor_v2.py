@@ -142,7 +142,7 @@ class Position:
         return 0
 
     def effective_trailing_pct(self, fixed_pct: float) -> float:
-        """트레일링 폭 계산: max(고정값, ATR_MULTIPLIER × atr_at_buy / first_buy_price).
+        """트레일링 폭 계산: max(고정값, min(ATR_MULTIPLIER × atr_at_buy / first_buy_price, cap)).
 
         Args:
             fixed_pct: 레벨별 고정 트레일링 비율 (예: TRAIL_LEVEL1_PCT=0.04)
@@ -150,14 +150,21 @@ class Position:
         Returns:
             실제 적용할 트레일링 비율. ATR 데이터 누락 시 고정값 폴백.
 
-        예시:
+        예시 (cap=TRAILING_ATR_CAP_PCT=0.08):
             - 변동성 큰 종목: ATR=2000, first=50000, MULT=2.0 → atr_pct=8% > 4%(L1) → 8% 적용
             - 안정 종목: ATR=500, first=50000, MULT=2.0 → atr_pct=2% < 4%(L1) → 4% 적용
+            - 초고변동 종목: ATR=14878, first=132300, MULT=2.0 → atr_pct=22.5% → cap 8%로 클램프 (피에스케이홀딩스 사건)
             - ATR 누락 (atr_at_buy=0): atr_pct=0 → max(고정, 0) = 고정값 안전 폴백
+            - cap=0: 상한 없음(롤백) → 기존 max(고정, atr_pct)
         """
         if not settings.TRAILING_USE_ATR or self.atr_at_buy <= 0 or self.first_buy_price <= 0:
             return fixed_pct
         atr_pct = (settings.ATR_MULTIPLIER * self.atr_at_buy) / self.first_buy_price
+        # ATR 폭 상한(cap): 고ATR 종목에서 trailing 폭이 폭발(예 22.5%)해 손절처럼 작동하는 것 차단.
+        # cap=0이면 상한 없음(롤백). min()을 무조건 적용하면 cap=0 시 ATR이 0으로 억제되는 역동작이라 가드.
+        cap = getattr(settings, 'TRAILING_ATR_CAP_PCT', 0.08)
+        if cap > 0:
+            atr_pct = min(atr_pct, cap)
         return max(fixed_pct, atr_pct)
 
     @property
@@ -302,6 +309,20 @@ class PortfolioMonitorV2:
                     f"TRAIL_ACTIVATION_PCT({self.trail_activation_pct:.0%}): "
                     f"BE 활성화 즉시 L1이 덮어쓰므로 BE 효과 제한적"
                 )
+
+        # 트레일링 활성 시 BE 바닥 보존 (ATR 폭 폭발로 trailing_stop < BE 되면 양보 안 함)
+        self.trail_be_floor_enabled = getattr(settings, 'TRAIL_BE_FLOOR_ENABLED', True)
+
+        # ATR 트레일링 폭 상한(cap) 설정값 방어 — cap이 고정 레벨보다 작으면 고정값 하한이 무력화될 위험 고지
+        atr_cap = getattr(settings, 'TRAILING_ATR_CAP_PCT', 0.08)
+        max_fixed_level = max(self.trail_level1_pct, self.trail_level2_pct, self.trail_level3_pct)
+        if atr_cap <= 0:
+            logger.info("TRAILING_ATR_CAP_PCT<=0: ATR 트레일링 폭 상한 없음(무제한). 고ATR 종목 trailing 폭 폭발 가능.")
+        elif atr_cap < max_fixed_level:
+            logger.warning(
+                f"TRAILING_ATR_CAP_PCT({atr_cap:.0%}) < 최대 고정 레벨({max_fixed_level:.0%}): "
+                f"cap이 고정값보다 작아 일부 레벨에서 ATR 항이 항상 클램프됨(max로 고정값 하한은 보장). 설정 확인 권장."
+            )
 
         # 손절
         self.stop_loss = settings.DEFAULT_STOP_LOSS
@@ -1304,9 +1325,12 @@ class PortfolioMonitorV2:
         Returns:
             손절 필요 여부
         """
-        # 트레일링이 활성화되어 stop_loss_price를 올린 경우,
-        # _check_trailing_stop에서 처리하도록 양보
-        if pos.trailing_active and pos.trailing_stop is not None:
+        # 트레일링이 활성화되어 stop_loss_price를 올린 경우 _check_trailing_stop에서 처리하도록 양보.
+        # 단 ATR 폭 폭발로 trailing_stop이 stop_loss_price(BE 포함)보다 낮아지면 양보하지 않고
+        # BE 손절 체크를 진행한다 (2026-06-16 피에스케이홀딩스: trailing 119,905 < BE 130,977 방치 사건).
+        # TRAIL_BE_FLOOR_ENABLED=False면 기존 무조건 양보로 롤백.
+        if (pos.trailing_active and pos.trailing_stop is not None
+                and (not self.trail_be_floor_enabled or pos.trailing_stop >= pos.stop_loss_price)):
             return False
 
         # 보호기간: hold_days <= GRACE_PERIOD_DAYS이면 넓은 손절선 적용
@@ -1330,7 +1354,17 @@ class PortfolioMonitorV2:
                 return True
             return False
 
-        return pos.current_price <= pos.stop_loss_price
+        hit = pos.current_price <= pos.stop_loss_price
+        if hit and pos.trailing_active and pos.trailing_stop is not None:
+            # 트레일링 양보 해제(trailing_stop < stop_loss_price) 경로 — BE 바닥에서 청산.
+            # 무음 청산 방지 + 제안서 관찰항목("양보 안 함 분기 발동 케이스 수집") 연동.
+            # 실제 손절 발주가 뒤따르므로 warning (기존 손절 경로와 레벨 일관).
+            logger.warning(
+                f"   🛡️ BE 바닥 손절(트레일링 양보 해제): {pos.stock_name} "
+                f"현재가 {pos.current_price:,} <= 손절가 {pos.stop_loss_price:,.0f} "
+                f"(trailing_stop {pos.trailing_stop:,.0f} < 손절가, 보유 {pos.hold_days}일)"
+            )
+        return hit
     
     async def _execute_stop_loss(self, pos: Position) -> None:
         """손절 실행"""

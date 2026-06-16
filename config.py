@@ -458,6 +458,23 @@ class Settings(BaseSettings):
         default=14,
         description="ATR 계산 기간 (전통적 표준 14일, True Range 14일 평균)"
     )
+    TRAILING_ATR_CAP_PCT: float = Field(
+        default=0.08,
+        description=(
+            "ATR 트레일링 폭 상한(cap). effective_pct = max(고정, min(ATR항, cap)). "
+            "고ATR 종목에서 트레일링 폭이 폭발(예 22.5%)해 손절처럼 작동하는 것을 차단. "
+            "0=상한 없음(롤백). 고정 레벨 최대값(L1=0.04)보다 크게 설정해야 하한이 무력화되지 않음. "
+            "2026-06-16 피에스케이홀딩스 사건 대응 (focus:trailing 제안서)"
+        )
+    )
+    TRAIL_BE_FLOOR_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "트레일링 활성 시에도 BE/stop_loss를 바닥으로 보존. "
+            "True=trailing_stop이 stop_loss_price보다 낮으면 손절 체크를 양보하지 않고 BE 손절 진행. "
+            "False=기존 무조건 양보(롤백). ATR cap(TRAILING_ATR_CAP_PCT)과 독립 토글."
+        )
+    )
 
     # ===== 트레일링 스탑 =====
     ENABLE_TRAILING_STOP: bool = Field(
