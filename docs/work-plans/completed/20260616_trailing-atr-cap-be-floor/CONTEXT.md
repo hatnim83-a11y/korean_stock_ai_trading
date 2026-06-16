@@ -75,3 +75,12 @@ self.grace_period_days = getattr(settings, 'GRACE_PERIOD_DAYS', 1)
 - **(code-tester 주의)** B fall-through × grace 휩쏘: `trailing_stop < stop_loss_price` 발생 경로는 "고ATR로 trailing_stop이 BE 아래 형성"(재시작 불완전 아님). hold≤1 grace에서 BE(buy×0.99) 손절 — 의도된 동작이나 케이스 12로 명시 검증.
 - **(strategy-coder 필수)** 제안서 정정: ① BE 바닥 = first×0.99(코드/정책), avg×0.99 아님 ② cap 소급 = 신규+신고가 종목만. 롯데쇼핑 187,220 상향은 무개입 시 미발생.
 - **(strategy-coder 권장)** B 독립 토글 필요(A 롤백으로 B 못 끔). config 검증 가드 + fall-through 로그.
+
+## 배포 후 실데이터 검증 (2026-06-16 14:59 KST 재시작, PID 895479)
+- 머지 main d3c34cb + restart 정상(active, 에러/traceback 없음). 트레일링/BE 복원 정상 동작.
+- **cap 미소급 실발현 확인**: 대주전자재료(078600) L1 복원, trailing_stop=104,597(high 132,400 대비 **-21%**, cap 미적용 옛값). position_state가 source라 복원값엔 cap 미반영(문서화된 한계대로).
+- **결함 B 안전망 작동 확인**: 대주전자재료 trailing_stop(104,597) < stop_loss(메모리 ~109,848 = DB portfolio.stop_loss) → B가 양보 해제 → 약 -8.4%(first 119,800 대비)에서 손절 보장. **cap 없이 -12.7% 방치되는 피에스케이 재현은 차단됨.** 신고가(132,400) 갱신 시 cap 적용되어 trailing_stop 121,808로 자동 정상화.
+- 롯데쇼핑 L2: trailing_stop 175,560 > BE → 안전. 신한지주/대덕전자 L0: 미활성, +8% 트레일링 켜질 때 cap 자동 적용.
+
+## 후속 개선 후보 (이번 범위 밖, 별도 작업)
+- **복원 경로 BE 재적용 갭**: `_restore_trailing_state`의 **트레일링 활성(L1+) 복원 경로(770-783)는 stop_loss_price를 BE로 올리지 않는다**(BE only 경로 786-800에만 BE 재적용 존재). 그래서 cap 미소급 + L1 복원 종목(대주전자재료)의 실효 손절선이 BE(-1%)가 아니라 DB stop_loss(-8.4%). 결함 B가 이 갭을 부분 보완(악화 아닌 개선)하나, 완전하려면 트레일링 활성 복원 경로에도 `max_profit>=+5%면 BE 재적용` 추가 필요. 이번 변경이 유발한 게 아니라 기존 갭이며, B가 catastrophic 손실은 막으므로 별도 단위로 분리.
