@@ -101,8 +101,8 @@
 - **결함 A (cap)**: `effective_trailing_pct()` = `max(고정, min(2.0×ATR/first, TRAILING_ATR_CAP_PCT))`. cap 기본 **0.08**(고정 최대 L1보다 커야 하한 무력화 방지). **cap=0이면 상한 없음(롤백)** — `if cap>0:` 가드 필수(min 직접 적용 시 cap=0에서 ATR 0 억제 역동작).
 - **결함 B (BE 바닥)**: `_check_stop_loss`의 무조건 양보를 **조건부**로 — `trailing_stop >= stop_loss_price`일 때만 양보. trailing_stop이 BE보다 낮으면 양보 해제 → BE 바닥에서 손절(warning 로그). 토글 `TRAIL_BE_FLOOR_ENABLED`(기본 True).
 - **A+B 관계**: A 적용 시 trailing_stop이 BE 위로 유지돼 B는 평시 거의 미발화(안전망). 두 토글 **독립 롤백**(cap=0 / BE_FLOOR=false + restart). A 롤백으로 B는 안 꺼짐.
-- **한계**: cap은 `_update_trailing_stop`이 신고가 갱신 시에만 호출되므로 **신규 매수 + 재시작 후 신고가 갱신 종목에만 소급**. 이미 활성·고점 박힌 포지션은 미소급(BE 위면 손실 위험 없음).
-- **상세**: `docs/work-plans/active/trailing-atr-cap-be-floor/` + 제안서 `docs/improvements/2026-06-16-focus-trailing.md`
+- **복원 즉시 소급**: `_restore_trailing_state` 트레일링 활성 복원 블록에서 `effective_trailing_pct`(cap 적용)로 재계산해 더 타이트하면 trailing_stop 상향(올라가기만). 재시작만으로 기존 활성 포지션에도 cap 즉시 적용(2026-06-16 검증: 롯데쇼핑 175,560→189,520, 대주전자재료 104,597→121,808, 둘 다 고점×92%=cap 8%). `atr_at_buy`는 `load_positions_from_db`가 portfolio(authoritative)에서 선복원하므로 정확. cap=0이면 폭 동일→NO-OP.
+- **상세**: `docs/work-plans/completed/20260616_trailing-atr-cap-be-floor/` + 제안서 `docs/improvements/2026-06-16-focus-trailing.md`
 
 ### monitor_state.json sanity 분기 (v17 확장)
 - `tranche_count==1`: 기존 `first_buy_price × 1.02` 임계 유지
