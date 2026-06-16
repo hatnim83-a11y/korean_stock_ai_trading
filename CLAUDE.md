@@ -69,7 +69,7 @@
 - 1차 진입: 50% (`TRANCHE_FIRST_RATIO=0.5`)
 - 2차 진입(불타기): 50%, 트리거 **+5% first 기준** (`PYRAMID_TRIGGER_PCT=0.05`)
 - 분할 익절: **+12%/+20%/+30% avg 기준** × 25/20/20% (잔여 35%)
-- 트레일링 폭: `max(L1=4%/L2=3%/L3=2%, 2.0×ATR(14)/first_buy_price)`
+- 트레일링 폭: `max(L1=4%/L2=3%/L3=2%, min(2.0×ATR(14)/first_buy_price, TRAILING_ATR_CAP_PCT=8%))` ← **cap 도입 2026-06-16**
 
 ### 토글 (`.env` 또는 환경변수)
 - `TRANCHE_ENTRY_ENABLED` (default **False** 안전): True=1차 50% + 2차 트리거 활성
@@ -95,6 +95,14 @@
 - 호출 측 `effective_trailing_pct()`에서 `max(고정, 0)` = 고정값 안전 디그레이드
 - 매수 직후 동기 호출 (캐시 hit 우선), 09:20 prefetch 잡은 추후 작업
 - 매수 시점 박제만 (보유 중 미갱신, Phase 2에서 일일 재계산 검토)
+
+### ATR 트레일링 폭 상한(cap) + BE 바닥 보존 (2026-06-16 — 피에스케이홀딩스 사건)
+- **사건**: 피에스케이홀딩스(031980)가 ATR=주가의 11.2%라 트레일링 폭이 `2.0×ATR/first=22.5%`로 폭발 → L2 트레일링이 +16.9% 고점→**-9.4%까지 26%p 반납** 후 청산(사실상 손절). 게다가 BE 손절(first×0.99)이 설정됐으나 트레일링 활성 시 `_check_stop_loss`가 무조건 양보해 무력화.
+- **결함 A (cap)**: `effective_trailing_pct()` = `max(고정, min(2.0×ATR/first, TRAILING_ATR_CAP_PCT))`. cap 기본 **0.08**(고정 최대 L1보다 커야 하한 무력화 방지). **cap=0이면 상한 없음(롤백)** — `if cap>0:` 가드 필수(min 직접 적용 시 cap=0에서 ATR 0 억제 역동작).
+- **결함 B (BE 바닥)**: `_check_stop_loss`의 무조건 양보를 **조건부**로 — `trailing_stop >= stop_loss_price`일 때만 양보. trailing_stop이 BE보다 낮으면 양보 해제 → BE 바닥에서 손절(warning 로그). 토글 `TRAIL_BE_FLOOR_ENABLED`(기본 True).
+- **A+B 관계**: A 적용 시 trailing_stop이 BE 위로 유지돼 B는 평시 거의 미발화(안전망). 두 토글 **독립 롤백**(cap=0 / BE_FLOOR=false + restart). A 롤백으로 B는 안 꺼짐.
+- **한계**: cap은 `_update_trailing_stop`이 신고가 갱신 시에만 호출되므로 **신규 매수 + 재시작 후 신고가 갱신 종목에만 소급**. 이미 활성·고점 박힌 포지션은 미소급(BE 위면 손실 위험 없음).
+- **상세**: `docs/work-plans/active/trailing-atr-cap-be-floor/` + 제안서 `docs/improvements/2026-06-16-focus-trailing.md`
 
 ### monitor_state.json sanity 분기 (v17 확장)
 - `tranche_count==1`: 기존 `first_buy_price × 1.02` 임계 유지

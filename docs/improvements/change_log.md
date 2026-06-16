@@ -90,6 +90,8 @@
 
 | 2026-06-15 | 종가베팅 청산 trade_date 산정 (closing-bet-weekend-exit-skip-fix) | before: 청산 잡 4개(run_emergency_stop_check/morning_exit/morning_force_close/morning_trailing)가 `now_kst().date() - timedelta(days=1)`(**달력 어제**)로 청산 대상 조회 → 금요일/휴장 직전 진입분이 월요일 청산(trade_date=일요일=진입없음)에서 **영구 미청산 고아**(실피해 005935 7주 @206,500 6/12금 진입). | after: `config.previous_trading_day(ref_date=None)` 헬퍼 신규(직전 **거래일** walk-back, run_label_yesterday의 기존 정답패턴 공용화) → 4개 래퍼 `previous_trading_day().isoformat()`로 교체(trailing은 now.date() 박제 기준). **정상 연속거래일엔 직전거래일==달력어제라 동작 동일(회귀 없음)**, 금/휴장 갭에서만 교정. | docs/work-plans/active/closing-bet-weekend-exit-skip-fix/ | hatni | 버그fix(파라미터 아님, 항상 적용 로직). 토글 무관. strategy-planner+code-tester 사전리뷰(설계 타당, 방어코드 권고 반영) + 사후 code-tester 심각0/주의0(배포가능). 단위 14/14 PASS(월→금/추석 다중 walk-back/datetime 정규화) + 기존 회귀 exit47/candidate24/score28 PASS. 005935은 청산창 6/15 구코드로 지나가 별도 수동정리. |
 
+| 2026-06-16 | TRAILING_ATR_CAP_PCT (신규) / TRAIL_BE_FLOOR_ENABLED (신규) | ① ATR 트레일링 폭 상한 없음 `max(고정,2.0×ATR/first)` ② 트레일링 활성 시 `_check_stop_loss` 무조건 양보 | ① `TRAILING_ATR_CAP_PCT=0.08` → `max(고정,min(ATR항,cap))` (0=무제한 롤백) ② `TRAIL_BE_FLOOR_ENABLED=True` → 조건부 양보(trailing_stop≥stop_loss일 때만), trailing<BE면 BE 바닥 손절 | docs/improvements/2026-06-16-focus-trailing.md | hatni | 피에스케이홀딩스(031980) 6/16 +16.9%고점→-9.4% 청산(26%p반납) 사건. 표본19건 이봉분포(정상18건 giveback≤8% vs 피에스케이 26%). 시뮬: cap8% -9.4%→+7.6%. strategy-coder+code-tester 사전·사후리뷰(심각0, 테스트가 BE로그 NoneType 버그 선제발견·수정). 신규14/14+회귀10/10 PASS. 두 토글 독립 롤백(=0 / =false +restart). 한계: cap은 신규매수+신고가갱신 종목만 소급(롯데쇼핑 등 기존활성분 미소급). default ON이라 머지+restart 시 즉시적용 — 대덕전자/대주전자재료 트레일링 켜지기 전 배포 권장 |
+
 ## 관련 링크
 - 제안서 템플릿: `docs/improvements/_TEMPLATE.md`
 - 에이전트 정의: `.claude/agents/trade-improvement-analyst.md`
