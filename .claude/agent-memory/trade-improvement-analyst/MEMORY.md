@@ -5,4 +5,5 @@
 - [atr_overheat filter finding](closing_bet_atr_overheat_filter.md) — 과열필터 1.8 하드필터 위치/PRD 근거 + 비단조(non-monotonic) 라벨 분포: 2.2+ 극과열이 최고, 1.8~2.2 중과열이 최악
 - [Trailing width / ATR cap finding](trailing_width_cap_finding.md) — 스윙 트레일링 cap 8% 사후검증: cap은 catastrophic 꼬리 1건만 차단(정상18건 무영향), 좁히면 휩쏘 반반. max_hold 만료=활성화 미달 약종목(폭 무관). cap 8% 유지 권고
 - [Trailing MULTIPLIER dead-param finding](trailing_multiplier_dead_param_finding.md) — ATR_MULTIPLIER 2.0→1.5 축소 무효: 박제11건 중 10건 cap 8%에 묶여 불변. 폭 줄이려면 cap이 유일 레버(그래도 비권고). MULT 2.0 유지
+- [Partial-profit trigger lowering finding](partial_profit_trigger_finding.md) — 분할익절 하향 검토: 현행+12/20/30=v17 상향분(+10/15/20→). 하향=v17 되돌리기. v17표본 2건뿐, pre-v17 +10% 9건 자연실험. 익절은 반납0(개선여지작음), 추세상단손실 작고(25%한정) 정체조기실현 반반. S3(1차만+10)만 방어가능하나 현행유지+관찰이 정직. Low
 - [Stall handling A/B/C finding](stall_handling_finding.md) — 정체종목 청산개선: "정체로 손해" 가설 데이터 미지지. 만료=약종목(고점+6%미달)·롯데쇼핑은 분할익절로 정상청산. A/C 기각, B만 Low(휩쏘반반). 진짜레버=일별가격경로 적재 인프라
