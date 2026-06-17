@@ -1302,9 +1302,16 @@ class PortfolioMonitorV2:
             # 포트폴리오 보유 수량 업데이트
             db.update_portfolio_shares(pos.stock_code, pos.remaining_shares)
             # portfolio partial/trailing 상태 업데이트
+            # ⚠️ stage 기반 강제: 이 메서드는 stage차 매도 성공 직후 호출되는데, 호출부
+            # (_check_and_execute_partial_profit)는 pos.partial_N_executed=True를 _execute_partial_sell
+            # 반환 *이후*에 set한다. 따라서 이 시점 pos.partial_{stage}_executed는 아직 False라
+            # 그대로 넘기면 portfolio에 0이 저장돼 마지막 실행 단계 플래그가 영구 누락된다
+            # (2026-06-17 롯데쇼핑 P2=0 사건). 매도 성공이 stage를 보장하므로 stage>=N으로 강제.
             db.update_portfolio_partial_state(
                 pos.stock_code,
-                pos.partial_1_executed, pos.partial_2_executed, pos.partial_3_executed,
+                pos.partial_1_executed or stage >= 1,
+                pos.partial_2_executed or stage >= 2,
+                pos.partial_3_executed or stage >= 3,
                 pos.trailing_active, pos.trailing_level,
                 pos.trailing_stop, pos.highest_price, pos.max_profit_rate,
             )
