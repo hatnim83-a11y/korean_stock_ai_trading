@@ -113,3 +113,84 @@ def map_action(open_price, entry_price, exit_cfg) -> ExitAction:
 - **strategy-planner + strategy-coder 병렬 사전 리뷰** (P0/P1 발견 후 PLAN 갱신)
 - **승인 후 코딩 시작** (CLAUDE.md feedback_plan_review_process)
 - 컨텍스트 크기 주의 — 단위 2-5는 entry_executor와 비슷한 규모(~500줄 + 30~40건 테스트)
+
+---
+
+## 본 세션 작업 요약 (2026-05-16 KST)
+
+### 발견 사항
+1. **사전 리뷰 P0 3건**:
+   - **P0-1** (planner 단독): 시뮬레이터(`phase25_simulator.py` 3구간 `prd_split_gapup/flat/gapdown`) vs 실 매도 6단계 매핑 불일치 → walkforward EV +1.04% (n=103) 실전 정합성 위험. 해결: 5단계로 통일(trailing_stop은 단위 2-5g 분리) + 모든 액션 시초가 시장가 매도로 통일 → 시뮬 `open_pct` 가정과 정합 + 단위 2-5e 정합성 게이트 (delta ≤ 0.1%) 추가
+   - **P0-2** (둘 다): `candidate_logger.log_exit()` 가 `entry_price IS NULL` 시 `LookupError` raise. 단위 2-4c 옵션 A 인터페이스 계약상 phase1 only 보유는 `candidate_status='recommended' + entry_price=NULL` → 매도 발주 직전 `mark_entered_phase1_only(candidate_id)` 헬퍼 신규 호출 패턴 박제
+   - **P0-3** (coder 단독): 09:00 메인 봇 잡 race — `scheduler.py:163` `monitoring_start_early` + `:218` `midweek_sell_profit` 모두 09:00 cron → KIS `_shared_token` 경합 위험. 해결: emergency_stop 09:00 → **09:01** 오프셋 박제
+2. **사전 리뷰 P1 9건**: GAPUP 임계값 / idempotency / trailing 모니터링 / force_close 취소 순서 / sell_lock 결정 / dry_run 정책 / 파일 크기 / 잡별 misfire / align_to_tick 기검증 — 모두 PLAN/CONTEXT/CHECKLIST 박제
+3. **단위 2-5a 6 검증 PASS**:
+   - `KISApi.get_current_price` 응답 open/high/price 11필드 (`_safe_int` 적용)
+   - 매도 대상 SQL 운영 DB 직접 query 검증 (5/15 trade_date 0건, 기대값 일치)
+   - `KISOrderApi.sell_market_order` 응답 entry_executor 동일 패턴
+   - 부분 체결 잔량 = `COALESCE(phase1, 0) + COALESCE(phase2, 0)`
+   - **`KISOrderApi.cancel_order(order_id, stock_code, quantity)` 기존 구현 발견** (TR_CANCEL_REAL=TTTC0803U) → P1-4 force_close 재사용 가능
+   - 09:00 메인 봇 잡 monitoring_start_early **1초 미만 비동기 위임** → 09:01 60초 여유 확정
+4. **code-tester stream idle timeout 대체**: 단위 2-5c 검증 시 stream timeout → 직접 6항목 검증으로 통과 (py_compile 0 / datetime.now 잔존 0 / async to_thread 전체 / sell_market_order 단일 / dry_run 분기 위치 / P1-4 cancel_order 보강)
+
+### 수정/작성 파일 (단위 2-5a~e)
+**신규 9개**:
+- `closing_bet_system/collectors/morning_price_collector.py` (MorningPriceCollector + MorningPriceSnapshot frozen)
+- `closing_bet_system/execution/exit_target_query.py` (select_exit_targets + ExitTarget frozen + is_phase1_only/total_shares property)
+- `closing_bet_system/execution/exit_executor.py` (~620줄 — ExitExecutor + ExitExecutorSettings + ExitAction Enum 5단계 + ExitResult + CandidateExit + map_action + 3 public 메서드)
+- `closing_bet_system/notification/exit_notifier.py` (3종 알림 + dry_run "[DRY-RUN]" prefix)
+- `scripts/test_morning_exit_unit_2_5b.py` (12건 PASS)
+- `scripts/test_exit_executor.py` (EX-1~30 + EX-18b = 31건 PASS)
+- `docs/work-plans/active/closing-bet-unit-2-5-morning-exit/STEP0_MORNING_EXIT_RESEARCH.md`
+- `docs/work-plans/active/closing-bet-unit-2-5-morning-exit/UNIT_2_5e_PARITY_REPORT.md`
+- `docs/improvements/change_log.md` (단위 2-5 종합 1줄 추가)
+
+**수정 5개**:
+- `closing_bet_system/storage/candidate_logger.py` (`mark_entered_phase1_only` 헬퍼 신규, P0-2)
+- `closing_bet_system/main_orchestrator.py` (상수 6건 + exit_executor lazy property + 3개 async 메서드 + register_jobs 잡 3건 추가, 잡 로그 "5건→8건")
+- `closing_bet_system/config/settings.yaml` (morning_exit:* 섹션 7키 신규 + schedule.emergency_stop_start "09:00"→"09:01" + morning_exit.enabled=true/dry_run=true 부분 활성화)
+- `scripts/test_closing_bet_orchestrator.py` (잡 8건 + 신규 3개 잡 트리거 + 상수 16건 검증 보강)
+- `docs/work-plans/active/closing-bet-unit-2-5-morning-exit/PLAN.md / CHECKLIST.md` (P0/P1 반영)
+
+### 단위 2-5 commit 이력 (5/16 본 세션)
+| commit | 단위 | 내용 |
+|---|---|---|
+| `49537cd` | 사전 리뷰 | P0 3건 + P1 9건 PLAN/CONTEXT/CHECKLIST 반영 |
+| `ea8d3e7` | 2-5a/b | Step 0 + collectors + mark_entered_phase1_only |
+| `f6b957c` | 2-5c | ExitExecutor 620줄 + ExitNotifier + 31건 PASS |
+| `4bbcd8b` | 2-5d | APScheduler 통합 + settings.yaml |
+| `1f8f55a` | 2-5e | 정합성 분석 + change_log |
+| `2e5fcc2` | 2-5e+ | morning_exit dry_run 부분 활성 토글 |
+| `e20f2bc` | main 머지 | 5 commits 통합 main 머지 + push (`bf0caa2→e20f2bc`) |
+
+### 배포 상태 (2026-05-16 KST 10:34)
+- 워크트리 브랜치: `worktree-closing-bet-unit-2-4-entry-executor` @ `2e5fcc2` (clean)
+- main: `e20f2bc` (origin 동기화)
+- 운영 봇: **PID 294777** (2026-05-16 01:33:16 UTC restart)
+- 종가베팅 잡 **8건 등록**: pipeline/summary/label/flow_reliability/entry_pipeline + **emergency_stop 09:01 / morning_exit 09:30 / morning_force_close 10:30**
+- settings.yaml: entry_executor.enabled=true/dry_run=true (단위 2-4) + morning_exit.enabled=true/dry_run=true (단위 2-5) — **자동매매 위험 0** (KIS 미발주 + log_exit 미호출 + DB 무변경)
+
+### 누적 회귀 199건 PASS (14개 슈트)
+phase25 60 + 2-4b 29 + 2-4c 31 + orchestrator 16 + candidate_logger 20 + 2-5b 12 + 2-5c 31
+
+### 다음 세션에서 주의할 점 (5/19~5/22 모니터링 + 단위 2-5f 활성화)
+1. **5/18(월) 15:18 KST 매수 dry_run 첫 발화 자연 검증**
+   - 텔레그램 phase1/phase2/pipeline_summary 알림 도착 확인
+   - DB candidates 박제 (ODNO 없이 status='recommended' 유지, entry_phase1_executed_shares = NULL — dry_run이라)
+   - 잡 발화 시점에 KIS 호출 미발주 확인 (journalctl: `[entry_executor] DRY_RUN phase1: ...`)
+2. **5/19(화) 09:01/09:30/10:30 매도 dry_run 첫 발화 자연 검증**
+   - dry_run에서는 entry_phase1_executed_shares = NULL이라 매도 대상 select 0건 가능 — 정상 동작
+   - 만약 자동매매 실 활성화 후라면 매도 대상 select N건 + 4단계 매트릭스 분포 알림
+3. **5/22(금) 17:30+ 별도 세션 — 단위 2-5f 활성화 결정**:
+   - 1주 dry_run 데이터 누적 검증 (5/18~5/22)
+   - `phase25_walkforward.py --start 2026-05-04 --end 2026-05-22` 재실행
+   - UNIT_2_5e_PARITY_REPORT 정합성 게이트 재측정 (실 매도 추정 EV +0.55~0.75%)
+   - 사용자 명시 승인 → entry_executor.dry_run=false + morning_exit.dry_run=false **묶어서** 활성화 (매수+매도 짝 맞춤)
+4. **bot-health-checker 5/19 발화 후 자동 점검 권장**
+5. **단위 2-5g (선택)**: trailing_stop 모니터링 루프 — 09:30~10:30 폴링 (별도 비동기 잡 또는 2분 cron). 단위 2-5f 활성화 후 후속.
+6. **단위 2-7d (선택)**: 시뮬레이터 5단계 정합성 모델 도입 (GAP_UP_LOW 100% 시초가 분리 + GAP_UP_HIGH force_close 정밀 모델). UNIT_2_5e_PARITY_REPORT delta +0.3~0.5%p 해소.
+
+### 컨텍스트 크기
+- 이번 세션 컨텍스트 매우 큼 (단위 2-4 옵션 1 배포 + 옵션 B 부분 활성화 + 단위 2-5 PLAN + 사전 리뷰 + 2-5a~e 완료 + main 머지 + restart)
+- **다음 세션은 새 대화 시작 강력 권장** — `/resume` 명령으로 PLAN.md + CONTEXT.md + CHECKLIST.md 자동 로드
+- 단위 2-5f 활성화 별도 세션은 5/22(금) 17:30+ 예정
