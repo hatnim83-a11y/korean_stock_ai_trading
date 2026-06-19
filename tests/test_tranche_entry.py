@@ -468,6 +468,67 @@ def test_time_guard_logic():
     print("  [PASS] time_guard_logic")
 
 
+def test_pyramid_min_one_share_fallback_logic():
+    """최소 1주 폴백 핵심 로직 (2026-06-19 삼성물산 사건).
+
+    고가주를 1차에 1주만 진입하면 mirror_first 예산(=1차 원가)이
+    상승한 현재가보다 작아 int(예산//현재가)=0 → 불타기 영구 불발.
+    PYRAMID_MIN_ONE_SHARE 폴백이 자본 여유 시 1주로 보정하는지 검증.
+    """
+    # --- 사건 재현: 삼성물산 1차 1주 @482,500, 현재가 511,000 (+5.9%) ---
+    first_buy_price = 482500
+    shares = 1
+    cur_price = 511000
+    second_ratio = first_ratio = 0.5
+    target_amount = (first_buy_price * shares) * (second_ratio / first_ratio)
+    assert target_amount == 482500, "mirror_first 예산 계산"
+
+    # 기존 동작: int(예산//현재가) = 0 → 구조적 불발
+    second_qty = int(target_amount // max(1, cur_price))
+    assert second_qty == 0, "고가주 1주 → 산정수량 0 (사건 재현)"
+
+    # --- 폴백 적용 (자본 여유 충분: swing_available 1주가 이상, cash 충분) ---
+    def apply_fallback(second_qty, cur_price, swing_available, cash, enabled=True, dry_run=False):
+        if second_qty <= 0 and enabled and cur_price > 0:
+            swing_ok = (swing_available is None) or (cur_price <= swing_available)
+            cash_ok = True
+            if swing_ok and not dry_run:
+                cash_ok = cur_price <= max(0, cash)
+            if swing_ok and cash_ok:
+                return 1
+        return second_qty
+
+    # 케이스 1: swing/cash 여유 충분 → 1주 폴백
+    assert apply_fallback(0, cur_price, swing_available=2000_0000, cash=2000_0000) == 1, \
+        "자본 여유 시 1주 폴백 적용 실패"
+
+    # 케이스 2: swing_available 부족 (현재가 < swing) → 차단
+    assert apply_fallback(0, cur_price, swing_available=500000, cash=2000_0000) == 0, \
+        "swing_pool 부족 시 폴백 차단 실패 (511,000 > 500,000)"
+
+    # 케이스 3: 현금 부족 → 차단
+    assert apply_fallback(0, cur_price, swing_available=2000_0000, cash=300000) == 0, \
+        "현금 부족 시 폴백 차단 실패"
+
+    # 케이스 4: 토글 OFF → 기존 동작(0 유지)
+    assert apply_fallback(0, cur_price, swing_available=2000_0000, cash=2000_0000, enabled=False) == 0, \
+        "토글 OFF 시 기존 동작(스킵) 실패"
+
+    # 케이스 5: swing_available=None(계산 실패) → swing 가드 통과, cash로만 판정
+    assert apply_fallback(0, cur_price, swing_available=None, cash=2000_0000) == 1, \
+        "swing None 시 cash 통과로 1주 폴백 실패"
+
+    # 케이스 6: DRY_RUN → cash 조회 스킵, swing만 통과하면 1주 (시뮬)
+    assert apply_fallback(0, cur_price, swing_available=2000_0000, cash=0, dry_run=True) == 1, \
+        "DRY_RUN 시 cash 스킵하고 1주 폴백 실패"
+
+    # 케이스 7: 정상 산정수량(>0)이면 폴백 미진입 (그대로 유지)
+    assert apply_fallback(3, cur_price, swing_available=2000_0000, cash=2000_0000) == 3, \
+        "정상 수량 시 폴백 개입 금지 위반"
+
+    print("  [PASS] pyramid_min_one_share_fallback_logic")
+
+
 def test_update_portfolio_second_tranche():
     """update_portfolio_second_tranche: 가중평균/누적 갱신 검증."""
     from database import Database

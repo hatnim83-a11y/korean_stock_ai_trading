@@ -1707,6 +1707,8 @@ class PortfolioMonitorV2:
             # 종가베팅 cap 50% 정책 정합 — v17 1차+2차 합쳐 swing_pool(90%) 한도 절대 안 넘김.
             # fund_guard.compute_capital_limit 의 swing_used 계산(cost_basis) 과 동일 식.
             # 환경변수 SWING_CAPITAL_RATIO 미설정 시 default 0.9 (settings.yaml과 동기화).
+            # swing_available: 최소 1주 폴백(8단계)에서 자본 여유 판정에 재사용. 계산 실패 시 None.
+            swing_available = None
             try:
                 import os as _os
                 swing_capital_ratio = float(_os.getenv("SWING_CAPITAL_RATIO", "0.9"))
@@ -1740,11 +1742,46 @@ class PortfolioMonitorV2:
             # 8) 2차 매수 수량 계산
             second_qty = int(target_amount // max(1, pos.current_price))
             if second_qty <= 0:
-                logger.warning(
-                    f"[v17] {stock_name} 2차 진입 스킵: 산정 수량 0 "
-                    f"(target_amount={target_amount}, cur_price={pos.current_price})"
-                )
-                return False
+                # 8-B) 최소 1주 폴백 (2026-06-19 삼성물산 사건)
+                # 고가주를 1차에 1주만 진입하면 mirror_first 예산(=1차 원가)이
+                # 상승한 현재가보다 작아 int(예산//현재가)=0 → 불타기가 구조적으로 영원히 불발.
+                # PYRAMID_MIN_ONE_SHARE=True 면 자본 여유 확인 후 최소 1주 매수로 보정.
+                cur_price = pos.current_price
+                if getattr(settings, "PYRAMID_MIN_ONE_SHARE", True) and cur_price > 0:
+                    # 자본가드 1: swing_pool 잔여로 1주 매수 비용(원) 이상인지 (금액 비교)
+                    # — 7-B의 target_amount 한도 비교와 달리 "1주 살 돈이 있는가" 판정.
+                    # None=계산 실패/미적용 → 통과(보수적으로 cash 가드로만 판정).
+                    swing_ok = (swing_available is None) or (cur_price <= swing_available)
+                    # 자본가드 2: 주문가능현금 (실발주 모드에서만 조회 — DRY_RUN은 시뮬이라 스킵)
+                    cash_ok = True
+                    if swing_ok and not getattr(settings, "DRY_RUN_PYRAMID", False):
+                        try:
+                            from modules.kis_api import KISApi
+                            cash = KISApi().get_orderable_cash()
+                            cash_ok = cur_price <= max(0, cash)
+                            if not cash_ok:
+                                logger.info(
+                                    f"[v17] {stock_name} 2차 진입 최소 1주 폴백 스킵: "
+                                    f"주문가능현금 부족 (cur_price={cur_price:,.0f}원 > cash={cash:,.0f}원)"
+                                )
+                        except Exception as e:
+                            # 현금 조회 실패 시 보수적으로 차단 (자본 초과 매수 방지, 다음 사이클 재시도)
+                            logger.debug(f"[v17] 최소 1주 폴백 현금 조회 실패 {stock_code}: {e}")
+                            cash_ok = False
+                    if swing_ok and cash_ok:
+                        second_qty = 1
+                        target_amount = float(cur_price)  # 후속 로그/회계 정합 (1주 실비용)
+                        logger.info(
+                            f"[v17] {stock_name} 2차 진입 최소 1주 폴백 적용: "
+                            f"산정수량 0 → 1주 @{cur_price:,.0f}원 "
+                            f"(mirror 예산<1주가, swing_available={swing_available})"
+                        )
+                if second_qty <= 0:
+                    logger.warning(
+                        f"[v17] {stock_name} 2차 진입 스킵: 산정 수량 0 "
+                        f"(target_amount={target_amount}, cur_price={pos.current_price})"
+                    )
+                    return False
 
             # 9) DRY_RUN 게이트 — 시뮬레이션 모드면 실발주 차단
             if getattr(settings, "DRY_RUN_PYRAMID", False):

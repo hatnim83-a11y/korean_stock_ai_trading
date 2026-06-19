@@ -444,6 +444,17 @@ class Settings(BaseSettings):
             "TRANCHE_ENTRY_ENABLED=True 상태에서만 의미 있음(1차 진입은 영향 X)"
         )
     )
+    PYRAMID_MIN_ONE_SHARE: bool = Field(
+        default=True,
+        description=(
+            "2차 진입(불타기) 산정 수량이 0주일 때 최소 1주 폴백 매수. "
+            "고가주를 1차에 1주만 진입한 경우 mirror_first 예산(=1차 원가)이 "
+            "상승한 현재가보다 작아 int(예산//현재가)=0이 되어 불타기가 구조적으로 "
+            "영원히 불가능해지는 것을 보정(2026-06-19 삼성물산 사건). "
+            "단 swing_pool 잔여·주문가능현금에 1주 매수 여유가 있을 때만 발주(없으면 스킵). "
+            "False=폴백 미적용(기존 동작, 산정수량 0이면 스킵)"
+        )
+    )
 
     # ===== ATR 기반 트레일링 (v17 — max(고정값, 2.0×ATR)) =====
     TRAILING_USE_ATR: bool = Field(
