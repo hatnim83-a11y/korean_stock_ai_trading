@@ -568,17 +568,25 @@ class MainOrchestrator:
             self.candidate_logger.get_closed_today, today
         )
 
+        # 옵션 A phase1-only 체결은 candidate_status='recommended'로 남을 수 있어
+        # entered 집계와 별도로 일일요약에 노출한다.
+        phase1_fills = await asyncio.to_thread(
+            self.candidate_logger.get_phase1_fills_for_date, today
+        )
+
         sent = await asyncio.to_thread(
             self.review_bot.send_daily_summary,
-            today, counts, len(recent_recommended), closed_today
+            today, counts, len(recent_recommended), closed_today, phase1_fills
         )
         logger.info(
-            f"[orchestrator] 일일 요약 발송={sent} — 오늘 {counts}, 청산 {len(closed_today)}건, "
+            f"[orchestrator] 일일 요약 발송={sent} — 오늘 {counts}, "
+            f"phase1체결 {len(phase1_fills)}건, 청산 {len(closed_today)}건, "
             f"누적 {len(recent_recommended)}/{self.gate_threshold}"
         )
         return {
             "date": str(today), "today_counts": counts,
-            "cumulative_recommended": len(recent_recommended), "sent": bool(sent),
+            "cumulative_recommended": len(recent_recommended),
+            "phase1_fills": len(phase1_fills), "sent": bool(sent),
         }
 
     async def run_label_yesterday(

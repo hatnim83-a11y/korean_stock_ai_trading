@@ -205,6 +205,7 @@ class TelegramReviewBot:
         status_counts: dict,
         recommended_count: int = 0,
         closed_positions: Optional[list[dict]] = None,
+        phase1_fills: Optional[list[dict]] = None,
     ) -> bool:
         """일일 요약 (15:35 마감 후, 스윙 send_daily_report 형식 통일).
 
@@ -215,6 +216,9 @@ class TelegramReviewBot:
             closed_positions: 오늘 청산된 포지션 리스트 (각 dict: ticker, name,
                 entry_price_avg, exit_price, qty, profit_abs, profit_rate).
                 None 또는 빈 리스트 시 PnL 섹션 생략.
+            phase1_fills: 오늘 phase1 체결 리스트. 옵션 A 설계상
+                candidate_status='recommended'로 남는 phase1-only 체결을 일일요약에
+                별도 표시하기 위한 값.
 
         Returns:
             발송 성공 여부.
@@ -238,6 +242,30 @@ class TelegramReviewBot:
             f"• Rejected (필터): {rej_f}건",
             f"• Rejected (수동): {rej_m}건",
         ]
+
+        # 옵션 A phase1-only 체결은 candidate_status='recommended'로 남을 수 있으므로
+        # entered 집계와 별도로 실제 체결 현황을 표시한다.
+        if phase1_fills:
+            total_amount = sum(float(f.get("total_amount") or 0) for f in phase1_fills)
+            total_shares = sum(int(f.get("total_shares") or 0) for f in phase1_fills)
+            lines.extend([
+                "",
+                f"🟢 *Phase1 체결*: {len(phase1_fills)}건 / {total_amount:,.0f}원 / {total_shares:,}주",
+            ])
+            for fill in phase1_fills[:5]:
+                tk = _escape_markdown(fill.get("ticker", ""))
+                nm = _escape_markdown(fill.get("name", ""))
+                shares = int(fill.get("total_shares") or 0)
+                avg_price = float(fill.get("avg_entry_price") or 0)
+                status = _escape_markdown(fill.get("candidate_status", ""))
+                order_id = _escape_markdown(fill.get("entry_phase1_order_id", ""))
+                phase_label = "phase1-only" if fill.get("phase1_only") else "phase1+phase2"
+                line = f"• {nm} ({tk}): {shares:,}주 @ {avg_price:,.0f}원 — `{phase_label}` / status `{status}`"
+                if order_id:
+                    line += f" / 주문 `{order_id}`"
+                lines.append(line)
+            if len(phase1_fills) > 5:
+                lines.append(f"… +{len(phase1_fills) - 5}건 더")
 
         # 오늘 청산된 포지션 PnL 섹션 (선택적)
         if closed_positions:
@@ -444,6 +472,7 @@ def _escape_markdown(text: Any) -> str:
          .replace("_", "\\_")
          .replace("*", "\\*")
          .replace("[", "\\[")
+         .replace("]", "\\]")
          .replace("`", "\\`")
     )
 

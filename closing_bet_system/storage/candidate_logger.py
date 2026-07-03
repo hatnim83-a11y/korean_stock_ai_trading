@@ -789,6 +789,59 @@ class CandidateLogger:
             )
         return result
 
+    def get_phase1_fills_for_date(self, trade_date: Any) -> list[dict]:
+        """trade_date 당일 phase1 체결 후보 조회.
+
+        옵션 A 설계에서는 phase1만 체결되고 phase2가 비활성/미체결이면
+        candidate_status가 'recommended'로 남을 수 있다. 일일 요약에서
+        entered=0이어도 실제 phase1 체결을 명확히 보여주기 위한 조회 헬퍼다.
+
+        Returns:
+            candidate_id, ticker, name, candidate_status, phase1/phase2 체결가·수량,
+            order id, 총 체결금액, created_at 포함 dict 리스트.
+        """
+        date_str = _to_date_str(trade_date)
+        with self.db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT candidate_id, trade_date, ticker, name, candidate_status,
+                       entry_phase1_order_id, entry_phase1_executed_price,
+                       entry_phase1_executed_shares,
+                       entry_phase2_order_id, entry_phase2_executed_price,
+                       entry_phase2_executed_shares, entry_price, entry_amount,
+                       entry_time, exit_price, exit_time, final_exit_time, created_at
+                FROM candidates
+                WHERE trade_date = ?
+                  AND COALESCE(entry_phase1_executed_shares, 0) > 0
+                ORDER BY candidate_id ASC
+                """,
+                (date_str,),
+            )
+            rows = cursor.fetchall()
+
+        result: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            p1 = float(d.get("entry_phase1_executed_price") or 0)
+            s1 = int(d.get("entry_phase1_executed_shares") or 0)
+            p2 = float(d.get("entry_phase2_executed_price") or 0)
+            s2 = int(d.get("entry_phase2_executed_shares") or 0)
+            phase1_amount = p1 * s1
+            phase2_amount = p2 * s2
+            total_shares = s1 + s2
+            total_amount = phase1_amount + phase2_amount
+            avg_price = total_amount / total_shares if total_shares > 0 else 0.0
+            d.update({
+                "phase1_amount": phase1_amount,
+                "phase2_amount": phase2_amount,
+                "total_shares": total_shares,
+                "total_amount": total_amount,
+                "avg_entry_price": avg_price,
+                "phase1_only": s1 > 0 and s2 == 0,
+            })
+            result.append(d)
+        return result
+
     # ===== 내부 헬퍼 =====
 
     def _update_status(self, candidate_id: int, new_status: str, reason: str) -> None:
