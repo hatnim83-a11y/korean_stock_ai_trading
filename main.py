@@ -85,6 +85,33 @@ def _coalesce_zero(v):
     return 0 if v is None else v
 
 
+def _format_buy_failure_reason(order: dict) -> str:
+    """사용자용 매수 실패/미체결 사유 한 줄을 만든다.
+
+    execute_portfolio()의 실제 실행 결과를 기준으로 하며, 후보/계획 주문이 아니라
+    KIS 주문·체결 루프 결과를 설명한다.
+    """
+    requested = int(order.get("requested_quantity") or order.get("quantity") or 0)
+    filled = int(order.get("quantity") or 0)
+    remaining = order.get("remaining_shares")
+    if remaining is None and requested:
+        remaining = max(0, requested - filled)
+    remaining = int(remaining or 0)
+    retry_count = int(order.get("retry_count") or 0)
+    msg = str(order.get("message") or "").strip()
+
+    parts: list[str] = []
+    if requested or filled or remaining:
+        parts.append(f"체결 {filled}/{requested}주")
+    if remaining > 0:
+        parts.append(f"미체결 {remaining}주")
+    if retry_count > 0:
+        parts.append(f"재시도 {retry_count}회")
+    if msg:
+        parts.append(f"사유: {msg}")
+    return " / ".join(parts) if parts else "주문 실패"
+
+
 def _pick_momentum(t: dict):
     """테마 dict에서 momentum 값을 안전하게 추출.
 
@@ -1520,10 +1547,13 @@ class TradingSystem:
 
         # Phase 7: 매수 실행
         bought_count = 0
+        filled_buy_orders = []
+        failed_buy_orders = []
         if new_buy_orders:
             if self.test_mode:
                 logger.info(f"   [테스트 모드] 매수 스킵: {len(new_buy_orders)}건")
                 bought_count = len(new_buy_orders)
+                filled_buy_orders = list(new_buy_orders)
                 self.today_orders = new_buy_orders
             else:
                 buy_result = await asyncio.to_thread(
@@ -1531,9 +1561,14 @@ class TradingSystem:
                     new_buy_orders,
                     save_to_db=True
                 )
-                self.today_orders = new_buy_orders
+                execution_orders = buy_result.get("orders", []) or []
+                # 요약/상세 메시지는 계획 주문(new_buy_orders)이 아니라 실제 실행 결과를 기준으로 한다.
+                # 미체결 종목을 신규 매수로 표시하면 "후보였지만 왜 못 샀는지"가 사라진다.
+                self.today_orders = execution_orders
+                failed_buy_orders = [o for o in execution_orders if not o.get("success")]
+                filled_buy_orders = [o for o in execution_orders if o.get("success")]
 
-                for order in buy_result.get("orders", []):
+                for order in execution_orders:
                     if order.get("success"):
                         bought_count += 1
                         filled_price = order.get("filled_price") or order.get("price", 0)
@@ -1576,7 +1611,12 @@ class TradingSystem:
                         })
 
         # Phase 8: 텔레그램 요약 발송
-        self._send_buy_summary(current_holdings, new_buy_orders, bought_count)
+        self._send_buy_summary(
+            current_holdings,
+            filled_buy_orders,
+            bought_count,
+            failed_buy_orders=failed_buy_orders,
+        )
 
         # Phase 9: 매수 완료 → 모니터 즉시 재시작 (재시작 cron과의 레이스 차단)
         # 2026-06-10 사건: 매수 루프(~82초)가 cron 간격(1분)을 초과하면 재시작이
@@ -1606,7 +1646,9 @@ class TradingSystem:
         self,
         current_holdings: list[dict],
         new_buy_orders: list[dict],
-        bought_count: int
+        bought_count: int,
+        *,
+        failed_buy_orders: Optional[list[dict]] = None,
     ) -> None:
         """09:25 매수 리포트 텔레그램 발송"""
         from config import now_kst
@@ -1651,7 +1693,9 @@ class TradingSystem:
             name = s.get('name', s.get('stock_name', s.get('code', '?')))
             excluded_lines.append(f"  - {name} — 슬롯 부족")
 
-        # --- 매수 없음 + 탈락 사유 표시 ---
+        failed_buy_orders = failed_buy_orders or []
+
+        # --- 매수 없음 + 탈락/미체결 사유 표시 ---
         if not new_buy_orders:
             # 파이프라인 요약
             screening_count = len(self.today_candidates) if self.today_candidates else 0
@@ -1664,10 +1708,19 @@ class TradingSystem:
                 lines.append(f"⚠️ 사유: {skip_reason}")
                 self._buy_skip_reason = ''  # 1회성 소비
 
+            if failed_buy_orders:
+                lines.append(f"\n⚠️ 미매수/미체결: {len(failed_buy_orders)}종목")
+                for o in failed_buy_orders:
+                    name = o.get('stock_name', o.get('name', o.get('stock_code', '?')))
+                    code = o.get('stock_code', o.get('code', ''))
+                    reason = _format_buy_failure_reason(o)
+                    code_part = f" ({code})" if code else ""
+                    lines.append(f"  - {name}{code_part} — {reason}")
+
             if excluded_lines:
                 lines.append(f"\n❌ 탈락: {len(excluded_lines)}종목")
                 lines.extend(excluded_lines)
-            elif not current_holdings and screening_count == 0:
+            elif not current_holdings and screening_count == 0 and not failed_buy_orders:
                 lines.append("보유 0개, 매수 후보 없음")
 
             self.notifier.send_message("\n".join(lines))
@@ -1779,6 +1832,17 @@ class TradingSystem:
                     logger.warning(f"buy_message UPDATE 0 row: {code} (holding row 없음)")
             except Exception as e:
                 logger.warning(f"buy_message 저장 실패 {code}: {e}")
+
+        # 미체결/실패 종목 (매수 있는 경우에도 표시)
+        if failed_buy_orders:
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"\n⚠️ 미매수/미체결: {len(failed_buy_orders)}종목")
+            for o in failed_buy_orders:
+                name = o.get('stock_name', o.get('name', o.get('stock_code', '?')))
+                code = o.get('stock_code', o.get('code', ''))
+                reason = _format_buy_failure_reason(o)
+                code_part = f" ({code})" if code else ""
+                lines.append(f"  - {name}{code_part} — {reason}")
 
         # 탈락 종목 (매수 있는 경우에도 표시)
         if excluded_lines:
