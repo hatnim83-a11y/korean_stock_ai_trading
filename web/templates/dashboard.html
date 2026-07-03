@@ -481,6 +481,52 @@ tr:hover td { background: var(--bg-elevated); }
 #portfolio-table tbody tr[data-buy-msg] td:nth-child(1) {
   cursor: help;
 }
+
+/* ===== 개선 보고서 ===== */
+.imp-layout { display: grid; grid-template-columns: 340px 1fr; gap: var(--sp-lg); align-items: start; }
+.imp-list { display: flex; flex-direction: column; gap: var(--sp-sm); max-height: 78vh; overflow-y: auto; }
+.imp-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.imp-card:hover { border-color: var(--accent); }
+.imp-card.active { border-color: var(--accent); background: var(--accent-dim); }
+.imp-card .imp-title { font-size: 0.86rem; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; line-height: 1.35; }
+.imp-card .imp-meta { font-size: 0.68rem; color: var(--text-tertiary); display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.imp-card .imp-summary { font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4; }
+.imp-kind {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+}
+.imp-kind.weekly { background: var(--info-dim); color: var(--info); }
+.imp-kind.monthly { background: var(--positive-dim); color: var(--positive); }
+.imp-kind.focus { background: var(--accent-dim); color: var(--accent); }
+.imp-kind.closing_bet { background: rgba(245,158,11,0.18); color: #f59e0b; }
+.imp-kind.other { background: rgba(81,88,104,0.2); color: var(--text-tertiary); }
+.imp-detail {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--sp-md) var(--sp-lg);
+  max-height: 78vh; overflow-y: auto;
+}
+.imp-detail h2 { font-size: 1.05rem; margin-bottom: var(--sp-sm); }
+.imp-detail .imp-detail-meta { font-size: 0.72rem; color: var(--text-tertiary); margin-bottom: var(--sp-md); display: flex; flex-wrap: wrap; gap: 8px; }
+.imp-detail pre.imp-content {
+  white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem; line-height: 1.55; color: var(--text-secondary);
+  margin: 0;
+}
+.imp-trunc { color: var(--accent); font-size: 0.72rem; margin-top: var(--sp-md); }
+@media (max-width: 768px) {
+  .imp-layout { grid-template-columns: 1fr; }
+  .imp-list { max-height: none; }
+}
 </style>
 </head>
 <body>
@@ -503,6 +549,7 @@ tr:hover td { background: var(--bg-elevated); }
   <div class="tab" data-tab="news">News</div>
   <div class="tab" data-tab="system">System</div>
   <div class="tab" data-tab="closingbet">종가베팅</div>
+  <div class="tab" data-tab="improvements">개선 보고서</div>
 </div>
 
 <!-- Content -->
@@ -665,6 +712,18 @@ tr:hover td { background: var(--bg-elevated); }
         <thead><tr><th>시각</th><th>종목</th><th>매도1</th><th>매수1</th><th>현재가</th><th>스프레드</th></tr></thead>
         <tbody id="cb-ob-body"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- ========== 개선 보고서 (read-only) ========== -->
+  <div class="panel" id="panel-improvements">
+    <div class="imp-layout">
+      <div class="imp-list" id="imp-list">
+        <p style="color:var(--text-tertiary)">로딩 중...</p>
+      </div>
+      <div class="imp-detail" id="imp-detail">
+        <p style="color:var(--text-tertiary)">왼쪽 목록에서 보고서를 선택하세요.</p>
+      </div>
     </div>
   </div>
 
@@ -1002,7 +1061,71 @@ function loadTab(tab) {
     case 'news': loadNews(); break;
     case 'system': loadSystem(); break;
     case 'closingbet': loadClosingBet(); break;
+    case 'improvements': loadImprovements(); break;
   }
+}
+
+// ===== 개선 보고서 (read-only) =====
+const IMP_KIND_LABEL = { weekly: '주간', monthly: '월간', focus: '집중', closing_bet: '종가베팅', other: '기타' };
+
+async function loadImprovements() {
+  const listEl = document.getElementById('imp-list');
+  listEl.innerHTML = '<p style="color:var(--text-tertiary)">로딩 중...</p>';
+  const d = await api('/improvements');
+  if (!d) return;
+  const reports = d.reports || [];
+  if (!reports.length) {
+    listEl.innerHTML = '<p style="color:var(--text-tertiary)">개선 보고서가 없습니다.</p>';
+    return;
+  }
+  listEl.innerHTML = reports.map(r => {
+    const kind = escapeHtml(r.kind || 'other');
+    const label = IMP_KIND_LABEL[r.kind] || '기타';
+    const meta = [];
+    if (r.analysis_period) meta.push(escapeHtml(r.analysis_period));
+    if (r.generated_at) meta.push(escapeHtml(r.generated_at));
+    if (r.modified_at) meta.push(escapeHtml((r.modified_at || '').slice(0, 10)));
+    const kb = r.size_bytes ? (r.size_bytes / 1024).toFixed(1) + 'KB' : '';
+    return `<div class="imp-card" data-file="${escapeHtml(r.filename)}">
+      <div class="imp-meta"><span class="imp-kind ${kind}">${escapeHtml(label)}</span>${kb ? '<span>' + kb + '</span>' : ''}</div>
+      <div class="imp-title">${escapeHtml(r.title || r.filename)}</div>
+      <div class="imp-meta">${meta.join(' · ')}</div>
+      <div class="imp-summary">${escapeHtml(r.summary || '')}</div>
+    </div>`;
+  }).join('');
+  listEl.querySelectorAll('.imp-card').forEach(card => {
+    card.addEventListener('click', () => {
+      listEl.querySelectorAll('.imp-card.active').forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      loadImprovementDetail(card.dataset.file);
+    });
+  });
+}
+
+async function loadImprovementDetail(filename) {
+  const el = document.getElementById('imp-detail');
+  el.innerHTML = '<p style="color:var(--text-tertiary)">로딩 중...</p>';
+  const res = await fetch('/api/v1/improvements/' + encodeURIComponent(filename));
+  if (res.status === 401) { window.location = '/login'; return; }
+  if (!res.ok) {
+    el.innerHTML = '<p style="color:var(--negative)">보고서를 불러올 수 없습니다.</p>';
+    return;
+  }
+  const d = await res.json();
+  const meta = [];
+  const label = IMP_KIND_LABEL[d.kind] || '기타';
+  meta.push(`<span class="imp-kind ${escapeHtml(d.kind || 'other')}">${escapeHtml(label)}</span>`);
+  if (d.analysis_period) meta.push('<span>기간: ' + escapeHtml(d.analysis_period) + '</span>');
+  if (d.mode) meta.push('<span>mode: ' + escapeHtml(d.mode) + '</span>');
+  if (d.sample_size) meta.push('<span>표본: ' + escapeHtml(d.sample_size) + '</span>');
+  if (d.generated_at) meta.push('<span>' + escapeHtml(d.generated_at) + '</span>');
+  const trunc = d.content_truncated
+    ? '<div class="imp-trunc">⚠ 내용이 길어 일부만 표시됩니다 (원본 파일 참조).</div>' : '';
+  el.innerHTML = `
+    <h2>${escapeHtml(d.title || d.filename)}</h2>
+    <div class="imp-detail-meta">${meta.join('')}</div>
+    <pre class="imp-content">${escapeHtml(d.content || '')}</pre>
+    ${trunc}`;
 }
 
 // ===== 종가베팅 (Phase 2-6) =====

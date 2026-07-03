@@ -2,6 +2,8 @@
 web/api_routes.py - REST API 엔드포인트
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 
 import sys
@@ -10,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from web.auth import require_auth
 from web import dashboard_service as svc
+from web import improvements_service as improvements
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_auth)])
 
@@ -53,11 +56,37 @@ async def system_status():
     return data
 
 
+# ===== 개선 보고서 (read-only, docs/improvements) =====
+# 파일 시스템 읽기 전용. 경로 가드는 improvements_service 에서 강제.
+
+
+@router.get("/improvements")
+async def improvements_list():
+    """개선 보고서 목록(최신순). 디렉토리 부재 시 빈 리스트."""
+    try:
+        reports = await asyncio.to_thread(improvements.list_improvements)
+    except Exception:
+        reports = []
+    return {"reports": reports, "count": len(reports)}
+
+
+@router.get("/improvements/{filename}")
+async def improvements_detail(filename: str):
+    """단일 개선 보고서 상세. 유효하지 않으면 400, 없으면 404."""
+    try:
+        data = await asyncio.to_thread(improvements.get_improvement, filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="유효하지 않은 파일명")
+    except Exception:
+        raise HTTPException(status_code=404, detail="보고서를 찾을 수 없음")
+    if data is None:
+        raise HTTPException(status_code=404, detail="보고서를 찾을 수 없음")
+    return data
+
+
 # ===== 종가베팅 (Phase 2-6) =====
 # closing_bet_system/dashboard/data_adapter.py 의 read-only 헬퍼를 호출.
 # 모든 응답은 closing_bet.db 가 비어있어도 빈 dict / 0 카운트 정상 반환.
-
-import asyncio  # noqa: E402
 
 from closing_bet_system.dashboard import data_adapter as cb_adapter  # noqa: E402
 
