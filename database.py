@@ -1030,6 +1030,66 @@ class Database:
             logger.warning(f"테마 통과율 조회 실패: {e}")
             return {}
 
+    def get_recent_theme_stock_codes(
+        self, theme_name: str, days: int = 14, limit: int = 10
+    ) -> list:
+        """최근 screening_log에서 특정 테마의 종목코드를 복원 (supply_score_v2 fallback용).
+
+        theme["stocks"]가 비어 supply_score_v2가 강제 0.0이 되는 문제(Phase 1-B½ Shadow
+        Run noise)를 완화하기 위해, 최근 N일 screening_log에서 같은 테마로 관측된
+        6자리 종목코드를 복원한다. 읽기 전용, 네트워크 미사용.
+
+        Args:
+            theme_name: 테마명 (정확 일치)
+            days: 룩백 일수 (KST 기준, <=0이면 [])
+            limit: 최대 반환 종목 수 (<=0이면 [])
+
+        Returns:
+            list[str]: 6자리 종목코드. passed 빈도·최근성·관측횟수 순 정렬.
+                blank 테마 / 무데이터 / 예외 시 [].
+
+        Note:
+            컷오프는 Python 레벨에서 `now_kst()` 기준으로 계산하므로 SQLite `DATE('now')`
+            (서버 UTC) 함정이 없다. KST 15:00~24:00 호출 시에도 당일 관측이 누락되지 않는다.
+            `stage='filter'`(screener 단계)만 조회 — 테마→종목 매핑의 authoritative 출처이며
+            ai_verify/gap_filter 하위 단계의 passed 부풀림 노이즈를 배제한다
+            (`get_theme_pass_rates`와 동일 기준).
+            passed=1을 우선 정렬하되, passed 데이터가 없어도 관측된 종목은 반환(보수적).
+        """
+        if not theme_name or not str(theme_name).strip():
+            return []
+        if days <= 0 or limit <= 0:
+            return []
+        try:
+            cutoff = (now_kst().date() - timedelta(days=days)).isoformat()
+            with self.get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT stock_code,
+                           MAX(date) AS last_seen,
+                           SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END) AS passed_count,
+                           COUNT(*) AS seen_count
+                    FROM screening_log
+                    WHERE theme = ? AND date >= ? AND stage = 'filter'
+                    GROUP BY stock_code
+                    ORDER BY passed_count DESC, last_seen DESC, seen_count DESC
+                    """,
+                    (theme_name, cutoff),
+                )
+                rows = cursor.fetchall()
+
+            codes: list = []
+            for row in rows:
+                code = row["stock_code"]
+                if isinstance(code, str) and len(code) == 6 and code.isdigit():
+                    codes.append(code)
+                if len(codes) >= limit:
+                    break
+            return codes
+        except Exception as e:
+            logger.warning(f"get_recent_theme_stock_codes 실패 [{theme_name}]: {e}")
+            return []
+
     # ===== 종목 관련 메서드 =====
 
     def save_screened_stocks(self, stocks: list[dict], target_date: date) -> None:

@@ -340,6 +340,175 @@ def test_attribution_data_days_filter_kst():
         db.close()
 
 
+# ===== get_recent_theme_stock_codes (Phase 1-B½ stock-code fallback) =====
+
+def _insert_screening_logs(db, rows):
+    """rows: [(date_iso, stock_code, stock_name, theme, passed), ...]"""
+    for date_iso, code, name, theme, passed in rows:
+        db.save_screening_log({
+            "date": date_iso,
+            "stock_code": code,
+            "stock_name": name,
+            "theme": theme,
+            "stage": "filter",
+            "passed": passed,
+        })
+
+
+def test_recent_theme_codes_returns_matching():
+    """최근 screening_log에서 해당 테마 6자리 코드 반환."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        _insert_screening_logs(db, [
+            (today, "005930", "삼성전자", "반도체", 1),
+            (today, "000660", "SK하이닉스", "반도체", 1),
+        ])
+        codes = db.get_recent_theme_stock_codes("반도체", days=14, limit=10)
+        assert "005930" in codes
+        assert "000660" in codes
+        assert len(codes) == 2
+        print("  [PASS] recent_theme_codes_returns_matching")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_filters_invalid():
+    """6자리 숫자가 아닌 코드는 제외."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        _insert_screening_logs(db, [
+            (today, "005930", "삼성전자", "2차전지", 1),
+            (today, "0015G0", "무효코드", "2차전지", 1),  # 무효 (문자 포함)
+            (today, "12345", "짧은코드", "2차전지", 0),    # 5자리
+        ])
+        codes = db.get_recent_theme_stock_codes("2차전지", days=14, limit=10)
+        assert codes == ["005930"], f"expected ['005930'], got {codes}"
+        print("  [PASS] recent_theme_codes_filters_invalid")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_obeys_limit():
+    """limit만큼만 반환."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        _insert_screening_logs(db, [
+            (today, "005930", "A", "바이오", 1),
+            (today, "000660", "B", "바이오", 1),
+            (today, "035420", "C", "바이오", 1),
+            (today, "373220", "D", "바이오", 1),
+        ])
+        codes = db.get_recent_theme_stock_codes("바이오", days=14, limit=2)
+        assert len(codes) == 2
+        print("  [PASS] recent_theme_codes_obeys_limit")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_blank_and_zero_bounds():
+    """빈 테마명 / limit<=0 / days<=0 → []."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        _insert_screening_logs(db, [
+            (today, "005930", "삼성전자", "방산", 1),
+        ])
+        assert db.get_recent_theme_stock_codes("", days=14, limit=10) == []
+        assert db.get_recent_theme_stock_codes("   ", days=14, limit=10) == []
+        assert db.get_recent_theme_stock_codes("방산", days=14, limit=0) == []
+        assert db.get_recent_theme_stock_codes("방산", days=14, limit=-3) == []
+        assert db.get_recent_theme_stock_codes("방산", days=0, limit=10) == []
+        assert db.get_recent_theme_stock_codes("방산", days=-1, limit=10) == []
+        print("  [PASS] recent_theme_codes_blank_and_zero_bounds")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_no_cross_match():
+    """다른 테마의 종목은 반환하지 않음."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        _insert_screening_logs(db, [
+            (today, "005930", "삼성전자", "반도체", 1),
+            (today, "247540", "에코프로비엠", "2차전지", 1),
+        ])
+        codes = db.get_recent_theme_stock_codes("반도체", days=14, limit=10)
+        assert codes == ["005930"]
+        assert "247540" not in codes
+        print("  [PASS] recent_theme_codes_no_cross_match")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_respects_days_cutoff():
+    """days 룩백 밖의 관측은 제외 (KST 컷오프)."""
+    db = _temp_db()
+    try:
+        from datetime import timedelta
+        from config import now_kst
+        today = now_kst().date()
+        recent = today.isoformat()
+        old = (today - timedelta(days=30)).isoformat()
+        _insert_screening_logs(db, [
+            (recent, "005930", "삼성전자", "우주항공", 1),
+            (old, "047810", "한국항공우주", "우주항공", 1),
+        ])
+        codes = db.get_recent_theme_stock_codes("우주항공", days=14, limit=10)
+        assert codes == ["005930"], f"expected ['005930'], got {codes}"
+        print("  [PASS] recent_theme_codes_respects_days_cutoff")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_only_filter_stage():
+    """screener 'filter' 단계만 조회 — ai_verify/gap_filter 단계는 제외."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        db.save_screening_log({
+            "date": today, "stock_code": "005930", "stock_name": "삼성전자",
+            "theme": "반도체", "stage": "filter", "passed": 1,
+        })
+        db.save_screening_log({
+            "date": today, "stock_code": "000660", "stock_name": "SK하이닉스",
+            "theme": "반도체", "stage": "ai_verify", "passed": 1,  # 제외 대상
+        })
+        codes = db.get_recent_theme_stock_codes("반도체", days=14, limit=10)
+        assert codes == ["005930"], f"expected ['005930'], got {codes}"
+        assert "000660" not in codes
+        print("  [PASS] recent_theme_codes_only_filter_stage")
+    finally:
+        db.close()
+
+
+def test_recent_theme_codes_prefers_passed():
+    """passed=1 종목이 passed=0 종목보다 우선 정렬."""
+    db = _temp_db()
+    try:
+        from config import now_kst
+        today = now_kst().date().isoformat()
+        _insert_screening_logs(db, [
+            (today, "005930", "통과종목", "IT", 1),
+            (today, "000660", "탈락종목", "IT", 0),
+        ])
+        codes = db.get_recent_theme_stock_codes("IT", days=14, limit=10)
+        assert codes[0] == "005930"
+        assert "000660" in codes  # passed 없어도 관측된 종목은 포함(보수적)
+        print("  [PASS] recent_theme_codes_prefers_passed")
+    finally:
+        db.close()
+
+
 # ===== kis_api skip_supply 옵션 =====
 
 def test_kis_api_skip_supply_signature():
@@ -409,6 +578,15 @@ if __name__ == "__main__":
 
     test_attribution_data_empty()
     test_attribution_data_days_filter_kst()
+
+    test_recent_theme_codes_returns_matching()
+    test_recent_theme_codes_filters_invalid()
+    test_recent_theme_codes_obeys_limit()
+    test_recent_theme_codes_blank_and_zero_bounds()
+    test_recent_theme_codes_no_cross_match()
+    test_recent_theme_codes_respects_days_cutoff()
+    test_recent_theme_codes_only_filter_stage()
+    test_recent_theme_codes_prefers_passed()
 
     test_kis_api_skip_supply_signature()
     test_kis_api_skip_supply_skips_investor_call()

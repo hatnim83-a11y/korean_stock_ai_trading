@@ -313,6 +313,65 @@ def _stock_supply_ratio(snap: dict, lookback_days: int = 5) -> float:
     return foreign_net / denominator
 
 
+def _valid_stock_codes(codes) -> list:
+    """6자리 숫자 종목코드만 필터링 (URL 보강 실패/무효코드 방어).
+
+    0015G0 같은 문자 포함 코드, 자릿수 불일치, 비문자열 값을 모두 제거한다.
+    """
+    if not codes:
+        return []
+    out = []
+    for c in codes:
+        if isinstance(c, str) and len(c) == 6 and c.isdigit():
+            out.append(c)
+    return out
+
+
+def _resolve_theme_stock_codes_for_supply(theme, theme_name, supply_db=None) -> tuple:
+    """supply_score_v2 계산용 종목코드 해석 + 출처 메타데이터 반환.
+
+    theme["stocks"]가 비어 supply_score_v2가 강제 0.0이 되는 false-zero 관측
+    (Phase 1-B½ noise)를 줄이기 위해, DB fallback으로 최근 screening_log 종목코드를 복원한다.
+
+    출처 우선순위:
+      1. 유효한 theme["stocks"]           → source 'theme_stocks'
+      2. screening_log 최근 관측 (fallback) → source 'screening_log_recent'
+      3. 없음                              → source 'none'
+
+    Args:
+        theme: 테마 dict (stocks 키 포함 가능)
+        theme_name: 테마명 (fallback 조회 키)
+        supply_db: Database 인스턴스 (None이면 fallback 미사용, 네트워크/DB 무접근)
+
+    Returns:
+        (codes: list[str], source: str)
+    """
+    theme_stocks = theme.get("stocks", []) if isinstance(theme, dict) else []
+    theme_codes = _valid_stock_codes(theme_stocks)
+    if theme_codes:
+        return theme_codes, "theme_stocks"
+
+    if (
+        supply_db is not None
+        and getattr(settings, "SUPPLY_THEME_STOCK_FALLBACK_ENABLED", False)
+        and theme_name
+    ):
+        try:
+            fallback = supply_db.get_recent_theme_stock_codes(
+                theme_name,
+                days=settings.SUPPLY_THEME_STOCK_FALLBACK_DAYS,
+                limit=settings.SUPPLY_THEME_STOCK_FALLBACK_LIMIT,
+            )
+        except Exception as e:
+            logger.warning(f"supply fallback 종목코드 조회 실패 [{theme_name}]: {e}")
+            fallback = []
+        fallback = _valid_stock_codes(fallback)
+        if fallback:
+            return fallback, "screening_log_recent"
+
+    return [], "none"
+
+
 def calculate_theme_supply_score_v2(
     stock_codes: list,
     db,
@@ -986,11 +1045,13 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
         # 8. v16 Phase 1-B½ Shadow Run — supply_score_v2 계산 (관측 모드면 미반영)
         supply_v2_result = None
         supply_score_v2 = 0.0
+        _stocks_source = "none"
         if _supply_db is not None:
-            theme_stock_codes = theme.get("stocks", []) or []
-            # 6자리 종목코드만 (URL 보강 실패 케이스 방어)
-            theme_stock_codes = [c for c in theme_stock_codes
-                                  if isinstance(c, str) and len(c) == 6 and c.isdigit()]
+            # 2026-07-03 — theme["stocks"] 비면 screening_log fallback으로 종목코드 복원
+            #   (supply_score_v2 false-zero 관측 감소). 출처 메타데이터 breakdown_json 기록.
+            theme_stock_codes, _stocks_source = _resolve_theme_stock_codes_for_supply(
+                theme, theme_name, supply_db=_supply_db
+            )
             supply_v2_result = calculate_theme_supply_score_v2(
                 theme_stock_codes,
                 _supply_db,
@@ -1094,6 +1155,13 @@ def score_themes(themes: list[dict], include_news: bool = False, include_ai: boo
                     "observe_only": settings.SUPPLY_SCORE_OBSERVE_ONLY,
                     "score_applied": _score_applied,          # 실제 총점 가산 여부 (분석용)
                     "stocks_available": len(theme_stock_codes) > 0,  # noise 필터링용
+                    # 2026-07-03 — 종목코드 커버리지/출처 메타데이터 (Phase 1-C gating 판단용)
+                    "stocks_count": len(theme_stock_codes),
+                    "stocks_source": _stocks_source,  # theme_stocks | screening_log_recent | none
+                    "stocks_missing_reason": (
+                        None if theme_stock_codes
+                        else "no_theme_stocks_or_recent_screening_log"
+                    ),
                     "score_max": settings.SUPPLY_SCORE_MAX,
                     "ref_bil": settings.SUPPLY_INTENSITY_REF_BIL,
                     "top_n": settings.SUPPLY_SCORE_TOP_N,

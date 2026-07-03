@@ -1006,6 +1006,20 @@ class Settings(BaseSettings):
         default=30,
         description="universe 내부 외인 동적 TOP 측정 시 상위 N개 종목 (KIS TOP30 대비 비교용, Phase 1-C 결정에 사용)"
     )
+    # 2026-07-03 추가 — theme["stocks"] 비어 supply_score_v2=0.0 강제되는 문제 완화용
+    # screening_log 기반 종목코드 fallback (관측 품질 개선, 실발주 무관)
+    SUPPLY_THEME_STOCK_FALLBACK_ENABLED: bool = Field(
+        default=True,
+        description="theme['stocks']가 비었을 때 최근 screening_log에서 같은 테마 종목코드 복원 (supply_score_v2 false-zero 감소). False면 기존 동작(빈 리스트→0.0)"
+    )
+    SUPPLY_THEME_STOCK_FALLBACK_DAYS: int = Field(
+        default=14, ge=1,
+        description="screening_log fallback 룩백 일수 (KST 기준). 0/음수 오설정 방어: ge=1 + database.py 조기반환"
+    )
+    SUPPLY_THEME_STOCK_FALLBACK_LIMIT: int = Field(
+        default=10, ge=1,
+        description="screening_log fallback 최대 복원 종목 수. 0/음수 오설정 방어: ge=1 + database.py 조기반환"
+    )
 
     # ===== 스케줄 시간 =====
     SCHEDULE_THEME_ANALYSIS: str = Field(

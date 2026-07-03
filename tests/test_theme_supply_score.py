@@ -18,6 +18,8 @@ from database import Database
 from modules.theme_analyzer.scorer import (
     calculate_theme_supply_score_v2,
     measure_universe_top_supply_signal,
+    _valid_stock_codes,
+    _resolve_theme_stock_codes_for_supply,
 )
 
 
@@ -598,6 +600,110 @@ def test_ratio_universe_signal_skips_zero_trade_value():
         db.close()
 
 
+# ===== 2026-07-03 신규: 종목코드 fallback 해석 (Phase 1-B½ 커버리지 개선) =====
+
+
+def test_valid_stock_codes_filters():
+    """6자리 숫자만 통과, 나머지 제외."""
+    assert _valid_stock_codes(["005930", "0015G0", "12345", "1234567", None, 5930]) == ["005930"]
+    assert _valid_stock_codes([]) == []
+    assert _valid_stock_codes(None) == []
+    print("✅ test_valid_stock_codes_filters PASS")
+
+
+def test_resolve_prefers_theme_stocks():
+    """유효한 theme['stocks']가 DB fallback보다 우선."""
+    db = _temp_db()
+    try:
+        # DB에 fallback 후보를 넣어도 theme_stocks가 이기는지 확인
+        today = _kst_today_iso()
+        db.save_screening_log({
+            "date": today, "stock_code": "000660", "stock_name": "SK하이닉스",
+            "theme": "반도체", "stage": "filter", "passed": 1,
+        })
+        theme = {"name": "반도체", "stocks": ["005930", "0015G0"]}
+        codes, source = _resolve_theme_stock_codes_for_supply(theme, "반도체", supply_db=db)
+        assert codes == ["005930"], f"got {codes}"  # 무효코드 필터 + theme 우선
+        assert source == "theme_stocks"
+        print("✅ test_resolve_prefers_theme_stocks PASS")
+    finally:
+        db.close()
+
+
+def test_resolve_uses_db_fallback_when_empty():
+    """theme['stocks']가 비면 DB fallback 사용."""
+    db = _temp_db()
+    try:
+        today = _kst_today_iso()
+        db.save_screening_log({
+            "date": today, "stock_code": "000660", "stock_name": "SK하이닉스",
+            "theme": "반도체", "stage": "filter", "passed": 1,
+        })
+        theme = {"name": "반도체", "stocks": []}
+        codes, source = _resolve_theme_stock_codes_for_supply(theme, "반도체", supply_db=db)
+        assert codes == ["000660"], f"got {codes}"
+        assert source == "screening_log_recent"
+        print("✅ test_resolve_uses_db_fallback_when_empty PASS")
+    finally:
+        db.close()
+
+
+def test_resolve_none_when_no_data():
+    """theme_stocks 없고 fallback도 없으면 source='none'."""
+    db = _temp_db()
+    try:
+        theme = {"name": "무데이터테마", "stocks": []}
+        codes, source = _resolve_theme_stock_codes_for_supply(theme, "무데이터테마", supply_db=db)
+        assert codes == []
+        assert source == "none"
+        print("✅ test_resolve_none_when_no_data PASS")
+    finally:
+        db.close()
+
+
+def test_resolve_no_db_falls_back_to_theme_only():
+    """supply_db=None이면 theme_stocks만 사용 (네트워크/DB 무접근)."""
+    theme = {"name": "반도체", "stocks": ["005930"]}
+    codes, source = _resolve_theme_stock_codes_for_supply(theme, "반도체", supply_db=None)
+    assert codes == ["005930"]
+    assert source == "theme_stocks"
+    # 빈 theme_stocks + db None → none
+    codes2, source2 = _resolve_theme_stock_codes_for_supply({"name": "X", "stocks": []}, "X", supply_db=None)
+    assert codes2 == []
+    assert source2 == "none"
+    print("✅ test_resolve_no_db_falls_back_to_theme_only PASS")
+
+
+def test_resolve_fallback_disabled():
+    """SUPPLY_THEME_STOCK_FALLBACK_ENABLED=False면 DB fallback 미사용."""
+    db = _temp_db()
+    try:
+        today = _kst_today_iso()
+        db.save_screening_log({
+            "date": today, "stock_code": "000660", "stock_name": "SK하이닉스",
+            "theme": "반도체", "stage": "filter", "passed": 1,
+        })
+        from config import settings
+        orig = settings.SUPPLY_THEME_STOCK_FALLBACK_ENABLED
+        try:
+            settings.SUPPLY_THEME_STOCK_FALLBACK_ENABLED = False
+            codes, source = _resolve_theme_stock_codes_for_supply(
+                {"name": "반도체", "stocks": []}, "반도체", supply_db=db
+            )
+            assert codes == []
+            assert source == "none"
+        finally:
+            settings.SUPPLY_THEME_STOCK_FALLBACK_ENABLED = orig
+        print("✅ test_resolve_fallback_disabled PASS")
+    finally:
+        db.close()
+
+
+def _kst_today_iso():
+    from config import now_kst
+    return now_kst().date().isoformat()
+
+
 def run_all():
     tests = [
         test_empty_stock_codes,
@@ -627,6 +733,13 @@ def run_all():
         test_ratio_top_n_uses_ratio_not_net,
         test_ratio_universe_signal_normal,
         test_ratio_universe_signal_skips_zero_trade_value,
+        # 2026-07-03 신규 — 종목코드 fallback 해석
+        test_valid_stock_codes_filters,
+        test_resolve_prefers_theme_stocks,
+        test_resolve_uses_db_fallback_when_empty,
+        test_resolve_none_when_no_data,
+        test_resolve_no_db_falls_back_to_theme_only,
+        test_resolve_fallback_disabled,
     ]
     failures = 0
     for t in tests:

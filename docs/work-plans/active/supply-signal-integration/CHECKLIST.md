@@ -147,6 +147,28 @@
 - [ ] Pearson r 유지 (< 0.7)
 - [ ] **사용자 확인 → Phase 1-C 진행**
 
+### Phase 1-B½ 후속 — 종목 커버리지 개선 (2026-07-03 진단)
+
+**진단:** 3차 측정 데이터(2026-06-22~07-02, 270건)를 재분석한 결과, 양극화의 주원인은
+ratio 변환식이 아니라 **종목코드 커버리지 부족**으로 확인.
+- `stocks_available=False`: 136/270 (50.4%) — 전부 강제 `supply_score_v2=0.0`
+- `stocks_available=True`: 134건 — 평균 1.62, 중간 버킷 10.4%, 상위 버킷 18.7%, Pearson −0.1576
+- 원인: `score_themes()`가 `_enrich_theme_stocks()`를 `include_news=True`에서만, 상위 15개 테마만 URL/네트워크 보강 → 나머지/URL 없음/DB 복원 테마는 `theme["stocks"]` 비어 강제 0.0
+
+**조치 (stock-code fallback, Phase 1-C 이전):**
+- [x] `database.get_recent_theme_stock_codes(theme, days, limit)` — 최근 screening_log에서 같은 테마 6자리 종목코드 복원 (읽기 전용, KST 컷오프, passed 우선 정렬). 단위 7 PASS
+- [x] `scorer._valid_stock_codes()` + `_resolve_theme_stock_codes_for_supply()` — 출처 우선순위 `theme_stocks` → `screening_log_recent` → `none`. 단위 6 PASS
+- [x] `config.py` 토글 3개: `SUPPLY_THEME_STOCK_FALLBACK_ENABLED=True`, `SUPPLY_THEME_STOCK_FALLBACK_DAYS=14`, `SUPPLY_THEME_STOCK_FALLBACK_LIMIT=10`
+- [x] `score_themes()` breakdown_json에 `stocks_count`/`stocks_source`/`stocks_missing_reason` 추가 (Phase 1-C gating이 진짜 약한 수급 vs 종목 누락 noise 구분)
+- [x] `scripts/analyze_supply_score_observations.py` 신규 — 커버리지/분포/Pearson/stocks_source 집계 (읽기 전용, ad-hoc SQL 제거)
+- [ ] **systemctl restart trading_system** (사용자 진행 필요) → fallback 반영된 신규 관측 누적
+- [ ] 재시작 후 커버리지 재측정 (`stocks_available=False` 비율 하락 확인)
+
+**신규 gating 규칙 (Phase 1-C 진입 전):**
+- 관측을 **전체 행**과 **`stocks_available=True` 행** 양쪽으로 평가한다.
+- fallback 반영 후 관측에서 종목 커버리지·분포가 허용 범위에 들기 전까지 Phase 1-C(`SUPPLY_SCORE_MAX>0`)를 활성화하지 않는다.
+- 분석은 `scripts/analyze_supply_score_observations.py --since <date> [--stocks-available-only]`로 재현.
+
 ### 문서 업데이트
 - [ ] Shadow Run 결과를 `memory/project_supply_signal_integration.md`에 기록
 
