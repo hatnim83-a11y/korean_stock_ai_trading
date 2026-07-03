@@ -107,8 +107,18 @@ def _format_buy_failure_reason(order: dict) -> str:
         parts.append(f"미체결 {remaining}주")
     if retry_count > 0:
         parts.append(f"재시도 {retry_count}회")
+    limit_min = int(order.get("limit_price_min") or 0)
+    limit_max = int(order.get("limit_price_max") or 0)
+    if limit_min and limit_max:
+        if limit_min == limit_max:
+            parts.append(f"주문가 {limit_min:,}원")
+        else:
+            parts.append(f"주문가 {limit_min:,}~{limit_max:,}원")
+    inferred = str(order.get("inferred_reason") or "").strip()
     if msg:
         parts.append(f"사유: {msg}")
+    elif inferred:
+        parts.append(f"사유: {inferred}")
     return " / ".join(parts) if parts else "주문 실패"
 
 

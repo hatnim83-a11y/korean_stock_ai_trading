@@ -40,6 +40,36 @@ UPPER_LIMIT_RATIO = 1.3  # 시장가 주문 상한가 증거금 배수 (+30%)
 RETRY_QTY_REDUCTION = 0.9  # 재시도 시 수량 감소 비율 (10% 감소)
 
 
+def _krx_tick_size(price: int) -> int:
+    """한국 주식 가격대별 호가 단위(보수적 근사)."""
+    if price < 2_000:
+        return 1
+    if price < 5_000:
+        return 5
+    if price < 20_000:
+        return 10
+    if price < 50_000:
+        return 50
+    if price < 200_000:
+        return 100
+    if price < 500_000:
+        return 500
+    return 1_000
+
+
+def _floor_to_tick(price: int, tick: int) -> int:
+    if price <= 0 or tick <= 0:
+        return 0
+    return (int(price) // tick) * tick
+
+
+def _add_ticks(price: int, ticks: int) -> int:
+    if price <= 0:
+        return 0
+    tick = _krx_tick_size(price)
+    return int(price) + max(0, int(ticks)) * tick
+
+
 # ===== 공격적 지정가(limit_aggressive) 주문 지원 =====
 
 class OrderErrorCategory(Enum):
@@ -395,23 +425,57 @@ class TradingEngine:
         stock_code: str,
         fallback_price: int
     ) -> tuple[int, str]:
-        """매도 1호가 조회 후 지정가 가격 결정
+        """매도 1호가 기반 상한 있는 추격 지정가 산출.
+
+        시장가 대신 ask1 위로 N틱만 더하되, 스크리닝/주문 기준가 대비
+        LIMIT_AGGRESSIVE_MAX_CHASE_PCT를 넘지 않도록 제한한다.
 
         Returns:
-            (price, source): 가격과 산출 출처("ask1" | "fallback")
+            (price, source): 가격과 산출 출처("ask1+Ntick" | "ask1+Ntick:capped" | "fallback")
         """
+        self._last_aggressive_quote = None
         try:
             ask_info = self.order_api.inquire_asking_price(stock_code)
             if ask_info.get("success") and ask_info.get("ask1", 0) > 0:
-                return int(ask_info["ask1"]), "ask1"
+                ask1 = int(ask_info.get("ask1") or 0)
+                ticks = max(0, int(getattr(settings, "LIMIT_AGGRESSIVE_CHASE_TICKS", 0) or 0))
+                raw_price = _add_ticks(ask1, ticks)
+                source = f"ask1+{ticks}tick" if ticks else "ask1"
+
+                cap_pct = float(getattr(settings, "LIMIT_AGGRESSIVE_MAX_CHASE_PCT", 0.0) or 0.0)
+                capped = False
+                price = raw_price
+                if fallback_price > 0 and cap_pct > 0:
+                    tick = _krx_tick_size(raw_price)
+                    cap_price = _floor_to_tick(int(fallback_price * (1 + cap_pct)), tick)
+                    if cap_price > 0 and price > cap_price:
+                        price = cap_price
+                        capped = True
+
+                self._last_aggressive_quote = {
+                    "ask1": ask1,
+                    "bid1": int(ask_info.get("bid1") or 0),
+                    "ask_volume1": int(ask_info.get("ask_volume1") or 0),
+                    "bid_volume1": int(ask_info.get("bid_volume1") or 0),
+                    "current_price": int(ask_info.get("current_price") or 0),
+                    "order_price": int(price),
+                    "source": source + (":capped" if capped else ""),
+                    "cap_pct": cap_pct,
+                }
+                return int(price), self._last_aggressive_quote["source"]
         except Exception as e:
             logger.warning(f"   호가 조회 예외 ({stock_code}): {e}")
 
         # 폴백: fallback_price × LIMIT_AGGRESSIVE_FALLBACK_PREMIUM을 정수화
-        # 호가 단위는 KIS 서버가 지정가 전송 시 정규화하므로 정수로만 맞춰줌
         if fallback_price > 0:
             premium = settings.LIMIT_AGGRESSIVE_FALLBACK_PREMIUM
-            return int(round(fallback_price * premium)), "fallback"
+            price = int(round(fallback_price * premium))
+            self._last_aggressive_quote = {
+                "ask1": 0, "bid1": 0, "ask_volume1": 0, "bid_volume1": 0,
+                "current_price": 0, "order_price": price, "source": "fallback",
+                "cap_pct": float(getattr(settings, "LIMIT_AGGRESSIVE_MAX_CHASE_PCT", 0.0) or 0.0),
+            }
+            return price, "fallback"
         return 0, "fallback"
 
     def _capture_sell_reference_price(
@@ -498,6 +562,8 @@ class TradingEngine:
         remaining = requested_qty
         start_ts = time.time()
         last_error_msg = ""
+        quote_samples: list[dict] = []
+        limit_prices: list[int] = []
 
         logger.info(f"   [BL] 재시도 루프 시작: {stock_name} ({stock_code}) {requested_qty}주")
 
@@ -513,6 +579,16 @@ class TradingEngine:
 
             # 1) 매도 1호가 조회
             bid_price, src = self._compute_aggressive_limit_price(stock_code, expected_price)
+            quote = getattr(self, "_last_aggressive_quote", None)
+            if quote:
+                quote_samples.append({**quote, "attempt": attempt + 1})
+            if bid_price > 0:
+                limit_prices.append(int(bid_price))
+                logger.info(
+                    f"   [BL] 가격 산출 ({attempt+1}/{max_retries}): {src} "
+                    f"ask1={quote.get('ask1') if quote else 0:,} bid1={quote.get('bid1') if quote else 0:,} "
+                    f"cur={quote.get('current_price') if quote else 0:,} → 주문가 {bid_price:,}원"
+                )
             if bid_price <= 0:
                 logger.warning(f"   [BL] 가격 산출 실패 → 루프 중단")
                 last_error_msg = "가격 산출 실패 (호가/폴백 모두 실패)"
@@ -624,6 +700,18 @@ class TradingEngine:
         success = total_filled_qty > 0
         remaining_shares = requested_qty - total_filled_qty
 
+        limit_price_min = min(limit_prices) if limit_prices else 0
+        limit_price_max = max(limit_prices) if limit_prices else 0
+        inferred_reason = ""
+        if not success:
+            capped_count = sum(1 for q in quote_samples if "capped" in str(q.get("source", "")))
+            if capped_count:
+                inferred_reason = "추정: 추격 상한 도달로 미체결"
+            elif quote_samples and any((q.get("current_price") or 0) > (q.get("order_price") or 0) for q in quote_samples):
+                inferred_reason = "추정: 급등 중 지정가 미추격"
+            else:
+                inferred_reason = "추정: 호가 잔량 부족 또는 체결 대기 중 미체결"
+
         if success:
             logger.info(
                 f"   [BL] 완료: {stock_name} {total_filled_qty}/{requested_qty}주 "
@@ -632,7 +720,8 @@ class TradingEngine:
         else:
             logger.warning(
                 f"   [BL] 실패: {stock_name} 체결 0/{requested_qty}주 "
-                f"({elapsed_total:.1f}s, 재시도 {len(sub_order_ids)}회) — {last_error_msg}"
+                f"({elapsed_total:.1f}s, 재시도 {len(sub_order_ids)}회) — "
+                f"{last_error_msg or inferred_reason}"
             )
 
         return {
@@ -653,7 +742,11 @@ class TradingEngine:
             "action": "매수",
             "retry_count": len(sub_order_ids),
             "elapsed_seconds": round(elapsed_total, 2),
-            "message": "체결 완료" if success else (last_error_msg or "미체결"),
+            "limit_price_min": limit_price_min,
+            "limit_price_max": limit_price_max,
+            "quote_samples": quote_samples[-5:],
+            "inferred_reason": inferred_reason,
+            "message": "체결 완료" if success else (last_error_msg or inferred_reason or "미체결"),
         }
 
     def _wait_for_fills(

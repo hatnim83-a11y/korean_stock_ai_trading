@@ -223,20 +223,20 @@ class Settings(BaseSettings):
         description="기본 주문 유형: market(시장가) / limit_aggressive(지정가+매도1호가) / limit(일반지정가). 긴급 롤백은 market으로 복귀"
     )
     LIMIT_AGGRESSIVE_RETRY_TIMEOUT: int = Field(
-        default=10,
-        description="공격적 지정가: 주문 후 체결 대기 타임아웃 (초)"
+        default=3,
+        description="공격적 지정가: 주문 후 체결 대기 타임아웃 (초). 급등 추격 지연 방지를 위해 짧게 유지"
     )
     LIMIT_AGGRESSIVE_POLL_INTERVAL: int = Field(
-        default=3,
-        description="공격적 지정가: 체결 상태 폴링 간격 (초). TIMEOUT 내 ~3회 체크"
+        default=1,
+        description="공격적 지정가: 체결 상태 폴링 간격 (초). 빠른 재가격 산정을 위해 1초"
     )
     LIMIT_AGGRESSIVE_MAX_RETRIES: int = Field(
-        default=12,
-        description="공격적 지정가: 최대 재시도 횟수 상한 (TOTAL_TIMEOUT 60s가 먼저 적용되어 실질 최대 6라운드)"
+        default=10,
+        description="공격적 지정가: 최대 재시도 횟수 상한 (TOTAL_TIMEOUT이 먼저 적용될 수 있음)"
     )
     LIMIT_AGGRESSIVE_TOTAL_TIMEOUT: int = Field(
-        default=60,
-        description="공격적 지정가: 종목당 총 체결 상한 (초). 5종목 × 60s = 최악 5분 (09:26 모니터링 충돌 방지)"
+        default=30,
+        description="공격적 지정가: 종목당 총 체결 상한 (초). 오래 기다리지 않고 빠르게 재가격/포기"
     )
     LIMIT_AGGRESSIVE_MARGIN_RATIO: float = Field(
         default=1.04,
@@ -249,6 +249,14 @@ class Settings(BaseSettings):
     LIMIT_AGGRESSIVE_FALLBACK_PREMIUM: float = Field(
         default=1.005,
         description="호가 조회 실패 시 폴백 가격 배수 (expected_price × 배수). Phase 5 관찰 후 조정"
+    )
+    LIMIT_AGGRESSIVE_CHASE_TICKS: int = Field(
+        default=2,
+        description="호가 조회 성공 시 매도 1호가 위로 추가할 틱 수. 시장가 대신 상한 있는 추격 지정가 사용"
+    )
+    LIMIT_AGGRESSIVE_MAX_CHASE_PCT: float = Field(
+        default=0.005,
+        description="expected_price 대비 최대 추격 허용률. 0.005=+0.5% 상한"
     )
     ABNORMAL_RETRY_WARN_THRESHOLD: int = Field(
         default=5,

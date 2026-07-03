@@ -83,3 +83,19 @@ def test_buy_summary_shows_only_actual_fills_as_new_buys_and_failed_attempts():
     assert "⚠️ 미매수/미체결: 1종목" in msg
     assert "대웅제약 (069620) — 체결 0/5주 / 미체결 5주 / 재시도 5회 / 사유: 미체결" in msg
     assert [code for code, _ in sys.db.updated] == ["006360"]
+
+
+def test_format_buy_failure_reason_includes_execution_price_diagnostics():
+    reason = _format_buy_failure_reason({
+        "requested_quantity": 5,
+        "quantity": 0,
+        "remaining_shares": 5,
+        "retry_count": 5,
+        "limit_price_min": 132_100,
+        "limit_price_max": 133_200,
+        "inferred_reason": "추정: 급등 중 지정가 미추격",
+        "message": "추정: 급등 중 지정가 미추격",
+    })
+
+    assert "주문가 132,100~133,200원" in reason
+    assert "추정: 급등 중 지정가 미추격" in reason
