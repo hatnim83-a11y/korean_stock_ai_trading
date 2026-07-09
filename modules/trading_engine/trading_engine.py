@@ -425,13 +425,18 @@ class TradingEngine:
         stock_code: str,
         fallback_price: int
     ) -> tuple[int, str]:
-        """매도 1호가 기반 상한 있는 추격 지정가 산출.
+        """매도 1호가 기반 상한 있는 추격 지정가 산출 (B안 동적 추격).
 
-        시장가 대신 ask1 위로 N틱만 더하되, 스크리닝/주문 기준가 대비
-        LIMIT_AGGRESSIVE_MAX_CHASE_PCT를 넘지 않도록 제한한다.
+        시장가 대신 ask1 위로 N틱만 더하되, 기준가(fallback_price) 대비 상한을 둔다.
+        - base cap(+MAX_CHASE_PCT) 이내: 그대로 사용
+        - base cap 초과 & gap ≤ base+DYNAMIC_TRIGGER_PCT: dynamic cap(+DYNAMIC_CHASE_PCT)까지 추격
+        - gap이 trigger 초과: 기존 base cap 고정
+        - gap ≥ OVERHEAT_PCT: 과열 → 주문가 0 반환(반복 발주 억제)
 
         Returns:
-            (price, source): 가격과 산출 출처("ask1+Ntick" | "ask1+Ntick:capped" | "fallback")
+            (price, source): 가격과 산출 출처
+                "ask1+Ntick" | ":dynamic" | ":dyn_capped" | ":capped" | ":overheat" | "fallback"
+                과열 시 price=0 반환.
         """
         self._last_aggressive_quote = None
         try:
@@ -442,15 +447,70 @@ class TradingEngine:
                 raw_price = _add_ticks(ask1, ticks)
                 source = f"ask1+{ticks}tick" if ticks else "ask1"
 
-                cap_pct = float(getattr(settings, "LIMIT_AGGRESSIVE_MAX_CHASE_PCT", 0.0) or 0.0)
-                capped = False
+                # B안 동적 추격 cap: base cap(+0.5%)을 살짝 넘는 정상 매수는
+                # dynamic cap(+1.2%)까지 추격 허용하되, 과열(+1.8%↑)은 즉시 포기.
+                base_cap_pct = float(getattr(settings, "LIMIT_AGGRESSIVE_MAX_CHASE_PCT", 0.0) or 0.0)
+                dyn_cap_pct = float(getattr(settings, "LIMIT_AGGRESSIVE_DYNAMIC_CHASE_PCT", 0.0) or 0.0)
+                trigger_pct = float(getattr(settings, "LIMIT_AGGRESSIVE_DYNAMIC_TRIGGER_PCT", 0.0) or 0.0)
+                overheat_pct = float(getattr(settings, "LIMIT_AGGRESSIVE_OVERHEAT_PCT", 0.0) or 0.0)
+
+                tick = _krx_tick_size(raw_price)
+                base_cap_price = (
+                    _floor_to_tick(int(fallback_price * (1 + base_cap_pct)), tick)
+                    if fallback_price > 0 and base_cap_pct > 0 else 0
+                )
+                # dynamic cap은 base cap에서 추가로 허용할 추격 폭이다.
+                # 2026-07-09 KT처럼 base_cap=54,500, ask1=55,100인 경우
+                # fallback 기준 +1.2%로는 여전히 54,900에 묶일 수 있어,
+                # base cap 기준 확장으로 실제 cap 초과폭을 흡수한다.
+                dyn_cap_base = base_cap_price if base_cap_price > 0 else fallback_price
+                dyn_cap_price = (
+                    _floor_to_tick(int(dyn_cap_base * (1 + dyn_cap_pct)), tick)
+                    if dyn_cap_base > 0 and dyn_cap_pct > 0 else 0
+                )
+                gap_pct = (ask1 - fallback_price) / fallback_price if fallback_price > 0 else 0.0
+                cap_gap_pct = (ask1 - base_cap_price) / base_cap_price if base_cap_price > 0 else gap_pct
+
                 price = raw_price
-                if fallback_price > 0 and cap_pct > 0:
-                    tick = _krx_tick_size(raw_price)
-                    cap_price = _floor_to_tick(int(fallback_price * (1 + cap_pct)), tick)
-                    if cap_price > 0 and price > cap_price:
-                        price = cap_price
-                        capped = True
+                overheat = False
+                note = ""
+
+                if overheat_pct > 0 and fallback_price > 0 and gap_pct >= overheat_pct:
+                    # 1) 과열: ask1이 기준 대비 overheat 이상 → 주문가 0으로 즉시 포기(반복 억제)
+                    price = 0
+                    overheat = True
+                    source = source + ":overheat"
+                    note = (
+                        f"과열 포기: ask1 {ask1:,}원 vs 기준 {fallback_price:,}원 "
+                        f"(+{gap_pct * 100:.2f}%) ≥ {overheat_pct * 100:.1f}%"
+                    )
+                elif base_cap_price > 0 and raw_price > base_cap_price:
+                    # 2) raw가 base cap 초과
+                    if dyn_cap_price > 0 and cap_gap_pct <= trigger_pct:
+                        # 2-a) 동적 추격 허용 (ask1이 base cap보다 trigger 이내 높을 때)
+                        if raw_price > dyn_cap_price:
+                            price = dyn_cap_price
+                            source = source + ":dyn_capped"
+                            note = (
+                                f"동적 상한 적용: ask1 {ask1:,}원, dyn_cap {dyn_cap_price:,}원 "
+                                f"(+{gap_pct * 100:.2f}%, cap_gap +{cap_gap_pct * 100:.2f}%)"
+                            )
+                        else:
+                            price = raw_price
+                            source = source + ":dynamic"
+                            note = (
+                                f"동적 추격: ask1 {ask1:,}원 > base_cap {base_cap_price:,}원, "
+                                f"주문가 {price:,}원 (+{gap_pct * 100:.2f}%)"
+                            )
+                    else:
+                        # 2-b) gap이 trigger 초과 → 기존 base cap 고정
+                        price = base_cap_price
+                        source = source + ":capped"
+                        note = (
+                            f"추격 상한 초과: ask1 {ask1:,}원 > cap {base_cap_price:,}원 "
+                            f"(+{gap_pct * 100:.2f}%)"
+                        )
+                # else: raw ≤ base cap → 정상(기존 동작), price=raw_price
 
                 self._last_aggressive_quote = {
                     "ask1": ask1,
@@ -459,10 +519,16 @@ class TradingEngine:
                     "bid_volume1": int(ask_info.get("bid_volume1") or 0),
                     "current_price": int(ask_info.get("current_price") or 0),
                     "order_price": int(price),
-                    "source": source + (":capped" if capped else ""),
-                    "cap_pct": cap_pct,
+                    "source": source,
+                    "cap_pct": base_cap_pct,
+                    "base_cap_price": base_cap_price,
+                    "dynamic_cap_price": dyn_cap_price,
+                    "gap_pct": round(gap_pct, 6),
+                    "cap_gap_pct": round(cap_gap_pct, 6),
+                    "overheat": overheat,
+                    "note": note,
                 }
-                return int(price), self._last_aggressive_quote["source"]
+                return int(price), source
         except Exception as e:
             logger.warning(f"   호가 조회 예외 ({stock_code}): {e}")
 
@@ -474,6 +540,8 @@ class TradingEngine:
                 "ask1": 0, "bid1": 0, "ask_volume1": 0, "bid_volume1": 0,
                 "current_price": 0, "order_price": price, "source": "fallback",
                 "cap_pct": float(getattr(settings, "LIMIT_AGGRESSIVE_MAX_CHASE_PCT", 0.0) or 0.0),
+                "base_cap_price": 0, "dynamic_cap_price": 0, "gap_pct": 0.0,
+                "overheat": False, "note": "",
             }
             return price, "fallback"
         return 0, "fallback"
@@ -590,8 +658,13 @@ class TradingEngine:
                     f"cur={quote.get('current_price') if quote else 0:,} → 주문가 {bid_price:,}원"
                 )
             if bid_price <= 0:
-                logger.warning(f"   [BL] 가격 산출 실패 → 루프 중단")
-                last_error_msg = "가격 산출 실패 (호가/폴백 모두 실패)"
+                if quote and quote.get("overheat"):
+                    # 과열 포기: 반복 발주 없이 즉시 중단 (30초 무의미 재시도 방지)
+                    last_error_msg = quote.get("note") or "과열 포기 (ask1 과도 상회)"
+                    logger.warning(f"   [BL] 과열 포기 → 루프 중단: {last_error_msg}")
+                else:
+                    logger.warning(f"   [BL] 가격 산출 실패 → 루프 중단")
+                    last_error_msg = "가격 산출 실패 (호가/폴백 모두 실패)"
                 break
 
             # 2) 지정가 주문

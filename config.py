@@ -256,7 +256,28 @@ class Settings(BaseSettings):
     )
     LIMIT_AGGRESSIVE_MAX_CHASE_PCT: float = Field(
         default=0.005,
-        description="expected_price 대비 최대 추격 허용률. 0.005=+0.5% 상한"
+        description="expected_price 대비 기본 추격 허용률(base cap). 0.005=+0.5% 상한"
+    )
+    LIMIT_AGGRESSIVE_DYNAMIC_CHASE_PCT: float = Field(
+        default=0.012,
+        description=(
+            "동적 추격 허용 상한(dynamic cap). ask1이 base cap을 살짝 넘을 때 base cap 기준 이 폭까지 추가 추격 허용. "
+            "0.012=base cap 대비 +1.2%. 0으로 두면 동적 추격 비활성(기존 base cap 동작 복귀, 롤백)."
+        )
+    )
+    LIMIT_AGGRESSIVE_DYNAMIC_TRIGGER_PCT: float = Field(
+        default=0.012,
+        description=(
+            "동적 추격 발동 허용 폭. ask1이 base cap보다 이 비율 이내로 높을 때만 dynamic cap 적용. "
+            "0.012=base cap보다 최대 +1.2% 초과까지 허용."
+        )
+    )
+    LIMIT_AGGRESSIVE_OVERHEAT_PCT: float = Field(
+        default=0.018,
+        description=(
+            "과열 즉시 포기 임계. ask1이 expected 대비 이 비율 이상 벌어지면 반복 주문 없이 즉시 포기(overheat). "
+            "0.018=+1.8%. 0으로 두면 과열 포기 비활성."
+        )
     )
     ABNORMAL_RETRY_WARN_THRESHOLD: int = Field(
         default=5,
