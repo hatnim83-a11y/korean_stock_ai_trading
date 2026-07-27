@@ -19,7 +19,12 @@ portfolio_monitor_v2.py - 개선된 포트폴리오 실시간 모니터링 모�
 import asyncio
 import json
 from datetime import datetime, time as dt_time
-from typing import Optional, Callable
+from typing import Optional, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # 타입 힌트 전용 import — 런타임 순환 import 회피
+    # (telegram_notifier는 portfolio_monitor를 import하지 않으므로 실제 순환은 없으나 방어적)
+    from modules.reporter.telegram_notifier import TelegramNotifier
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -210,15 +215,22 @@ class PortfolioMonitorV2:
     
     def __init__(
         self,
-        use_mock: bool = True
+        use_mock: bool = True,
+        notifier: Optional["TelegramNotifier"] = None,
     ):
         """
         모니터 초기화
-        
+
         Args:
             use_mock: 모의 모드 사용
+            notifier: 텔레그램 노티파이어 (v17 2차 진입 알림용). None이면 알림 무음 skip.
+                      main.py가 self.notifier를 주입한다 (2026-07-13 불타기 알림 배선).
         """
         self.use_mock = use_mock
+
+        # 텔레그램 노티파이어 (선택적 주입) — v17 2차 진입(불타기) 알림 발화용.
+        # 미주입 시 None → 알림 블록이 안전하게 skip (매매/DB/모니터 흐름 무영향).
+        self.notifier: Optional["TelegramNotifier"] = notifier
         
         # 포지션 관리
         self.positions: dict[str, Position] = {}
@@ -1883,9 +1895,9 @@ class PortfolioMonitorV2:
             except Exception as e:
                 logger.debug(f"[v17] dump_monitor_state 실패 {stock_code}: {e}")
 
-            # 16) 텔레그램 알림
-            try:
-                if hasattr(self, "notifier") and self.notifier:
+            # 16) 텔레그램 알림 (notifier 주입 시에만 — main.py가 self.notifier 배선)
+            if self.notifier is not None:
+                try:
                     self.notifier.send_message(
                         f"🔥 2/2 불타기 진입\n"
                         f"종목: {stock_name} ({stock_code})\n"
@@ -1895,8 +1907,16 @@ class PortfolioMonitorV2:
                         f"트리거: +{pos.profit_rate*100:.1f}% (first 기준)\n"
                         f"누적 보유: {total_qty_after}주"
                     )
-            except Exception as e:
-                logger.debug(f"[v17] 텔레그램 알림 실패: {e}")
+                except Exception as e:
+                    # 전송 실패는 매매/DB/모니터 흐름을 중단시키지 않고 소거하되,
+                    # 운영자가 확인 가능하도록 warning으로 남긴다 (비밀값 미기록).
+                    logger.warning(f"[v17] {stock_name} 2차 진입 텔레그램 알림 전송 실패: {e}")
+            else:
+                # notifier 미배선 상태(예: 구경로/테스트) — 무음 skip을 로그로 가시화.
+                logger.warning(
+                    f"[v17] {stock_name} 2차 진입 알림 skip: notifier 미주입 "
+                    f"(main.py start_monitoring 배선 확인 필요)"
+                )
 
             logger.info(
                 f"✅ [v17] {stock_name} 2차 진입 완료: +{filled_qty}주 @{filled_price:,.0f}, "

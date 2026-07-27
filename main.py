@@ -1887,7 +1887,9 @@ class TradingSystem:
         logger.info(f"   - 보유 기간: 수익 {settings.MAX_HOLD_DAYS_PROFIT}일, 손실 {settings.MAX_HOLD_DAYS_LOSS}일")
         logger.info("=" * 70)
 
-        self.monitor = PortfolioMonitorV2(use_mock=self.test_mode)
+        # notifier 주입 — v17 2차 진입(불타기) 알림 배선 (2026-07-13).
+        # 미주입 시 _check_and_execute_pyramid_in step 16이 무음 skip 되던 버그 fix.
+        self.monitor = PortfolioMonitorV2(use_mock=self.test_mode, notifier=self.notifier)
 
         # 포지션 로드
         self.monitor.load_positions_from_db()
