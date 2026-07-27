@@ -1093,6 +1093,34 @@ class Settings(BaseSettings):
         description="EVENT_JOB_MISSED 핵심 잡 누락 경보 + 장중 비정상 재시작 경보 (순수 관측/알림, 트레이딩 무개입)"
     )
 
+    # ===== Claude Code CLI(Max 로그인 세션) 브릿지 (2026-07 도입) =====
+    # 비-트레이딩 AI 분석(사후복기/테마 감성)을 Anthropic API 대신 로컬 로그인된
+    # Claude Code CLI 로 처리. 모두 default OFF(안전) — 기존 API behavior 유지.
+    CLAUDE_CODE_BRIDGE_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "post_trade_analyzer 일일/주간 분석을 Claude Code CLI(Max 세션) 경유로 처리. "
+            "True=bridge 우선 시도 후 실패 시 기존 Anthropic API 폴백. "
+            "False=기존 API 100% 유지(롤백, 안전 default)."
+        )
+    )
+    CLAUDE_CODE_THEME_SHADOW: bool = Field(
+        default=False,
+        description=(
+            "theme_analyzer batch 를 Claude Code CLI 로 shadow(병행) 분석해 로그로만 남김. "
+            "운영 판단(테마 선정/매매)에는 기존 API 결과만 사용 — shadow 는 무영향. "
+            "False=shadow 미수행(안전 default)."
+        )
+    )
+    CLAUDE_CODE_CLI_PATH: str = Field(
+        default="claude",
+        description="Claude Code CLI 바이너리 경로(기본 PATH 상 'claude')."
+    )
+    CLAUDE_CODE_TIMEOUT_SEC: int = Field(
+        default=120,
+        description="Claude Code CLI subprocess timeout(초). 초과 시 None → 기존 API 폴백."
+    )
+
     class Config:
         """Pydantic 설정"""
         # .env 파일 경로 설정

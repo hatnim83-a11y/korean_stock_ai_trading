@@ -53,6 +53,7 @@ from .scorer import (
 from .ai_analyzer import (
     analyze_theme_sentiment,
     analyze_themes_batch,
+    analyze_themes_batch_bridge,
     analyze_themes_sync,
 )
 
@@ -100,6 +101,7 @@ __all__ = [
     # AI 분석
     "analyze_theme_sentiment",
     "analyze_themes_batch",
+    "analyze_themes_batch_bridge",
     "analyze_themes_sync",
     # 테마 선정
     "select_top_themes",

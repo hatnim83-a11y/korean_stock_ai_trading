@@ -33,6 +33,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from logger import logger
 
+from modules.claude_code_bridge import call_claude_code_json
+
 # Anthropic 클라이언트 import
 try:
     from anthropic import Anthropic, AsyncAnthropic
@@ -84,6 +86,40 @@ THEME_ANALYSIS_PROMPT = """
 - 반드시 위 JSON 형식으로만 응답하세요.
 - score는 소수점 한자리까지 (예: 7.5)
 - confidence는 분석 확신도 (0.0 ~ 1.0)
+"""
+
+# batch(일괄) 분석 프롬프트 — 여러 테마를 한 번에 JSON 배열로 요청 (Claude Code bridge 용)
+THEME_BATCH_PROMPT = """당신은 한국 주식시장 전문 애널리스트입니다.
+아래 여러 테마에 대한 최근 뉴스를 각각 분석하여 투자 전망을 평가해주세요.
+
+## 분석 대상 테마 목록
+{themes_block}
+
+## 각 테마별 분석 요청
+1. 투자 매력도 점수 (0-10점): 0=매우 부정적, 5=중립, 10=매우 긍정적
+2. 핵심 근거 (2-3줄)
+3. 리스크 요인
+4. 향후 1개월 전망 (상승/중립/하락)
+
+## 응답 형식 (반드시 JSON 배열로만, 각 테마 1개 객체)
+```json
+[
+  {{
+    "theme_name": "2차전지",
+    "score": 7.5,
+    "reason": "정부 R&D 예산 증액과 글로벌 전기차 수요 회복",
+    "risk": "중국 저가 배터리 공세",
+    "outlook": "상승",
+    "confidence": 0.8
+  }}
+]
+```
+
+주의사항:
+- 입력된 모든 테마에 대해 각각 1개 객체를 반환하세요.
+- theme_name 은 입력된 테마명과 정확히 동일하게 사용하세요.
+- score 는 0~10, confidence 는 0.0~1.0 범위입니다.
+- 반드시 위 JSON 배열 형식으로만 응답하세요.
 """
 
 
@@ -463,9 +499,123 @@ def analyze_themes_sync(
         >>> ]
         >>> results = analyze_themes_sync(themes)
     """
-    return asyncio.run(
+    results = asyncio.run(
         analyze_themes_batch(themes_with_news, concurrent_limit, api_key)
     )
+
+    # ----- shadow mode: 기존 API 결과는 그대로 두고, bridge 로도 병행 분석해 로그만 남김 -----
+    # 운영 판단(테마 선정/매매)에는 절대 영향 없음. 예외는 전부 흡수.
+    try:
+        shadow_enabled, _, _ = _theme_shadow_config()
+        if shadow_enabled and themes_with_news:
+            shadow = analyze_themes_batch_bridge(themes_with_news)
+            logger.info(
+                f"[ThemeShadow] Claude Code bridge shadow 분석: "
+                f"{len(shadow)}/{len(themes_with_news)}개 (운영 결과 미반영)"
+            )
+            for s in shadow:
+                logger.debug(
+                    f"[ThemeShadow] {s.get('theme_name')}: "
+                    f"score={s.get('score')} outlook={s.get('outlook')}"
+                )
+    except Exception as e:
+        logger.warning(f"[ThemeShadow] shadow 분석 실패(운영 무영향): {e}")
+
+    return results
+
+
+# ===== Claude Code bridge — batch shadow / 향후 전환 =====
+
+def _theme_shadow_config() -> tuple:
+    """(shadow_enabled, cli_path, timeout_sec) 반환. 실패 시 안전 default."""
+    try:
+        from config import settings
+        return (
+            bool(getattr(settings, "CLAUDE_CODE_THEME_SHADOW", False)),
+            str(getattr(settings, "CLAUDE_CODE_CLI_PATH", "claude")),
+            int(getattr(settings, "CLAUDE_CODE_TIMEOUT_SEC", 120)),
+        )
+    except Exception:
+        return (False, "claude", 120)
+
+
+def _normalize_batch_item(raw: dict, fallback_name: str = "") -> dict:
+    """bridge 반환 단일 테마 결과를 기존 result shape 로 검증/보정한다."""
+    name = str(raw.get("theme_name") or fallback_name or "Unknown")
+
+    # score clamp 0~10 (기본 5.0)
+    try:
+        score = max(0.0, min(10.0, float(raw.get("score", 5.0))))
+    except (ValueError, TypeError):
+        score = 5.0
+
+    # confidence clamp 0~1 (기본 0.7)
+    try:
+        confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.7))))
+    except (ValueError, TypeError):
+        confidence = 0.7
+
+    return {
+        "theme_name": name,
+        "score": score,
+        "reason": str(raw.get("reason") or ""),
+        "risk": str(raw.get("risk") or ""),
+        "outlook": str(raw.get("outlook") or "중립"),
+        "confidence": confidence,
+    }
+
+
+def analyze_themes_batch_bridge(
+    themes_with_news: list,
+    *,
+    runner=None,
+    cli_path: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> list:
+    """여러 테마를 Claude Code CLI(Max 세션)로 일괄 분석한다.
+
+    Args:
+        themes_with_news: [{'name': ..., 'news': ...}, ...]
+        runner: 주입형 subprocess runner (테스트용). None 이면 실제 CLI
+        cli_path / timeout: None 이면 config 값 사용
+
+    Returns:
+        기존 result shape 리스트: theme_name/score/reason/risk/outlook/confidence.
+        실패/무효 시 빈 리스트.
+    """
+    if not themes_with_news:
+        return []
+
+    _, cfg_cli, cfg_timeout = _theme_shadow_config()
+    cli = cli_path or cfg_cli
+    tmo = timeout or cfg_timeout
+
+    # 테마 블록 구성 (뉴스 길이 제한)
+    max_news_length = 3000
+    lines = []
+    input_names = []
+    for i, theme in enumerate(themes_with_news, start=1):
+        name = theme.get("name", theme.get("theme_name", f"테마{i}"))
+        news = theme.get("news", theme.get("news_text", "")) or ""
+        if len(news) > max_news_length:
+            news = news[:max_news_length] + " [...생략...]"
+        input_names.append(name)
+        lines.append(f"### {i}. {name}\n{news if news.strip() else '(뉴스 데이터 부족)'}")
+
+    prompt = THEME_BATCH_PROMPT.format(themes_block="\n\n".join(lines))
+
+    result = call_claude_code_json(prompt, timeout=tmo, runner=runner, cli_path=cli)
+    if not isinstance(result, list):
+        logger.warning("[ThemeBatchBridge] bridge 응답이 배열이 아님 — 빈 리스트")
+        return []
+
+    normalized = []
+    for idx, item in enumerate(result):
+        if not isinstance(item, dict):
+            continue
+        fallback = input_names[idx] if idx < len(input_names) else ""
+        normalized.append(_normalize_batch_item(item, fallback_name=fallback))
+    return normalized
 
 
 # ===== 직접 실행 시 테스트 =====

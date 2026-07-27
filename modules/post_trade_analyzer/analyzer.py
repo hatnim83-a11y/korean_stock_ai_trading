@@ -21,6 +21,7 @@ from modules.post_trade_analyzer.prompts import (
     INDIVIDUAL_ANALYSIS_PROMPT,
     WEEKLY_SUMMARY_PROMPT,
 )
+from modules.claude_code_bridge import call_claude_code_json
 
 try:
     from anthropic import Anthropic
@@ -104,6 +105,52 @@ class PostTradeAnalyzer:
             logger.warning(f"[PostTradeAnalyzer] JSON 파싱 실패: {e}")
             return None
 
+    # ===== LLM 호출 (Claude Code bridge 우선 → API 폴백) =====
+
+    def _bridge_config(self) -> tuple[bool, str, int]:
+        """(bridge_enabled, cli_path, timeout_sec) 반환. 실패 시 안전 default."""
+        try:
+            from config import settings
+            return (
+                bool(getattr(settings, "CLAUDE_CODE_BRIDGE_ENABLED", False)),
+                str(getattr(settings, "CLAUDE_CODE_CLI_PATH", "claude")),
+                int(getattr(settings, "CLAUDE_CODE_TIMEOUT_SEC", 120)),
+            )
+        except Exception:
+            return (False, "claude", 120)
+
+    def _call_llm_json(self, prompt: str, max_tokens: int) -> Optional[dict]:
+        """프롬프트를 LLM 으로 보내 JSON dict 을 받는다.
+
+        bridge flag ON 이면 Claude Code CLI(Max 세션) 우선 시도, 실패 시 기존 API 폴백.
+        flag OFF 이면 곧바로 기존 API 경로.
+        """
+        enabled, cli_path, timeout = self._bridge_config()
+        if enabled:
+            result = call_claude_code_json(prompt, timeout=timeout, cli_path=cli_path)
+            if isinstance(result, dict):
+                logger.info("[PostTradeAnalyzer] Claude Code bridge 응답 사용")
+                return result
+            logger.warning("[PostTradeAnalyzer] bridge 실패/무효 — 기존 API 폴백")
+        return self._call_api_json(prompt, max_tokens)
+
+    def _call_api_json(self, prompt: str, max_tokens: int) -> Optional[dict]:
+        """기존 Anthropic API 경로."""
+        client = self._get_client()
+        if not client:
+            return None
+        try:
+            response = client.messages.create(
+                model=self._get_model(),
+                max_tokens=max_tokens,
+                temperature=TEMPERATURE,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return self._parse_json_response(response.content[0].text)
+        except Exception as e:
+            logger.error(f"[PostTradeAnalyzer] API 호출 실패: {e}")
+            return None
+
     # ===== 개별 분석 =====
 
     def _build_price_table(self, prices: list[dict]) -> str:
@@ -123,11 +170,7 @@ class PostTradeAnalyzer:
         return "\n".join(lines)
 
     def _analyze_single(self, review: dict, prices: list[dict]) -> Optional[dict]:
-        """단일 매매 건 AI 분석"""
-        client = self._get_client()
-        if not client:
-            return None
-
+        """단일 매매 건 AI 분석 (bridge 우선 → API 폴백)"""
         price_table = self._build_price_table(prices)
 
         prompt = INDIVIDUAL_ANALYSIS_PROMPT.format(
@@ -147,27 +190,15 @@ class PostTradeAnalyzer:
             price_table=price_table,
         )
 
-        try:
-            response = client.messages.create(
-                model=self._get_model(),
-                max_tokens=MAX_TOKENS,
-                temperature=TEMPERATURE,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            response_text = response.content[0].text
-            result = self._parse_json_response(response_text)
-
-            if result:
-                # 값 범위 검증
-                score = result.get("timing_score", 5)
-                try:
-                    result["timing_score"] = max(0, min(10, int(score)))
-                except (ValueError, TypeError):
-                    result["timing_score"] = 5
-                return result
-
-        except Exception as e:
-            logger.error(f"[PostTradeAnalyzer] AI 분석 실패 ({review.get('stock_name')}): {e}")
+        result = self._call_llm_json(prompt, MAX_TOKENS)
+        if result:
+            # 값 범위 검증
+            score = result.get("timing_score", 5)
+            try:
+                result["timing_score"] = max(0, min(10, int(score)))
+            except (ValueError, TypeError):
+                result["timing_score"] = 5
+            return result
 
         return None
 
@@ -325,24 +356,10 @@ class PostTradeAnalyzer:
             individual_summaries="\n".join(individual_lines[:15]) or "(없음)",
         )
 
-        client = self._get_client()
-        if not client:
-            logger.warning("[PostTradeAnalyzer] Claude API 미사용 가능 — 주간 종합 스킵")
-            return None
+        result = self._call_llm_json(prompt, MAX_TOKENS_WEEKLY)
+        if result:
+            logger.info(f"[PostTradeAnalyzer] 주간 종합 완료: 평균 타이밍 {result.get('avg_timing_score', 0)}/10")
+            return result
 
-        try:
-            response = client.messages.create(
-                model=self._get_model(),
-                max_tokens=MAX_TOKENS_WEEKLY,
-                temperature=TEMPERATURE,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result = self._parse_json_response(response.content[0].text)
-            if result:
-                logger.info(f"[PostTradeAnalyzer] 주간 종합 완료: 평균 타이밍 {result.get('avg_timing_score', 0)}/10")
-                return result
-
-        except Exception as e:
-            logger.error(f"[PostTradeAnalyzer] 주간 종합 실패: {e}")
-
+        logger.warning("[PostTradeAnalyzer] 주간 종합 결과 없음 (LLM 미응답)")
         return None
