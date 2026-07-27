@@ -59,6 +59,64 @@ def _get_order_api():
     return _order_instance
 
 
+# ===== 실계좌(KIS) 잔고 — 전략 추정치와 엄격 분리 =====
+# (timestamp, dict) 형태 TTL 캐시. 매 요청마다 KIS 토큰/호출 부담 회피.
+_broker_balance_cache: Optional[tuple[float, dict]] = None
+BROKER_BALANCE_TTL = 30.0
+
+
+def get_broker_balance() -> dict:
+    """KIS 실계좌 총자산 조회 (내부 전략 추정치와 분리).
+
+    - 성공: ``status="ok"`` + ``total_assets``(KIS output2 계좌총자산 필드값) + 메타.
+    - 실패/미조회: ``status="error"``, ``total_assets=None`` — **전략 계산값으로 위장하지
+      않는다**. 대시보드는 이 경우 ``-`` / ``조회 실패`` 로 표시.
+    - 민감정보(계좌번호 등) 미노출. 예외 메시지는 일반화한다.
+
+    Returns:
+        ``{source, status, fetched_at, total_assets, total_assets_field, cash,
+           eval_amount, error}``
+    """
+    global _broker_balance_cache
+    now = time.time()
+    if _broker_balance_cache and (now - _broker_balance_cache[0]) < BROKER_BALANCE_TTL:
+        return _broker_balance_cache[1]
+
+    result = {
+        "source": "KIS",
+        "status": "error",
+        "fetched_at": None,
+        "total_assets": None,
+        "total_assets_field": None,
+        "cash": None,
+        "eval_amount": None,
+        "error": None,
+    }
+    try:
+        bal = _get_order_api().get_balance()
+        result["fetched_at"] = now_kst().isoformat(timespec="seconds")
+        if bal.get("ok") and (bal.get("total_assets") or 0) > 0:
+            result.update({
+                "status": "ok",
+                "total_assets": int(bal["total_assets"]),
+                "total_assets_field": bal.get("total_assets_field"),
+                "cash": int(bal.get("cash") or 0),
+                "eval_amount": int(bal.get("total_eval_amount") or 0),
+                "error": None,
+            })
+        else:
+            # 조회 자체는 됐으나 실패 응답 — 전략값 폴백 금지
+            result["error"] = bal.get("error") or "조회 실패"
+    except Exception as e:
+        # 민감정보 노출 방지 — 예외 타입만 로깅, 사용자 메시지는 일반화
+        logger.warning(f"[dashboard] 실계좌 잔고 조회 예외: {type(e).__name__}")
+        result["fetched_at"] = now_kst().isoformat(timespec="seconds")
+        result["error"] = "조회 실패"
+
+    _broker_balance_cache = (now, result)
+    return result
+
+
 def get_cached_price(kis, stock_code: str) -> Optional[dict]:
     """5초 캐시 적용 현재가 조회"""
     now = time.time()
@@ -92,6 +150,8 @@ async def get_portfolio_data() -> dict:
             "realized_count": len(sell_trades),
             "total_capital": settings.TOTAL_CAPITAL,
             "current_total": settings.TOTAL_CAPITAL + int(realized_pnl),
+            # 전략 추정자산(내부 계산, KIS 실잔고 아님). current_total 과 동일값 — 명시 라벨.
+            "strategy_current_total": settings.TOTAL_CAPITAL + int(realized_pnl),
             "total_return": (realized_pnl / settings.TOTAL_CAPITAL * 100) if settings.TOTAL_CAPITAL > 0 else 0,
         }
 
@@ -177,6 +237,8 @@ async def get_portfolio_data() -> dict:
         "total_capital": settings.TOTAL_CAPITAL,
         "cash": cash_remaining,
         "current_total": int(current_total),
+        # 전략 추정자산(내부 계산 = 현금+평가+실현손익). KIS 실계좌 잔고와 별개.
+        "strategy_current_total": int(current_total),
         "total_return": round(total_return, 2),
     }
 

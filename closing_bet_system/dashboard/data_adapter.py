@@ -122,6 +122,198 @@ def get_today_candidates() -> dict:
     return result
 
 
+def _num(x) -> float:
+    """NULL/None/빈값 방어용 float 변환. None → 0.0.
+
+    비용 레그(수수료/세금/슬리피지)는 **가산 비용**이므로 NULL 을 0.0 으로 두는 것이
+    안전하다(비용을 과소 계상할 뿐 손익을 조작하지 않음).
+    """
+    if x is None:
+        return 0.0
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fallback_buy_commission_rate() -> float:
+    """Legacy NULL ``buy_commission`` 행 폴백용 매수수수료율 (소수).
+
+    ``cost_slippage_engine`` 설정값(``buy_commission``)을 조회한다. 로드 실패 시 0.0 →
+    호출측 ``buy_commission=0.0``(= 진입원가만)으로 안전 디그레이드.
+    Tier 2 폴백 경로에서만 사용된다(Tier 1 은 저장된 buy_commission 절대금액을 직접 사용).
+    """
+    try:
+        from closing_bet_system.engines.cost_slippage_engine import get_engine
+        return float(get_engine().buy_commission_rate)
+    except Exception as e:
+        logger.debug(f"[dashboard.data_adapter] 폴백 매수수수료율 로드 실패, 0 사용: {e}")
+        return 0.0
+
+
+def _row_realized_pnl(row, fallback_rate_getter) -> Optional[tuple]:
+    """단일 완전청산 행의 실현손익(원, KRW)을 계산. ``(pnl, method)`` 또는 ``None``(skip).
+
+    **Tier 1 — direct persisted-cost arithmetic (primary):**
+        ``entry_price``, ``exit_price``, ``exit_shares`` 가 모두 유효(>0)하면 **실제 체결가와
+        저장된 비용 레그**로 실현손익을 직접 계산한다. 저장된 ``net_pnl_pct`` 는 신뢰하지 않는다
+        — 엔진 산출 ``net_pnl_pct`` 가 실현 원화 손익과 불일치하는 행이 존재한다
+        (예: candidate 251 = -4,440.22 실제 vs net_pnl_pct 재구성 -4,680.08;
+        candidate 414 = +16,776.60 실제 vs +13,552.18). ::
+
+            realized = (exit_price - entry_price) * exit_shares
+                       - (buy_commission + sell_commission + transaction_tax + estimated_slippage)
+
+        비용 레그가 NULL 이면 0.0(가산 비용이라 안전). 이 경로가 사용자 read-only 검증 타깃
+        (251=-4,440 / 414=+16,777)을 **원 단위로 재현**한다.
+
+    **Tier 2 — net_pnl_pct 폴백 (exit_price 부재로 직접계산 불가한 legacy 행):**
+        ``exit_price`` 가 없거나 <=0 이지만 ``net_pnl_pct`` 가 있으면 진입원가 기준으로 근사. ::
+
+            realized = net_pnl_pct * (entry_cost_basis + buy_commission)
+
+        - ``entry_cost_basis`` = 저장된 ``entry_amount``(>0, 실제 진입 총원가) 우선 사용.
+        - ``entry_amount`` 이 NULL/<=0 이면 ``entry_price * entry_qty`` 로 재구성하되
+          ``entry_qty`` 는 **진입 체결수량**(phase1+phase2 executed shares)만 사용한다.
+          ``exit_shares`` 를 진입수량 대용으로 **쓰지 않는다**(부분청산·수량 불일치 legacy 행에서
+          위험). entry_price 또는 entry_qty 를 못 구하면 Tier 3.
+        - ``buy_commission`` NULL 이면 ``fallback_rate_getter()`` 율로 재구성(실패 시 0.0).
+
+    **Tier 3 — skip-safe:** 위 어느 경로로도 계산 불가하면 ``None`` 반환.
+        손익을 **조작(fabricate)하지 않고** 호출측이 skip 으로 명시 집계한다.
+    """
+    # 모든 수치 변환은 _num() 경유(NULL/빈문자열/비정상 타입 방어) — 여기서 ValueError 가
+    # 새면 호출측 get_realized_pnl_summary() 의 `except sqlite3.Error` 에 안 잡혀 요약 전체가
+    # 0 으로 blank 되므로(데이터 유실과 구분 불가) 반드시 방어한다.
+    entry_price = _num(row["entry_price"])
+    exit_shares = int(_num(row["exit_shares"]))
+    exit_price = _num(row["exit_price"])
+
+    # ---- Tier 1: direct persisted-cost arithmetic ----
+    if entry_price > 0 and exit_price > 0 and exit_shares > 0:
+        gross = (exit_price - entry_price) * exit_shares
+        costs = (
+            _num(row["buy_commission"])
+            + _num(row["sell_commission"])
+            + _num(row["transaction_tax"])
+            + _num(row["estimated_slippage"])
+        )
+        return (gross - costs, "direct")
+
+    # ---- Tier 2: net_pnl_pct × (entry_cost_basis + buy_commission) ----
+    net_pnl_pct = row["net_pnl_pct"]
+    if net_pnl_pct is not None:
+        entry_amount = _num(row["entry_amount"])
+        if entry_amount > 0:
+            entry_cost_basis = entry_amount
+        else:
+            # entry_amount 부재 → 진입 체결수량으로만 재구성 (exit_shares 대용 금지)
+            entry_qty = int(_num(row["entry_phase1_executed_shares"])) + int(
+                _num(row["entry_phase2_executed_shares"])
+            )
+            if entry_price > 0 and entry_qty > 0:
+                entry_cost_basis = entry_price * entry_qty
+            else:
+                return None  # Tier 3: 진입원가 미확정 → skip
+        bc = row["buy_commission"]
+        buy_comm = _num(bc) if bc is not None else entry_cost_basis * fallback_rate_getter()
+        return (_num(net_pnl_pct) * (entry_cost_basis + buy_comm), "net_pct_fallback")
+
+    # ---- Tier 3: skip-safe ----
+    return None
+
+
+def get_realized_pnl_summary() -> dict:
+    """종가베팅 누적/오늘 실현손익 요약 (read-only).
+
+    대상 행: ``final_exit_time IS NOT NULL AND exit_shares > 0`` (완전청산).
+    행별 실현손익은 :func:`_row_realized_pnl` 의 3단(Tier) 로직으로 계산한다.
+
+    - **Tier 1 (primary)**: 실제 체결가·저장 비용 레그로 직접 계산
+      (``(exit_price-entry_price)*exit_shares - Σcosts``). 저장된 ``net_pnl_pct`` 를 신뢰하지
+      않으며, 사용자 검증 타깃(candidate 251=-4,440 / 414=+16,777)을 원 단위로 재현한다.
+    - **Tier 2 (fallback)**: exit_price 부재 legacy 행만 ``net_pnl_pct × (entry_amount+매수수수료)``.
+      ``entry_amount`` 우선, 없으면 진입 체결수량으로 재구성(``exit_shares`` 대용 금지).
+    - **Tier 3 (skip-safe)**: 계산 불가 legacy 행은 손익 조작 없이 skip → ``skipped_incomplete`` 집계.
+    - "오늘" 판정은 ``final_exit_time`` ISO 문자열의 날짜 접두(=KST 청산일) 비교
+      (sqlite ``date()`` 의 +09:00→UTC 변환 위험 회피).
+
+    **비목표**: 이 값은 종가베팅 전용이며, 전역 portfolio 의 realized_pnl/current_total 과
+    합산하지 않는다 (별도 DB, 별도 라벨).
+
+    Returns:
+        ``{"date", "cumulative_realized_pnl", "closed_count", "win_count",
+           "today_realized_pnl", "today_closed_count", "skipped_incomplete"}``
+    """
+    today = now_kst().date().isoformat()
+    result = {
+        "date": today,
+        "cumulative_realized_pnl": 0,
+        "closed_count": 0,
+        "win_count": 0,
+        "today_realized_pnl": 0,
+        "today_closed_count": 0,
+        "skipped_incomplete": 0,
+    }
+    conn = _open_ro()
+    if conn is None:
+        return result
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT net_pnl_pct, entry_price, entry_amount, exit_price, exit_shares,
+                   buy_commission, sell_commission, transaction_tax, estimated_slippage,
+                   entry_phase1_executed_shares, entry_phase2_executed_shares,
+                   final_exit_time
+            FROM candidates
+            WHERE final_exit_time IS NOT NULL
+              AND exit_shares > 0
+            """
+        )
+        cumulative = 0.0
+        today_pnl = 0.0
+        closed = 0
+        today_closed = 0
+        wins = 0
+        skipped = 0
+        _cached_rate: list = []  # legacy 폴백율 lazy 캐시 (1회만 로드)
+
+        def _get_rate() -> float:
+            if not _cached_rate:
+                _cached_rate.append(_fallback_buy_commission_rate())
+            return _cached_rate[0]
+
+        for row in cur.fetchall():
+            computed = _row_realized_pnl(row, _get_rate)
+            if computed is None:
+                skipped += 1
+                continue
+            pnl, _method = computed
+            cumulative += pnl
+            closed += 1
+            if pnl > 0:
+                wins += 1
+            fet = row["final_exit_time"]
+            if isinstance(fet, str) and fet[:10] == today:
+                today_pnl += pnl
+                today_closed += 1
+
+        result["cumulative_realized_pnl"] = int(round(cumulative))
+        result["closed_count"] = closed
+        result["win_count"] = wins
+        result["today_realized_pnl"] = int(round(today_pnl))
+        result["today_closed_count"] = today_closed
+        result["skipped_incomplete"] = skipped
+    except sqlite3.Error as e:
+        logger.warning(f"[dashboard.data_adapter] realized-pnl 예외: {e}")
+    finally:
+        conn.close()
+
+    return result
+
+
 def get_gate_progress() -> dict:
     """운영 점검 게이트 진척도 (30건 / 15영업일 / 20종목).
 

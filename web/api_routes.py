@@ -23,6 +23,15 @@ async def portfolio():
     return data
 
 
+@router.get("/broker-balance")
+async def broker_balance():
+    """KIS 실계좌 총자산 (전략 추정자산과 별개).
+
+    실패/미조회 시 status="error", total_assets=None — 전략값으로 위장하지 않음.
+    """
+    return await asyncio.to_thread(svc.get_broker_balance)
+
+
 @router.get("/trades")
 async def trades(days: int = Query(30, ge=1, le=365), page: int = Query(1, ge=1)):
     data = await svc.get_trades_data(days=days, page=page)
@@ -95,6 +104,15 @@ from closing_bet_system.dashboard import data_adapter as cb_adapter  # noqa: E40
 async def closing_bet_today():
     """오늘 후보 status별 카운트 + 리스트."""
     return await asyncio.to_thread(cb_adapter.get_today_candidates)
+
+
+@router.get("/closing-bet/realized-pnl")
+async def closing_bet_realized_pnl():
+    """종가베팅 누적/오늘 실현손익 요약 (read-only, closing_bet.db 전용).
+
+    전역 portfolio 의 realized_pnl/current_total 과는 별개(별도 DB) — 합산하지 않음.
+    """
+    return await asyncio.to_thread(cb_adapter.get_realized_pnl_summary)
 
 
 @router.get("/closing-bet/gate-progress")

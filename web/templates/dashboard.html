@@ -652,6 +652,21 @@ tr:hover td { background: var(--bg-elevated); }
 
   <!-- ========== 종가베팅 (Phase 2-6) ========== -->
   <div class="panel" id="panel-closingbet">
+    <!-- 누적 실현 손익 (종가베팅 전용 — 전역 실현손익/현재자산과 별개) -->
+    <h3 style="margin-bottom:var(--sp-md)">종가베팅 실현 손익</h3>
+    <div class="summary" id="cb-pnl-summary">
+      <div class="card"><div class="label">누적 실현 손익</div><div class="value" id="cb-pnl-cum">-</div></div>
+      <div class="card"><div class="label">청산 완료 건수</div><div class="value" id="cb-pnl-count">-</div></div>
+      <div class="card"><div class="label">오늘 실현 손익</div><div class="value" id="cb-pnl-today">-</div></div>
+    </div>
+    <p style="margin-top:var(--sp-xs);font-size:0.74rem;color:var(--text-tertiary)">
+      ※ closing_bet.db 완전청산 기준 — 실제 체결가·비용 직접 산술 ((청산가−진입가)×청산수량 − 매수/매도수수료·거래세·슬리피지).
+      청산가 미기록 legacy 행만 net_pnl_pct × 진입원가로 폴백하며, 계산 불가 행은 제외합니다.
+      상단 포트폴리오 탭의 전역 실현손익/현재자산과는 별도 집계입니다.
+    </p>
+
+    <hr class="section-divider">
+
     <!-- 게이트 진척도 -->
     <h3 style="margin-bottom:var(--sp-md)">운영 점검 게이트 진척도 (1-9)</h3>
     <div class="summary" id="cb-gate-summary">
@@ -773,8 +788,21 @@ async function api(path) {
 // ===== Portfolio =====
 let holdingsData = [];
 
+function renderBrokerCard(b) {
+  // KIS 실계좌 잔고 — 전략 추정치와 분리. 실패/미조회는 '조회 실패'(전략값 위장 금지).
+  if (!b || b.status !== 'ok' || b.total_assets == null) {
+    return `<div class="card"><div class="label">실계좌 잔고 (KIS)</div>`
+      + `<div class="value" style="color:var(--text-tertiary)">조회 실패</div></div>`;
+  }
+  const when = b.fetched_at ? String(b.fetched_at).replace('T', ' ') : '';
+  return `<div class="card"><div class="label">실계좌 잔고 (KIS)</div>`
+    + `<div class="value">${fmt(b.total_assets)}원`
+    + `<span style="display:block;font-size:0.64rem;color:var(--text-tertiary)">${escapeHtml(when)}</span></div></div>`;
+}
+
 async function loadPortfolio() {
-  const d = await api('/portfolio');
+  // 포트폴리오(전략)와 실계좌 잔고(KIS)를 병렬 조회 — 별개 데이터소스
+  const [d, broker] = await Promise.all([api('/portfolio'), api('/broker-balance')]);
   if (!d) return;
   holdingsData = d.holdings || [];
 
@@ -784,7 +812,8 @@ async function loadPortfolio() {
     <div class="card"><div class="label">평가 손익</div><div class="value ${valueClass(d.unrealized_pnl)}">${fmt(d.unrealized_pnl)}원 (${fmtPct(d.unrealized_rate)})</div></div>
     <div class="card"><div class="label">실현 손익</div><div class="value ${valueClass(d.realized_pnl)}">${fmt(d.realized_pnl)}원 (${d.realized_count}건)</div></div>
     <div class="card"><div class="label">투입 자본</div><div class="value">${fmt(d.total_capital)}원</div></div>
-    <div class="card"><div class="label">현재 자산</div><div class="value ${valueClass(d.total_return)}">${fmt(d.current_total)}원 (${fmtPct(d.total_return)})</div></div>
+    <div class="card"><div class="label" title="내부 전략 계산값(현금+평가+실현손익). KIS 실계좌 잔고가 아님">전략 추정자산</div><div class="value ${valueClass(d.total_return)}">${fmt(d.strategy_current_total ?? d.current_total)}원 (${fmtPct(d.total_return)})</div></div>
+    ${renderBrokerCard(broker)}
   `;
 
   const tbody = document.getElementById('portfolio-body');
@@ -1130,15 +1159,29 @@ async function loadImprovementDetail(filename) {
 
 // ===== 종가베팅 (Phase 2-6) =====
 async function loadClosingBet() {
-  // 4 API 병렬 호출
-  const [today, gate, fg, rej, ob] = await Promise.all([
+  // API 병렬 호출
+  const [pnl, today, gate, fg, rej, ob] = await Promise.all([
+    api('/closing-bet/realized-pnl'),
     api('/closing-bet/today'),
     api('/closing-bet/gate-progress'),
     api('/closing-bet/fund-guard-status'),
     api('/closing-bet/rejections?days=7&limit=50'),
     api('/closing-bet/orderbook-history?days=1&limit=30'),
   ]);
+  // pnl 은 독립 카드라 가드에서 의도적으로 제외 (아래 if(pnl) 로 개별 방어)
   if (!today || !gate || !fg || !rej || !ob) return;
+
+  // 누적 실현 손익 (종가베팅 전용)
+  if (pnl) {
+    const cumEl = document.getElementById('cb-pnl-cum');
+    cumEl.textContent = fmt(pnl.cumulative_realized_pnl) + '원';
+    cumEl.className = 'value ' + valueClass(pnl.cumulative_realized_pnl);
+    document.getElementById('cb-pnl-count').textContent =
+      `${pnl.closed_count}건 (승 ${pnl.win_count})`;
+    const todayEl = document.getElementById('cb-pnl-today');
+    todayEl.textContent = `${fmt(pnl.today_realized_pnl)}원 (${pnl.today_closed_count}건)`;
+    todayEl.className = 'value ' + valueClass(pnl.today_realized_pnl);
+  }
 
   // 게이트 진척도
   document.getElementById('cb-gate-rec').textContent =
@@ -1163,15 +1206,15 @@ async function loadClosingBet() {
   } else {
     todayBody.innerHTML = today.candidates.map(c => `
       <tr>
-        <td>${c.ticker}</td>
-        <td>${c.name || '-'}</td>
-        <td>${c.candidate_status}</td>
+        <td>${escapeHtml(c.ticker)}</td>
+        <td>${escapeHtml(c.name || '-')}</td>
+        <td>${escapeHtml(c.candidate_status)}</td>
         <td>${c.layer1_score ?? '-'}</td>
         <td>${c.layer2_score ?? '-'}</td>
         <td>${c.layer3_score ?? '-'}</td>
         <td>${c.external_risk_score ?? '-'}</td>
         <td>${c.total_score ?? '-'}</td>
-        <td style="font-size:0.78rem;color:var(--text-tertiary)">${c.rejection_reason || '-'}</td>
+        <td style="font-size:0.78rem;color:var(--text-tertiary)">${escapeHtml(c.rejection_reason || '-')}</td>
       </tr>
     `).join('');
   }
@@ -1197,11 +1240,11 @@ async function loadClosingBet() {
   } else {
     rejBody.innerHTML = rej.rejections.map(r => `
       <tr>
-        <td>${r.trade_date}</td>
-        <td>${r.ticker}</td>
-        <td>${r.name || '-'}</td>
-        <td>${r.candidate_status}</td>
-        <td style="font-size:0.78rem">${r.rejection_reason || '-'}</td>
+        <td>${escapeHtml(r.trade_date)}</td>
+        <td>${escapeHtml(r.ticker)}</td>
+        <td>${escapeHtml(r.name || '-')}</td>
+        <td>${escapeHtml(r.candidate_status)}</td>
+        <td style="font-size:0.78rem">${escapeHtml(r.rejection_reason || '-')}</td>
       </tr>
     `).join('');
   }

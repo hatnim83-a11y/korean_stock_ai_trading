@@ -56,6 +56,104 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+# ===== 잔고 응답 파싱 (순수 함수 — 실 API 미의존 테스트 가능) =====
+
+# output2(계좌 요약)에서 보존할 raw 필드. 대시보드/감사에서 원본 확인용.
+_ACCOUNT_SUMMARY_FIELDS = (
+    "tot_asst_amt",         # 총자산금액 (KIS 계좌총자산)
+    "tot_evlu_amt",         # 총평가금액 (유가증권평가 + 예수금)
+    "nass_amt",             # 순자산금액
+    "dnca_tot_amt",         # 예수금총금액
+    "scts_evlu_amt",        # 유가증권평가금액
+    "evlu_amt_smtl_amt",    # 평가금액합계
+    "pchs_amt_smtl_amt",    # 매입금액합계
+    "evlu_pfls_smtl_amt",   # 평가손익합계
+    "prvs_rcdl_excc_amt",   # 가수도정산금액
+)
+
+# 계좌총자산 필드 우선순위. **문서상 필드를 그대로 사용**하며 cash + 주식평가를
+# 중복 합산하지 않는다(추정 금지). 앞선 필드가 유효(>0)하면 그 값을 채택.
+_TOTAL_ASSETS_FIELD_PRIORITY = ("tot_asst_amt", "tot_evlu_amt", "nass_amt")
+
+
+def parse_balance_response(data: dict) -> dict:
+    """KIS inquire-balance 응답(dict)을 대시보드/fund_guard 공용 구조로 파싱.
+
+    실 HTTP 호출과 분리된 순수 함수 — fixture dict 주입으로 테스트 가능.
+
+    반환 키(성공):
+        ok / error / total_value(=tot_evlu_amt, 후방호환) / cash(=dnca_tot_amt) /
+        total_buy_amount / total_eval_amount / total_profit / profit_rate /
+        total_assets(우선순위 필드값, 중복합산 금지) / total_assets_field(사용 필드명) /
+        net_asset_amount(=nass_amt) / account_summary(raw 보존) / positions / position_count
+    """
+    rt_cd = data.get("rt_cd", "1")
+    if rt_cd != "0":
+        return {
+            "ok": False,
+            "error": data.get("msg1") or f"rt_cd={rt_cd}",
+            "total_value": 0,
+            "cash": 0,
+            "total_assets": 0,
+            "total_assets_field": None,
+            "net_asset_amount": 0,
+            "account_summary": {},
+            "positions": [],
+            "position_count": 0,
+        }
+
+    output1 = data.get("output1") or []
+    output2_list = data.get("output2") or [{}]
+    output2 = output2_list[0] if output2_list else {}
+
+    positions = []
+    for item in output1:
+        qty = _safe_int(item.get("hldg_qty"))
+        if qty > 0:
+            buy_price = _safe_int(_safe_float(item.get("pchs_avg_pric")))
+            current_price = _safe_int(item.get("prpr"))
+            positions.append({
+                "stock_code": item.get("pdno", ""),
+                "stock_name": item.get("prdt_name", ""),
+                "quantity": qty,
+                "buy_price": buy_price,
+                "current_price": current_price,
+                "buy_amount": qty * buy_price,
+                "current_amount": qty * current_price,
+                "profit": _safe_int(item.get("evlu_pfls_amt")),
+                "profit_rate": _safe_float(item.get("evlu_pfls_rt")),
+            })
+
+    account_summary = {k: _safe_int(output2.get(k)) for k in _ACCOUNT_SUMMARY_FIELDS}
+
+    # 계좌총자산: 문서 필드 우선순위대로 첫 유효값 채택 (추정/합산 금지)
+    total_assets = 0
+    total_assets_field = None
+    for field_name in _TOTAL_ASSETS_FIELD_PRIORITY:
+        v = _safe_int(output2.get(field_name))
+        if v > 0:
+            total_assets = v
+            total_assets_field = field_name
+            break
+
+    return {
+        "ok": True,
+        "error": None,
+        "total_value": _safe_int(output2.get("tot_evlu_amt")),
+        "cash": _safe_int(output2.get("dnca_tot_amt")),
+        "total_buy_amount": _safe_int(output2.get("pchs_amt_smtl_amt")),
+        "total_eval_amount": _safe_int(output2.get("evlu_amt_smtl_amt")),
+        "total_profit": _safe_int(output2.get("evlu_pfls_smtl_amt")),
+        "profit_rate": _safe_float(output2.get("tot_evlu_pfls_rt")),
+        "total_assets": total_assets,
+        "total_assets_field": total_assets_field,
+        "net_asset_amount": _safe_int(output2.get("nass_amt")),
+        "account_summary": account_summary,
+        "positions": positions,
+        "position_count": len(positions),
+    }
+
+
 # ===== 상수 정의 =====
 # 주문 유형 코드
 ORDER_TYPE_MARKET = "01"  # 시장가
@@ -763,56 +861,32 @@ class KISOrderApi:
             response.raise_for_status()
             data = response.json()
 
-            rt_cd = data.get("rt_cd", "1")
-
-            if rt_cd == "0":
-                output1 = data.get("output1", [])  # 종목별
-                output2_list = data.get("output2") or [{}]
-                output2 = output2_list[0] if output2_list else {}
-
-                # 보유 종목
-                positions = []
-                for item in output1:
-                    qty = _safe_int(item.get("hldg_qty"))
-                    if qty > 0:
-                        buy_price = _safe_int(_safe_float(item.get("pchs_avg_pric")))
-                        current_price = _safe_int(item.get("prpr"))
-                        profit = _safe_int(item.get("evlu_pfls_amt"))
-                        profit_rate = _safe_float(item.get("evlu_pfls_rt"))
-
-                        positions.append({
-                            "stock_code": item.get("pdno", ""),
-                            "stock_name": item.get("prdt_name", ""),
-                            "quantity": qty,
-                            "buy_price": buy_price,
-                            "current_price": current_price,
-                            "buy_amount": qty * buy_price,
-                            "current_amount": qty * current_price,
-                            "profit": profit,
-                            "profit_rate": profit_rate
-                        })
-
-                # 총계
-                result = {
-                    "total_value": _safe_int(output2.get("tot_evlu_amt")),
-                    "cash": _safe_int(output2.get("dnca_tot_amt")),
-                    "total_buy_amount": _safe_int(output2.get("pchs_amt_smtl_amt")),
-                    "total_eval_amount": _safe_int(output2.get("evlu_amt_smtl_amt")),
-                    "total_profit": _safe_int(output2.get("evlu_pfls_smtl_amt")),
-                    "profit_rate": _safe_float(output2.get("tot_evlu_pfls_rt")),
-                    "positions": positions,
-                    "position_count": len(positions)
-                }
-                
-                logger.info(f"잔고 조회: {len(positions)}개 종목, 총 평가액 {result['total_value']:,}원")
-                return result
+            result = parse_balance_response(data)
+            if result["ok"]:
+                logger.info(
+                    f"잔고 조회: {result['position_count']}개 종목, "
+                    f"총 평가액 {result['total_value']:,}원 "
+                    f"(총자산 {result['total_assets']:,}원, {result['total_assets_field']})"
+                )
             else:
-                logger.error(f"잔고 조회 실패: {data.get('msg1', '')}")
-                return {"positions": [], "total_value": 0, "cash": 0}
-                
+                logger.error(f"잔고 조회 실패: {result['error']}")
+            return result
+
         except Exception as e:
             logger.error(f"잔고 조회 중 오류: {e}")
-            return {"positions": [], "total_value": 0, "cash": 0}
+            # 실패 응답도 파서와 동일한 키 셋을 반환 (소비자 KeyError 방지)
+            return {
+                "ok": False,
+                "error": str(e),
+                "total_value": 0,
+                "cash": 0,
+                "total_assets": 0,
+                "total_assets_field": None,
+                "net_asset_amount": 0,
+                "account_summary": {},
+                "positions": [],
+                "position_count": 0,
+            }
 
     # ===== 호가 조회 =====
 

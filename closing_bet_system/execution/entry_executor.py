@@ -104,7 +104,7 @@ class CandidateOrder:
     submitted: bool = False
     order_id: Optional[str] = None
     fill_status: Optional[FillStatus] = None
-    rejection_reason: Optional[str] = None  # fund_guard / price_cap / submit_fail
+    rejection_reason: Optional[str] = None  # fund_guard / fund_guard_transient / price_cap / submit_fail
 
 
 @dataclass
@@ -117,6 +117,7 @@ class Phase1Result:
     filled: int = 0
     skipped_price_cap: int = 0
     fund_guard_rejected: int = 0
+    fund_guard_transient: int = 0        # 2026-07-10: 일시적 잔고오류(비영구) 차단 수
     market_guard_status: Optional[str] = None
     orders: list[CandidateOrder] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -230,6 +231,8 @@ class EntryExecutor:
                 result.orders.append(order)
                 if order.rejection_reason == "fund_guard":
                     result.fund_guard_rejected += 1
+                elif order.rejection_reason == "fund_guard_transient":
+                    result.fund_guard_transient += 1
                 elif order.rejection_reason == "price_cap":
                     result.skipped_price_cap += 1
                 elif order.submitted:
@@ -367,17 +370,26 @@ class EntryExecutor:
 
         # 3. fund_guard (external_risk_active 동기 전달 — SoT 일관성)
         order_amount_int = int(target_price * quantity + 0.5)
-        allowed, reason = await asyncio.to_thread(
-            lambda: self.fund_guard.allow_order(
+        decision = await asyncio.to_thread(
+            lambda: self.fund_guard.evaluate_order(
                 ticker, order_amount_int, external_risk_active=external_risk_active
             )
         )
-        if not allowed:
-            await asyncio.to_thread(
-                self.candidate_logger.mark_rejected_by_filter,
-                candidate_id, f"fund_guard:{reason}",
-            )
-            order.rejection_reason = "fund_guard"
+        if not decision.allowed:
+            if decision.transient:
+                # 일시적 잔고/DB 오류 → 영구 rejected_filter 금지. 후보 recommended 유지
+                # (다음 재시도/관측 가능). 주문은 여전히 미발주(잔고 추정 대체 없음).
+                logger.warning(
+                    f"[entry_executor] {ticker} 일시적 잔고오류로 발주 보류(비영구): "
+                    f"{decision.reason}"
+                )
+                order.rejection_reason = "fund_guard_transient"
+            else:
+                await asyncio.to_thread(
+                    self.candidate_logger.mark_rejected_by_filter,
+                    candidate_id, f"fund_guard:{decision.reason}",
+                )
+                order.rejection_reason = "fund_guard"
             return order
 
         # 4. dry_run 분기
@@ -542,15 +554,23 @@ class EntryExecutor:
 
         # 4. fund_guard (phase2 추가 금액 검사)
         order_amount_int = int(target_price * quantity + 0.5)
-        allowed, reason = await asyncio.to_thread(
-            self.fund_guard.allow_order, ticker, order_amount_int
+        decision = await asyncio.to_thread(
+            self.fund_guard.evaluate_order, ticker, order_amount_int
         )
-        if not allowed:
-            await asyncio.to_thread(
-                self.candidate_logger.mark_rejected_by_filter,
-                candidate_id, f"fund_guard_phase2:{reason}",
-            )
-            order.rejection_reason = "fund_guard"
+        if not decision.allowed:
+            if decision.transient:
+                # 일시적 오류 → 영구 rejected_filter 금지. phase1 체결분(recommended) 보존.
+                logger.warning(
+                    f"[entry_executor] {ticker} phase2 일시적 잔고오류로 추가발주 보류(비영구): "
+                    f"{decision.reason}"
+                )
+                order.rejection_reason = "fund_guard_transient"
+            else:
+                await asyncio.to_thread(
+                    self.candidate_logger.mark_rejected_by_filter,
+                    candidate_id, f"fund_guard_phase2:{decision.reason}",
+                )
+                order.rejection_reason = "fund_guard"
             return order
 
         # 5. dry_run / 실 발주

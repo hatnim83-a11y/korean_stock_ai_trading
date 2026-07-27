@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -58,6 +59,27 @@ from closing_bet_system.storage.db import (
 _CONSERVATIVE_LARGE_AMOUNT = 10**12   # 1조원 (자금 한도 트리거)
 _CONSERVATIVE_LARGE_COUNT = 10**6     # 100만 (카운트 한도 트리거)
 
+# 잔고 조회 실패 시 차단 사유 문자열 (기존 로그/테스트 호환 유지).
+_BALANCE_FAIL_REASON = "총 자산 조회 실패 또는 0원 (보수적 차단)"
+
+
+@dataclass(frozen=True)
+class OrderDecision:
+    """주문 허용 판정 결과.
+
+    Attributes:
+        allowed: 허용 여부.
+        reason: 차단 사유(허용 시 빈 문자열).
+        transient: True 면 **일시적/인프라성 실패**(KIS 5xx 잔고조회·DB 조회 실패 등).
+            호출 측은 이 경우 후보를 영구 ``rejected_filter`` 로 확정하지 말고
+            ``recommended`` 유지(다음 재시도/관측 가능)해야 한다. 진짜 한도 초과·
+            입력오류는 ``transient=False`` (영구 거부 정당).
+    """
+
+    allowed: bool
+    reason: str
+    transient: bool = False
+
 
 @dataclass(frozen=True)
 class GuardConfig:
@@ -78,6 +100,9 @@ class GuardConfig:
     swing_used_source: str = "cost_basis"       # 'cost_basis' | 'evaluation'
     disable_absorb_on_crisis: bool = True       # CRISIS 시 absorb 비활성
     crisis_absorb_ratio: float = 0.0            # 2026-05-29: 위기 시 부분 흡수 비율 (0.0=무흡수, 1.0=전체)
+    # 잔고 조회 일시적 실패(KIS 5xx) 재시도 (2026-07-10 도입)
+    balance_retry_count: int = 2                # 최초 1회 실패 후 추가 재시도 횟수 (총 시도=1+N)
+    balance_retry_backoff_sec: float = 0.5      # 재시도 사이 대기(초). 테스트는 sleep_func 주입
 
     @classmethod
     def from_settings(cls, settings: Optional[dict] = None) -> "GuardConfig":
@@ -123,6 +148,10 @@ class GuardConfig:
                 f.get("disable_absorb_on_crisis", cls.disable_absorb_on_crisis)
             ),
             crisis_absorb_ratio=absorb_ratio,
+            balance_retry_count=max(0, int(f.get("balance_retry_count", cls.balance_retry_count))),
+            balance_retry_backoff_sec=max(
+                0.0, float(f.get("balance_retry_backoff_sec", cls.balance_retry_backoff_sec))
+            ),
         )
 
 
@@ -144,6 +173,7 @@ class FundGuard:
         total_value_provider: Optional[Callable[[], int]] = None,
         swing_holdings_provider: Optional[Callable[[], set[str]]] = None,
         swing_used_provider: Optional[Callable[[str], int]] = None,
+        sleep_func: Optional[Callable[[float], None]] = None,
     ):
         self.config = config or GuardConfig.from_settings()
         self.db_path = db_path or _resolve_db_path(_load_settings())
@@ -153,6 +183,8 @@ class FundGuard:
         self._swing_holdings_provider = swing_holdings_provider
         # 2026-05-23 동적 자본 분리 — 스윙 사용 자본 조회 콜백 (테스트 mock용)
         self._swing_used_provider = swing_used_provider
+        # 2026-07-10 잔고 재시도 backoff sleep (테스트는 no-op 주입해 실대기 회피)
+        self._sleep = sleep_func or time.sleep
 
     # ===== 외부 API =====
 
@@ -163,39 +195,53 @@ class FundGuard:
         *,
         external_risk_active: bool = False,
     ) -> tuple[bool, str]:
-        """주문 허용 여부 + 차단 사유.
+        """주문 허용 여부 + 차단 사유 (후방호환 wrapper).
+
+        내부적으로 :meth:`evaluate_order` 를 호출하고 ``(allowed, reason)`` 만 반환한다.
+        일시적/영구 구분(``transient``)이 필요하면 :meth:`evaluate_order` 를 직접 쓴다.
+        """
+        d = self.evaluate_order(ticker, amount, external_risk_active=external_risk_active)
+        return d.allowed, d.reason
+
+    def evaluate_order(
+        self,
+        ticker: str,
+        amount: int,
+        *,
+        external_risk_active: bool = False,
+    ) -> OrderDecision:
+        """주문 허용 판정 (transient 구분 포함).
 
         Args:
             ticker: 6자리 종목코드
             amount: 주문 금액(원). 호출 측이 (1주 가격 × 수량 + 수수료 추정치)
-                를 ``int`` 로 올림 처리하여 전달해야 한다.
-                ``float`` 또는 음수는 차단된다.
+                를 ``int`` 로 올림 처리하여 전달해야 한다. ``float``/음수는 차단.
             external_risk_active: MarketGuard CRISIS/DANGER 상태 (2026-05-23 추가).
-                True + ``disable_absorb_on_crisis=True`` → swing_idle 흡수 완전 비활성.
-                True + ``disable_absorb_on_crisis=False`` → swing_idle × ``crisis_absorb_ratio``
-                부분 흡수 (2026-05-29 추가).
 
         Returns:
-            ``(allowed: bool, reason: str)`` — 허용 시 ``reason`` 은 빈 문자열
+            :class:`OrderDecision`. ``transient=True`` 인 차단은 인프라 일시 실패
+            (잔고조회 5xx·종가베팅 DB 조회 실패)로, 호출 측은 후보를 영구 확정하지
+            말아야 한다. **어떤 경우에도 잔고를 추정해 허용하지 않는다.**
         """
-        # 1) 입력 검증
+        # 1) 입력 검증 (영구 — 재시도해도 안 바뀜)
         if not isinstance(ticker, str) or not ticker.isdigit() or len(ticker) != 6:
-            return False, f"유효하지 않은 종목코드: {ticker!r}"
+            return OrderDecision(False, f"유효하지 않은 종목코드: {ticker!r}")
         # bool 은 int 의 subclass 이므로 명시 거부
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
-            return False, f"주문 금액 오류 (양의 정수 필요): {amount!r}"
+            return OrderDecision(False, f"주문 금액 오류 (양의 정수 필요): {amount!r}")
 
         cfg = self.config
 
-        # 2) 총 자산 조회 — 실패 시 보수적 차단
-        total_value = self._get_total_value()
+        # 2) 총 자산 조회 — 일시적 실패(5xx) 재시도 후에도 0 이면 transient 차단.
+        #    추정치로 대체하지 않는다(항상 차단측 안전).
+        total_value = self._fetch_total_value_with_retry()
         if total_value <= 0:
-            return False, "총 자산 조회 실패 또는 0원 (보수적 차단)"
+            return OrderDecision(False, _BALANCE_FAIL_REASON, transient=True)
 
         # 3) 스윙 중복 — 절대 우선. DB 조회 전에 차단해 자원 낭비 방지.
         swing_held = self._get_swing_holdings()
         if ticker in swing_held:
-            return False, f"스윙 시스템이 이미 보유 중인 종목: {ticker}"
+            return OrderDecision(False, f"스윙 시스템이 이미 보유 중인 종목: {ticker}")
 
         # 4) 동적 capital_limit 계산 (SoT, 2026-05-23) — S-1/S-2 반영
         capital_limit, debug_info = self.compute_capital_limit(
@@ -209,53 +255,89 @@ class FundGuard:
 
         # 5) 1종목 비중 한도 (DB 조회 불필요)
         if amount > per_stock_limit:
-            return False, (
+            return OrderDecision(False, (
                 f"1종목 비중 초과: 주문 {amount:,}원 > 한도 {per_stock_limit:,}원 "
                 f"(capital_limit {capital_limit:,}원 ÷ {cfg.max_concurrent_positions}종목 | "
                 f"{debug_info.get('mode', '?')})"
-            )
+            ))
 
         # 5~7) DB 조회 통합 — 단일 connection + 단일 트랜잭션 스냅샷 (TOCTOU 방지)
         try:
             db_state = self._fetch_db_state()
         except sqlite3.Error as e:
             logger.error(f"[fund_guard] DB 상태 조회 실패 (보수적 차단): {e}")
-            return False, f"종가베팅 DB 조회 실패: {e}"
+            # DB 조회 실패도 인프라 일시 실패 → transient (영구 확정 금지)
+            return OrderDecision(False, f"종가베팅 DB 조회 실패: {e}", transient=True)
 
         # 5) 자금 한도 (누적 + 신규)
         if db_state["active_amount"] + amount > capital_limit:
-            return False, (
+            return OrderDecision(False, (
                 f"자금 한도 초과: 현재 사용 {db_state['active_amount']:,}원 + 주문 {amount:,}원 "
                 f"= {db_state['active_amount'] + amount:,}원 > 한도 {capital_limit:,}원"
-            )
+            ))
 
         # 6~7) 동시 보유 / 일일 진입 — 이미 활성화된 ticker 면 추가 매수 허용
         is_new_ticker = ticker not in db_state["active_tickers"]
         if is_new_ticker:
             active_count = len(db_state["active_tickers"])
             if active_count >= cfg.max_concurrent_positions:
-                return False, (
+                return OrderDecision(False, (
                     f"동시 보유 한도 초과: 활성 {active_count}종목 "
                     f">= 한도 {cfg.max_concurrent_positions}종목"
-                )
+                ))
 
             if db_state["today_entries"] >= cfg.max_daily_entries:
-                return False, (
+                return OrderDecision(False, (
                     f"1일 진입 한도 초과: 오늘 {db_state['today_entries']}건 "
                     f">= 한도 {cfg.max_daily_entries}건"
-                )
+                ))
 
         # 8) 주간 손실 한도 — 최근 7일 누적 net_pnl_pct 가 임계값 이하면 매매 중지.
         # entered + exit_time 채워진 후보들의 net_pnl_pct 합계 (개별 거래 손익률을 단순 합산).
         # 임계값(-0.05) 이하 → 차단. weekly_pnl 이 None(데이터 없음) 시 통과.
         weekly_pnl = db_state.get("weekly_pnl")
         if weekly_pnl is not None and weekly_pnl <= cfg.weekly_loss_limit:
-            return False, (
+            return OrderDecision(False, (
                 f"주간 손실 한도 초과: 최근 7일 누적 {weekly_pnl:+.2%} "
                 f"<= 한도 {cfg.weekly_loss_limit:+.2%}"
-            )
+            ))
 
-        return True, ""
+        return OrderDecision(True, "")
+
+    def _fetch_total_value_with_retry(self) -> int:
+        """총 자산 조회 — 일시적 실패(예외/0) 시 제한된 재시도.
+
+        시도 횟수 = ``1 + balance_retry_count``. 각 실패 후 ``balance_retry_backoff_sec``
+        만큼 ``self._sleep`` (테스트는 no-op 주입). 유효값(>0) 확보 즉시 반환.
+        모두 실패 시 0 반환 → 호출 측이 transient 차단 (추정 대체 없음).
+        """
+        attempts = 1 + max(0, self.config.balance_retry_count)
+        backoff = self.config.balance_retry_backoff_sec
+        for i in range(attempts):
+            try:
+                value = self._get_total_value()
+            except Exception as e:  # KIS 5xx 등 — 다음 시도로
+                value = 0
+                logger.warning(
+                    f"[fund_guard] 총 자산 조회 예외(시도 {i + 1}/{attempts}): {e}"
+                )
+            if value and value > 0:
+                if i > 0:
+                    logger.info(
+                        f"[fund_guard] 총 자산 조회 재시도 성공(시도 {i + 1}/{attempts}): {value:,}원"
+                    )
+                return int(value)
+            if i < attempts - 1:
+                logger.warning(
+                    f"[fund_guard] 총 자산 조회 실패(시도 {i + 1}/{attempts}) → "
+                    f"{backoff}s 후 재시도"
+                )
+                if backoff > 0:
+                    self._sleep(backoff)
+        logger.error(
+            f"[fund_guard] 총 자산 조회 {attempts}회 모두 실패 — 일시적(transient) 차단"
+        )
+        return 0
 
     # ===== Single Source of Truth: 동적 자본 한도 계산 (2026-05-23) =====
 

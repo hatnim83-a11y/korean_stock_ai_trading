@@ -42,6 +42,7 @@ from closing_bet_system.execution.entry_executor import (
     Phase2Result,
 )
 from closing_bet_system.execution.fill_checker import FillStatus
+from closing_bet_system.infra.fund_guard import OrderDecision
 from closing_bet_system.storage.candidate_logger import CandidateLogger
 from closing_bet_system.storage.db import ClosingBetDatabase
 from modules.market_guard import MarketStatus
@@ -66,11 +67,20 @@ def _make_executor(
     fill_status=None,
     order_success: bool = True,
     fund_guard_allow: bool = True,
+    fund_guard_transient: bool = False,
     market_status=MarketStatus.NORMAL,
     total_value: int = 100_000_000,
     raise_insufficient: bool = False,
 ):
-    """공통 mock executor 빌더."""
+    """공통 mock executor 빌더.
+
+    fund_guard 판정 mock (2026-07-10):
+        production 은 ``fund_guard.evaluate_order()`` → :class:`OrderDecision` 을 호출한다.
+        - ``fund_guard_allow=True``            → allowed (통과)
+        - ``fund_guard_allow=False`` (기본)    → 영구 거부 (transient=False, rejected_filter 확정)
+        - ``fund_guard_transient=True``        → 일시적 거부 (transient=True, recommended 유지)
+        레거시 ``allow_order()`` 도 동일 판정으로 동기화(후방호환 wrapper 경로 커버).
+    """
     kis_order_api = MagicMock()
     kis_order_api.buy_limit_order.return_value = {
         "success": order_success,
@@ -89,10 +99,20 @@ def _make_executor(
         max_daily_entries=3,
         weekly_loss_limit=-0.05,
     )
-    fund_guard.allow_order.return_value = (
-        fund_guard_allow,
-        "" if fund_guard_allow else "테스트 거부",
-    )
+    # evaluate_order → OrderDecision (production 실경로). allowed / 영구거부 / 일시거부 모델링.
+    if fund_guard_allow:
+        _decision = OrderDecision(allowed=True, reason="", transient=False)
+    elif fund_guard_transient:
+        _decision = OrderDecision(
+            allowed=False,
+            reason="총 자산 조회 실패 또는 0원 (보수적 차단)",
+            transient=True,
+        )
+    else:
+        _decision = OrderDecision(allowed=False, reason="테스트 거부", transient=False)
+    fund_guard.evaluate_order.return_value = _decision
+    # 레거시 allow_order wrapper 도 동일 판정으로 동기화 (후방호환 경로 커버)
+    fund_guard.allow_order.return_value = (_decision.allowed, _decision.reason)
     fund_guard._get_total_value.return_value = total_value
     # 2026-05-29: _compute_order_amount → fund_guard.compute_capital_limit 호출 mock
     # capital_limit = total_value × 0.5 (cap), per_stock = capital_limit / max_concurrent
@@ -647,8 +667,11 @@ def test_EE_19_swing_overlap_rejected_via_fund_guard():
             vwap_snap=VWAPSnapshot(ticker="x", vwap=70000.0, high=75500),
             fund_guard_allow=False,
         )
-        ex.fund_guard.allow_order.return_value = (
-            False, "스윙 시스템이 이미 보유 중인 종목: 005930",
+        # production 은 evaluate_order 를 호출 — 스윙 중복은 영구 거부(transient=False)
+        ex.fund_guard.evaluate_order.return_value = OrderDecision(
+            allowed=False,
+            reason="스윙 시스템이 이미 보유 중인 종목: 005930",
+            transient=False,
         )
         result = _run(ex.execute_phase1("2026-05-14"))
         row = ex.candidate_logger.get_candidate(cid)
@@ -1018,6 +1041,39 @@ def test_EE_34_default_threshold_crisis_equals_threshold():
         db.close()
 
 
+# ===== EE-35: transient 잔고오류 = 비영구 차단 (2026-07-10) =====
+
+
+def test_EE_35_fund_guard_transient_keeps_recommended():
+    """EE-35: evaluate_order transient=True → fund_guard_transient 카운트 + recommended 유지.
+
+    일시적 잔고/DB 오류(KIS 5xx 등)는 영구 rejected_filter 로 확정하지 않는다
+    (다음 재시도/관측 가능). 발주는 여전히 미실행(잔고 추정 대체 없음).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        db = _make_db(td)
+        cid = _insert_candidate(db, ticker="005930", name="삼성전자", total_score=3)
+        settings = EntryExecutorSettings(enabled=True, dry_run=True)
+        ex = _make_executor(
+            db, settings=settings,
+            vwap_snap=VWAPSnapshot(ticker="x", vwap=70000.0, high=75500),
+            fund_guard_allow=False,
+            fund_guard_transient=True,
+        )
+        result = _run(ex.execute_phase1("2026-05-14"))
+        # 일시적 차단 → transient 카운트, 영구 rejected 카운트는 0
+        assert result.fund_guard_transient == 1, f"got {result.fund_guard_transient}"
+        assert result.fund_guard_rejected == 0, f"got {result.fund_guard_rejected}"
+        # 후보는 recommended 유지 (rejected_filter 미확정)
+        row = ex.candidate_logger.get_candidate(cid)
+        assert row["candidate_status"] == "recommended", f"got {row['candidate_status']}"
+        # mark_rejected_by_filter 미호출 확인
+        assert result.orders[0].rejection_reason == "fund_guard_transient"
+        print("✅ EE-35 transient 잔고오류 → 비영구 차단 (recommended 유지)")
+        db.close()
+
+
 # ===== Runner =====
 
 
@@ -1058,6 +1114,7 @@ def main():
         test_EE_32_crisis_uses_score_threshold_crisis,
         test_EE_33_caution_uses_score_threshold_crisis,
         test_EE_34_default_threshold_crisis_equals_threshold,
+        test_EE_35_fund_guard_transient_keeps_recommended,
     ]
     print(f"\n=== EntryExecutor 단위 테스트 — {len(tests)}건 실행 ===\n")
     fails = []
