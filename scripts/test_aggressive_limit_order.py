@@ -103,7 +103,7 @@ def test_scenario_1_full_fill():
         stock_code="005930",
         stock_name="삼성전자",
         requested_qty=10,
-        expected_price=70000,
+        expected_price=75000,  # MockOrderApi ask1(75,000)과 정합 — 체결 메커니즘만 검증(과열 가드 회피)
     )
 
     ok = True
@@ -139,7 +139,7 @@ def test_scenario_2_partial_then_full():
         stock_code="005930",
         stock_name="삼성전자",
         requested_qty=10,
-        expected_price=70000,
+        expected_price=75000,  # MockOrderApi ask1(75,000)과 정합 — 체결 메커니즘만 검증(과열 가드 회피)
     )
 
     ok = True
@@ -171,7 +171,7 @@ def test_scenario_3_mixed_fill():
         stock_code="005930",
         stock_name="삼성전자",
         requested_qty=10,
-        expected_price=70000,
+        expected_price=75000,  # MockOrderApi ask1(75,000)과 정합 — 체결 메커니즘만 검증(과열 가드 회피)
     )
 
     ok = True
@@ -193,7 +193,7 @@ def test_scenario_4_no_fill_give_up():
         stock_code="005930",
         stock_name="삼성전자",
         requested_qty=10,
-        expected_price=70000,
+        expected_price=75000,  # MockOrderApi ask1(75,000)과 정합 — 체결 메커니즘만 검증(과열 가드 회피)
     )
 
     ok = True
@@ -228,7 +228,7 @@ def test_scenario_5_size_error_reduction():
         stock_code="005930",
         stock_name="삼성전자",
         requested_qty=10,
-        expected_price=70000,
+        expected_price=75000,  # MockOrderApi ask1(75,000)과 정합 — 체결 메커니즘만 검증(과열 가드 회피)
     )
 
     ok = True
@@ -264,7 +264,7 @@ def test_scenario_6_cancel_race():
         stock_code="005930",
         stock_name="삼성전자",
         requested_qty=10,
-        expected_price=70000,
+        expected_price=75000,  # MockOrderApi ask1(75,000)과 정합 — 체결 메커니즘만 검증(과열 가드 회피)
     )
 
     ok = True

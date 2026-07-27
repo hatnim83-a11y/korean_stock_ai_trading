@@ -20,15 +20,28 @@
 - [x] py_compile config.py trading_engine.py main.py → OK
 - [ ] code-tester 에이전트 검증 생략 — Hermes가 직접 관련 테스트/compileall 검증
 
+### 마무리 재검증 (2026-07-27)
+- [x] HEAD `886035a`와 dirty diff 대조 → 미커밋 잔재는 `scripts/test_aggressive_limit_order.py`
+      `expected_price` 70,000→75,000 (6 시나리오)뿐. 코드/설정 잔재 없음
+- [x] 필요성 확인: MockOrderApi ask1=75,000 기준 expected=70,000이면 gap 7.1% ≥
+      `LIMIT_AGGRESSIVE_OVERHEAT_PCT`(1.8%) → overheat(주문가 0)로 루프 중단 →
+      886035a 이후 시나리오 전멸. 75,000 정합은 체결 메커니즘 검증 목적의 mock 보정
+- [x] `scripts/test_aggressive_limit_order.py` 재실행 → **8/8 전체 PASS**
+      (MockOrderApi 전용, 실주문/실 KIS 발주 없음 — 로그 전부 `[모의]`)
+- [x] `pytest tests/test_aggressive_limit_chasing.py tests/test_buy_summary_failed_orders.py -q`
+      → **10 passed** (7+3)
+- [x] `py_compile scripts/test_aggressive_limit_order.py modules/trading_engine/trading_engine.py config.py` → OK
+- [x] `git diff --check` 클린
+
 ## 배포 (이번 세션 범위 아님 — 사용자 승인 후)
-- [ ] docs/improvements/change_log.md 1줄 추가
-- [ ] .env 신규 키(선택) — 운영 반영은 사용자 결정
-- [ ] systemctl restart (사용자가 직접) — **이번 작업에서 금지**
+- [x] docs/improvements/change_log.md 1줄 추가 (2026-07-27)
+- [ ] .env 신규 키(선택) — 운영 반영은 사용자 결정 (**미실행**)
+- [ ] systemctl restart (사용자가 직접) — **이번 작업에서 금지 · 미실행**
 
 ## 문서 업데이트
-- [ ] CLAUDE.md — v17/주문 규칙 섹션에 동적 추격 요약(필요 시)
-- [ ] memory/MEMORY.md — 결과 1줄
-- [ ] active/ → completed/ 아카이브
+- [ ] CLAUDE.md — v17/주문 규칙 섹션에 동적 추격 요약 (**미실행** — 기본 동작 변경 아니라 보류)
+- [ ] memory/MEMORY.md — 결과 1줄 (**미실행** — 이번 범위 밖)
+- [x] active/ → completed/ 아카이브 (`completed/20260709_limit-aggressive-chase-v2/`)
 
 ## 제약 준수
 - [x] .env/DB/runtime 미수정 — 테스트 실행으로 일반 로그 파일 기록 가능성은 있으나 설정/DB 변경 없음
